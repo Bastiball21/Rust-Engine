@@ -1,2 +1,2 @@
-# Flash
+# Aether
 My first chess engine
