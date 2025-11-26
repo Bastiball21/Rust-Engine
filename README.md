@@ -1,2 +1,2 @@
-# Rust-Engine
+# Flash
 My first chess engine
