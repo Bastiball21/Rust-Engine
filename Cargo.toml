@@ -1,0 +1,19 @@
+# In your Cargo.toml file
+
+[package]
+name = "aether_engine"
+version = "0.1.2"
+edition = "2021"
+
+# 1. Define the custom binary output name using underscores
+[[bin]]
+name = "Aether_v0_1_2"         # FIX: Replaced spaces and dots with underscores
+path = "src/main.rs"
+
+[profile.release]
+lto = "fat"        # Link Time Optimization: optimizations across all crates
+codegen-units = 1  # Slower compilation, but faster engine
+panic = "abort"    # Removes panic unwinding logic (smaller binary)
+opt-level = 3      # Max optimization
+
+[dependencies]
