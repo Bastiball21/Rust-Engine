@@ -1,0 +1,7 @@
+# --- .cargo/config.toml ---
+[target.x86_64-pc-windows-msvc]
+# This is the stable way to increase stack size for Windows linkers.
+rustflags = [
+  "-C", "link-args=/STACK:33554432" 
+]
+
