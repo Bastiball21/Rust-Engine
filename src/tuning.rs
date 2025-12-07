@@ -1,143 +1,201 @@
-use crate::state::{GameState, WHITE};
-use crate::eval::{self, PARAMS, EvalParams};
-use crate::search;
-use crate::tt::TranspositionTable;
-use crate::time::{TimeManager, TimeControl};
-use std::sync::{Arc, atomic::AtomicBool};
+// src/tuning.rs
+use crate::state::GameState;
+use crate::eval::{self, Trace};
 use std::fs::File;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
+use std::sync::atomic::Ordering;
 
-pub fn run_tuning() {
-    println!("Loading dataset from 'tuning.epd'...");
-    let positions = load_epd("tuning.epd");
-    if positions.is_empty() {
-        println!("No positions found. Make sure 'tuning.epd' exists.");
-        return;
-    }
-    println!("Loaded {} positions.", positions.len());
-
-    // Initial error
-    let initial_error = compute_total_error(&positions);
-    println!("Initial Error: {:.6}", initial_error);
-
-    // Simple Local Search Tuning
-    // We tweak each parameter by a small amount (+1/-1) and see if error drops.
-    let mut best_error = initial_error;
-    let mut improved = true;
-    let mut iteration = 0;
-
-    while improved {
-        improved = false;
-        iteration += 1;
-        println!("Iteration {}...", iteration);
-
-        unsafe {
-            // Tune Material
-            for i in 0..6 {
-                if try_improve_param(&mut PARAMS.material[i], &mut best_error, &positions) { improved = true; }
-            }
-            // Tune Mobility
-            for i in 0..4 {
-                if try_improve_param(&mut PARAMS.mobility_bonus[i], &mut best_error, &positions) { improved = true; }
-            }
-            // Tune Pawn PSQT (Center squares only for speed test)
-            for i in 24..40 {
-                if try_improve_param(&mut PARAMS.pawn_table[i], &mut best_error, &positions) { improved = true; }
-            }
-        }
-
-        if improved {
-            println!("New Best Error: {:.6}", best_error);
-            unsafe { print_params(&PARAMS); }
-        }
-    }
-    println!("Tuning Complete.");
-}
+const K_FACTOR: f64 = 1.13;
+const LEARNING_RATE: f64 = 1.0;
+const EPOCHS: usize = 2000;
+const BATCH_SIZE: usize = 8192;
 
 struct TunerEntry {
     state: GameState,
-    result: f64, // 1.0 (Win), 0.5 (Draw), 0.0 (Loss)
+    result: f64,
+    trace: Trace,
 }
 
-fn load_epd(path: &str) -> Vec<TunerEntry> {
+enum ParamType {
+    MaterialMG(usize),
+    MaterialEG(usize),
+    PsqtMG(usize, usize),
+    PsqtEG(usize, usize),
+}
+
+struct Parameter {
+    val: f64,
+    ptype: ParamType,
+}
+
+pub fn run_tuning() {
+    println!("--- AETHER TUNER ---");
+    let mut params = init_parameters();
+    println!("Parameters to tune: {}", params.len());
+
+    println!("Loading dataset 'quiet-labeled.epd'...");
+    let mut entries = load_entries("quiet-labeled.epd");
+    if entries.is_empty() {
+        println!("No positions found. Please download 'quiet-labeled.epd' and place it in root.");
+        return;
+    }
+    println!("Loaded {} positions.", entries.len());
+
+    println!("Pre-computing evaluation traces...");
+    for entry in &mut entries {
+        let _ = eval::trace_evaluate(&entry.state, &mut entry.trace);
+    }
+
+    let mut best_error = 999.0;
+
+    for epoch in 1..=EPOCHS {
+        let mut total_error = 0.0;
+        let mut gradients = vec![0.0; params.len()];
+        let mut count = 0;
+
+        for entry in &entries {
+            let mut mg_score = entry.trace.fixed_mg as f64;
+            let mut eg_score = entry.trace.fixed_eg as f64;
+            let mut phase = 0;
+
+            for &(idx, count) in &entry.trace.terms {
+                if idx < params.len() {
+                    if idx < 6 { mg_score += params[idx].val * count as f64; }
+                    else if idx < 12 { eg_score += params[idx].val * count as f64; }
+                    else {
+                        let relative = idx - 12;
+                        let block_offset = relative % 128;
+                        if block_offset < 64 { mg_score += params[idx].val * count as f64; }
+                        else { eg_score += params[idx].val * count as f64; }
+                    }
+                }
+            }
+
+            for p in 0..6 {
+                let c = (entry.state.bitboards[p] | entry.state.bitboards[p+6]).count_bits() as i32;
+                phase += c * eval::PHASE_WEIGHTS[p];
+            }
+            phase = phase.clamp(0, 24);
+
+            let score = (mg_score * phase as f64 + eg_score * (24 - phase) as f64) / 24.0;
+
+            let sigmoid = 1.0 / (1.0 + 10.0f64.powf(-K_FACTOR * score / 400.0));
+            let error = entry.result - sigmoid;
+            total_error += error * error;
+
+            let gradient_term = (error) * sigmoid * (1.0 - sigmoid);
+
+            for &(idx, count) in &entry.trace.terms {
+                let mg_weight = phase as f64 / 24.0;
+                let eg_weight = (24 - phase) as f64 / 24.0;
+                let local_grad = gradient_term * count as f64;
+
+                if idx < 6 { gradients[idx] += local_grad * mg_weight; }
+                else if idx < 12 { gradients[idx] += local_grad * eg_weight; }
+                else {
+                     let relative = idx - 12;
+                     let block_offset = relative % 128;
+                     if block_offset < 64 { gradients[idx] += local_grad * mg_weight; }
+                     else { gradients[idx] += local_grad * eg_weight; }
+                }
+            }
+
+            count += 1;
+            if count % BATCH_SIZE == 0 {
+                for i in 0..params.len() {
+                    params[i].val += gradients[i] * LEARNING_RATE / BATCH_SIZE as f64;
+                    gradients[i] = 0.0;
+                }
+            }
+        }
+
+        let mse = total_error / entries.len() as f64;
+        if mse < best_error {
+            best_error = mse;
+            println!("Epoch {} Best MSE: {:.6}", epoch, mse);
+            save_parameters(&params);
+        } else {
+            println!("Epoch {} MSE: {:.6}", epoch, mse);
+        }
+    }
+}
+
+fn init_parameters() -> Vec<Parameter> {
+    let mut params = Vec::new();
+    // Use Relaxed loading from Atomics
+    for i in 0..6 { params.push(Parameter { val: eval::MG_VALS[i].load(Ordering::Relaxed) as f64, ptype: ParamType::MaterialMG(i) }); }
+    for i in 0..6 { params.push(Parameter { val: eval::EG_VALS[i].load(Ordering::Relaxed) as f64, ptype: ParamType::MaterialEG(i) }); }
+
+    let mut add_table = |mg_table: &[std::sync::atomic::AtomicI32; 64], eg_table: &[std::sync::atomic::AtomicI32; 64], piece_idx: usize| {
+            for sq in 0..64 { params.push(Parameter { val: mg_table[sq].load(Ordering::Relaxed) as f64, ptype: ParamType::PsqtMG(piece_idx, sq) }); }
+            for sq in 0..64 { params.push(Parameter { val: eg_table[sq].load(Ordering::Relaxed) as f64, ptype: ParamType::PsqtEG(piece_idx, sq) }); }
+    };
+
+    add_table(&eval::MG_PAWN_TABLE, &eval::EG_PAWN_TABLE, 0);
+    add_table(&eval::MG_KNIGHT_TABLE, &eval::EG_KNIGHT_TABLE, 1);
+    add_table(&eval::MG_BISHOP_TABLE, &eval::EG_BISHOP_TABLE, 2);
+    add_table(&eval::MG_ROOK_TABLE, &eval::EG_ROOK_TABLE, 3);
+    add_table(&eval::MG_QUEEN_TABLE, &eval::EG_QUEEN_TABLE, 4);
+    add_table(&eval::MG_KING_TABLE, &eval::EG_KING_TABLE, 5);
+    params
+}
+
+fn load_entries(path: &str) -> Vec<TunerEntry> {
     let mut entries = Vec::new();
     if let Ok(file) = File::open(path) {
-        for line in io::BufReader::new(file).lines() {
-            if let Ok(l) = line {
-                let parts: Vec<&str> = l.split_whitespace().collect();
-                // EPD format: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 c0 "1.0";
-                // Simplified parse:
-                let fen = format!("{} {} {} {} {} {}", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
-                let result_str = parts.last().unwrap().trim_matches(|c| c == '"' || c == ';');
-                let result = match result_str {
-                    "1-0" | "1.0" => 1.0,
-                    "0-1" | "0.0" => 0.0,
-                    "1/2-1/2" | "0.5" => 0.5,
-                    _ => 0.5, 
-                };
-                entries.push(TunerEntry { state: GameState::parse_fen(&fen), result });
-            }
+        for line in io::BufReader::new(file).lines().flatten() {
+             let parts: Vec<&str> = line.split(" c").collect();
+             if parts.len() < 2 { continue; }
+             let fen = parts[0];
+             let result_part = parts[1];
+
+             let result = if result_part.contains("\"1.0\"") { 1.0 }
+                          else if result_part.contains("\"0.5\"") { 0.5 }
+                          else { 0.0 };
+
+             entries.push(TunerEntry {
+                 state: GameState::parse_fen(fen),
+                 result,
+                 trace: Trace::new(),
+             });
         }
     }
     entries
 }
 
-fn sigmoid(score: f64) -> f64 {
-    1.0 / (1.0 + 10.0f64.powf(-score / 400.0))
-}
-
-fn compute_total_error(positions: &[TunerEntry]) -> f64 {
-    let mut total_error = 0.0;
-    for entry in positions {
-        // Use Quiescence Search for static eval to account for tactical noise
-        let score = quiescence_eval(&entry.state);
-        let sigmoid_score = sigmoid(score as f64);
-        let diff = entry.result - sigmoid_score;
-        total_error += diff * diff;
+fn save_parameters(params: &[Parameter]) {
+    for p in params {
+        let int_val = p.val as i32;
+        match p.ptype {
+            ParamType::MaterialMG(i) => eval::MG_VALS[i].store(int_val, Ordering::Relaxed),
+            ParamType::MaterialEG(i) => eval::EG_VALS[i].store(int_val, Ordering::Relaxed),
+            ParamType::PsqtMG(piece, sq) => {
+                match piece {
+                    0 => eval::MG_PAWN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    1 => eval::MG_KNIGHT_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    2 => eval::MG_BISHOP_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    3 => eval::MG_ROOK_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    4 => eval::MG_QUEEN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    5 => eval::MG_KING_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    _ => {}
+                }
+            },
+            ParamType::PsqtEG(piece, sq) => {
+                match piece {
+                    0 => eval::EG_PAWN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    1 => eval::EG_KNIGHT_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    2 => eval::EG_BISHOP_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    3 => eval::EG_ROOK_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    4 => eval::EG_QUEEN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    5 => eval::EG_KING_TABLE[sq].store(int_val, Ordering::Relaxed),
+                    _ => {}
+                }
+            },
+        }
     }
-    total_error / positions.len() as f64
-}
-
-// Helper to run just Q-Search for scoring
-fn quiescence_eval(state: &GameState) -> i32 {
-    // Create dummy structures
-    let mut tt = TranspositionTable::new(1);
-    let tm = TimeManager::new(TimeControl::Infinite, state.side_to_move);
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut info = search::SearchInfo::new(tm, stop);
     
-    // Use evaluate() directly for speed in this simplified tuner, 
-    // OR call q-search if exposed. For Texel, Eval() is usually enough if dataset is "quiet" positions.
-    // Let's use the raw eval function we just made tunable.
-    eval::evaluate(state)
-}
-
-fn try_improve_param(param: &mut i32, best_error: &mut f64, positions: &[TunerEntry]) -> bool {
-    let original = *param;
-    let mut improved = false;
-
-    // Try +1
-    *param = original + 1;
-    let err_plus = compute_total_error(positions);
-    if err_plus < *best_error {
-        *best_error = err_plus;
-        return true;
-    }
-
-    // Try -1
-    *param = original - 1;
-    let err_minus = compute_total_error(positions);
-    if err_minus < *best_error {
-        *best_error = err_minus;
-        return true;
-    }
-
-    // Reset if no improvement
-    *param = original;
-    false
-}
-
-fn print_params(p: &EvalParams) {
-    println!("Current Material: {:?}", p.material);
-    // Print others as needed
+    // Printing is tricky with atomics, we need to load them first.
+    // For simplicity, we just dump generic info.
+    let mut file = File::create("tuned_params.txt").unwrap();
+    writeln!(file, "Tuned Values Saved.").unwrap();
 }
