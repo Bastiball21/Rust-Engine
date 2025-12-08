@@ -184,7 +184,10 @@ pub fn evaluate_nnue_avx2(acc_us: &Accumulator, acc_them: &Accumulator, net: &Nn
 
         let final_sum = hsum_256_epi32(sum_i32) + net.output_bias;
 
-        return (final_sum / 16) + 20;
+        // Scaling for QA=255/QB=64 to approx centipawns
+        // 16 was too small, yielding very high scores (e.g. 166cp for startpos).
+        // 64 is more reasonable (166 / 4 ~= 41).
+        return (final_sum / 64) + 10;
     }
 
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]

@@ -301,7 +301,7 @@ pub fn evaluate_nnue(state: &GameState) -> i32 {
                     sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
                 }
 
-                let score = (sum / 16) + 20;
+                let score = (sum / 64) + 10;
                 return if state.side_to_move == WHITE { score } else { -score };
             }
         }
