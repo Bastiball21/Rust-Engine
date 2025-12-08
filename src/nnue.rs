@@ -102,10 +102,7 @@ unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
     _mm_cvtsi128_si32(v32)
 }
 
-pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) -> i32 {
-    let acc_us = &state.accumulator[state.side_to_move];
-    let acc_them = &state.accumulator[1 - state.side_to_move];
-
+pub fn evaluate_nnue_avx2(acc_us: &Accumulator, acc_them: &Accumulator, net: &NnueWeights) -> i32 {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     unsafe {
         let mut input = [0i8; 512];
@@ -113,8 +110,8 @@ pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) ->
 
         // Clamp and Pack
         for i in 0..256 {
-            *input_ptr.add(i) = acc_us.v[i].clamp(0, 127) as i8;
-            *input_ptr.add(256+i) = acc_them.v[i].clamp(0, 127) as i8;
+            *input_ptr.add(i) = acc_us.v[i].clamp(0, 255) as i8;
+            *input_ptr.add(256+i) = acc_them.v[i].clamp(0, 255) as i8;
         }
 
         // --- LAYER 1 ---
@@ -126,18 +123,25 @@ pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) ->
             let weights_ptr = net.layer1_weights.as_ptr().add(row_offset);
 
             for k in (0..512).step_by(32) {
-                // Use Unaligned Loads
+                // Safe Implementation for QA=255 (Avoid maddubs saturation)
                 let inp = _mm256_loadu_si256(input_ptr.add(k) as *const __m256i);
                 let w = _mm256_loadu_si256(weights_ptr.add(k) as *const __m256i);
 
-                let product = _mm256_maddubs_epi16(inp, w);
-                let ones = _mm256_set1_epi16(1);
-                let sum_i32 = _mm256_madd_epi16(product, ones);
-                sum_vec = _mm256_add_epi32(sum_vec, sum_i32);
+                // Lower 128 bits
+                let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(inp));
+                let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(w));
+                let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
+
+                // Upper 128 bits
+                let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(inp, 1));
+                let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 1));
+                let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
+
+                sum_vec = _mm256_add_epi32(sum_vec, _mm256_add_epi32(prod_lo, prod_hi));
             }
 
             let total = hsum_256_epi32(sum_vec) + net.layer1_biases[i];
-            layer1_out[i] = (total >> 6).clamp(0, 127) as i8;
+            layer1_out[i] = (total >> 6).clamp(0, 255) as i8;
         }
 
         // --- LAYER 2 ---
@@ -148,21 +152,35 @@ pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) ->
             let row_offset = i * 32;
             let w = _mm256_loadu_si256(net.layer2_weights.as_ptr().add(row_offset) as *const __m256i);
 
-            let product = _mm256_maddubs_epi16(l1_vec, w);
-            let ones = _mm256_set1_epi16(1);
-            let sum_i32 = _mm256_madd_epi16(product, ones);
+            // Safe Implementation
+            let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(l1_vec));
+            let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(w));
+            let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
+
+            let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(l1_vec, 1));
+            let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 1));
+            let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
+
+            let sum_i32 = _mm256_add_epi32(prod_lo, prod_hi);
 
             let total = hsum_256_epi32(sum_i32) + net.layer2_biases[i];
-            layer2_out[i] = (total >> 6).clamp(0, 127) as i8;
+            layer2_out[i] = (total >> 6).clamp(0, 255) as i8;
         }
 
         // --- OUTPUT ---
         let l2_vec = _mm256_loadu_si256(layer2_out.as_ptr() as *const __m256i);
         let out_w = _mm256_loadu_si256(net.output_weights.as_ptr() as *const __m256i);
 
-        let product = _mm256_maddubs_epi16(l2_vec, out_w);
-        let ones = _mm256_set1_epi16(1);
-        let sum_i32 = _mm256_madd_epi16(product, ones);
+        // Safe Implementation
+        let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(l2_vec));
+        let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(out_w));
+        let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
+
+        let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(l2_vec, 1));
+        let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(out_w, 1));
+        let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
+
+        let sum_i32 = _mm256_add_epi32(prod_lo, prod_hi);
 
         let final_sum = hsum_256_epi32(sum_i32) + net.output_bias;
 

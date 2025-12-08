@@ -252,79 +252,30 @@ fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnE
 pub fn evaluate_nnue(state: &GameState) -> i32 {
     if let Ok(guard) = NNUE.read() {
         if let Some(net) = guard.as_ref() {
+            let mut acc_us = state.accumulator[state.side_to_move];
+            let mut acc_them = state.accumulator[1 - state.side_to_move];
+
+            if state.dirty {
+                acc_us.refresh(state, state.side_to_move);
+                acc_them.refresh(state, 1 - state.side_to_move);
+            }
+
             // Check if AVX2 is available via crate feature or architecture
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {
-                // Ensure accumulators are fresh
-                // Note: evaluate_nnue_avx2 in nnue.rs assumes accumulators are updated.
-                // But here we need to update them if dirty.
-                // However, refresh needs mutable access to state, but we have &GameState.
-                // The accumulator in state is likely UnsafeCell or RefCell or handled via interior mutability if it was mutable?
-                // Wait, state.accumulator is just an array. If state is shared, we can't mutate it.
-                // The signature `evaluate(state: &GameState)` implies read-only.
-                // But `refresh` takes `&mut self`.
-                // In search.rs, `state` is mutated during `make_move`.
-                // `evaluate` is called on a state.
-                // If `state.dirty` is true, we must update accumulators.
-                // But we can't mutate `state` here.
-                // This implies `state.dirty` handling is tricky.
-                // However, the original code did:
-                // `let mut acc_us = state.accumulator[...]` (copying the struct? No, Accumulator is Copy?)
-                // Accumulator struct in nnue.rs derives Copy?
-                // `#[derive(Clone, Copy, Debug)] pub struct Accumulator ...` -> YES.
-
-                // So the original code COPIED the accumulator, refreshed the COPY, and then used it?
-                // `acc_us.refresh(state, ...)`
-                // `refresh` reads from `state.bitboards` and updates `acc_us.v`.
-                // If `state.dirty` is set, it means we need to recompute from scratch (or delta update).
-                // `refresh` does a full recompute.
-
-                // So we should do the same:
-                let mut acc_us = state.accumulator[state.side_to_move];
-                let mut acc_them = state.accumulator[1 - state.side_to_move];
-
-                if state.dirty {
-                    acc_us.refresh(state, state.side_to_move);
-                    acc_them.refresh(state, 1 - state.side_to_move);
-                }
-
-                // Construct a temporary state-like object or pass accumulators?
-                // crate::nnue::evaluate_nnue_avx2 takes `state: &GameState`.
-                // But it reads `state.accumulator`. If we updated local copies, passing `state` uses the OLD (stale) accumulators!
-                // This is a BUG in the original code logic vs the AVX2 function signature!
-
-                // The AVX2 function:
-                // `let acc_us = &state.accumulator[state.side_to_move];`
-                // It reads directly from state.
-
-                // If `state` has stale accumulators (dirty=true), `evaluate_nnue_avx2` will use stale values.
-                // We must update the state's accumulators *before* calling it, OR pass the updated accumulators to a modified function.
-                // Since `state` is immutable here, we cannot update it.
-
-                // Solution: We must use the manual implementation (but optimized) OR modify `nnue.rs` to accept accumulators.
-                // Since I can't easily change `nnue.rs` signature without breaking other things (maybe?),
-                // I will inline the AVX2 logic here using the *local* (refreshed) accumulators.
-
-                return unsafe {
-                     evaluate_nnue_avx2_inline(&acc_us, &acc_them, net)
-                };
+                let score = nnue::evaluate_nnue_avx2(&acc_us, &acc_them, net);
+                return if state.side_to_move == WHITE { score } else { -score };
             }
 
             #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
             {
                 // Fallback (Original Slow Code)
-                let mut acc_us = state.accumulator[state.side_to_move];
-                let mut acc_them = state.accumulator[1 - state.side_to_move];
-
-                if state.dirty {
-                    acc_us.refresh(state, state.side_to_move);
-                    acc_them.refresh(state, 1 - state.side_to_move);
-                }
+                // Note: Accumulators are already refreshed above (acc_us, acc_them)
 
                 let mut input = [0i8; 512];
                 for i in 0..256 {
-                    input[i] = acc_us.v[i].clamp(0, 127) as i8;
-                    input[256 + i] = acc_them.v[i].clamp(0, 127) as i8;
+                    input[i] = acc_us.v[i].clamp(0, 255) as i8;
+                    input[256 + i] = acc_them.v[i].clamp(0, 255) as i8;
                 }
 
                 let mut layer1_out = [0i8; 32];
@@ -333,7 +284,7 @@ pub fn evaluate_nnue(state: &GameState) -> i32 {
                     for j in 0..512 {
                         sum += (input[j] as i32) * (net.layer1_weights[i * 512 + j] as i32);
                     }
-                    layer1_out[i] = (sum >> 6).clamp(0, 127) as i8;
+                    layer1_out[i] = (sum >> 6).clamp(0, 255) as i8;
                 }
 
                 let mut layer2_out = [0i8; 32];
@@ -342,7 +293,7 @@ pub fn evaluate_nnue(state: &GameState) -> i32 {
                     for j in 0..32 {
                         sum += (layer1_out[j] as i32) * (net.layer2_weights[i * 32 + j] as i32);
                     }
-                    layer2_out[i] = (sum >> 6).clamp(0, 127) as i8;
+                    layer2_out[i] = (sum >> 6).clamp(0, 255) as i8;
                 }
 
                 let mut sum = net.output_bias;
@@ -350,7 +301,8 @@ pub fn evaluate_nnue(state: &GameState) -> i32 {
                     sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
                 }
 
-                return (sum / 16) + 20;
+                let score = (sum / 16) + 20;
+                return if state.side_to_move == WHITE { score } else { -score };
             }
         }
     }
@@ -369,67 +321,6 @@ unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
     _mm_cvtsi128_si32(v32)
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-unsafe fn evaluate_nnue_avx2_inline(acc_us: &crate::nnue::Accumulator, acc_them: &crate::nnue::Accumulator, net: &crate::nnue::NnueWeights) -> i32 {
-    let mut input = [0i8; 512];
-    let input_ptr = input.as_mut_ptr();
-
-    // Clamp and Pack
-    for i in 0..256 {
-        *input_ptr.add(i) = acc_us.v[i].clamp(0, 127) as i8;
-        *input_ptr.add(256+i) = acc_them.v[i].clamp(0, 127) as i8;
-    }
-
-    // --- LAYER 1 ---
-    let mut layer1_out = [0i8; 32];
-
-    for i in 0..32 {
-        let mut sum_vec = _mm256_setzero_si256();
-        let row_offset = i * 512;
-        let weights_ptr = net.layer1_weights.as_ptr().add(row_offset);
-
-        for idx in (0..512).step_by(32) {
-            let inp = _mm256_loadu_si256(input_ptr.add(idx) as *const __m256i);
-            let w = _mm256_loadu_si256(weights_ptr.add(idx) as *const __m256i);
-
-            let product = _mm256_maddubs_epi16(inp, w);
-            let ones = _mm256_set1_epi16(1);
-            let sum_i32 = _mm256_madd_epi16(product, ones);
-            sum_vec = _mm256_add_epi32(sum_vec, sum_i32);
-        }
-
-        let total = hsum_256_epi32(sum_vec) + net.layer1_biases[i];
-        layer1_out[i] = (total >> 6).clamp(0, 127) as i8;
-    }
-
-    // --- LAYER 2 ---
-    let mut layer2_out = [0i8; 32];
-    let l1_vec = _mm256_loadu_si256(layer1_out.as_ptr() as *const __m256i);
-
-    for i in 0..32 {
-        let row_offset = i * 32;
-        let w = _mm256_loadu_si256(net.layer2_weights.as_ptr().add(row_offset) as *const __m256i);
-
-        let product = _mm256_maddubs_epi16(l1_vec, w);
-        let ones = _mm256_set1_epi16(1);
-        let sum_i32 = _mm256_madd_epi16(product, ones);
-
-        let total = hsum_256_epi32(sum_i32) + net.layer2_biases[i];
-        layer2_out[i] = (total >> 6).clamp(0, 127) as i8;
-    }
-
-    // --- OUTPUT ---
-    let l2_vec = _mm256_loadu_si256(layer2_out.as_ptr() as *const __m256i);
-    let out_w = _mm256_loadu_si256(net.output_weights.as_ptr() as *const __m256i);
-
-    let product = _mm256_maddubs_epi16(l2_vec, out_w);
-    let ones = _mm256_set1_epi16(1);
-    let sum_i32 = _mm256_madd_epi16(product, ones);
-
-    let final_sum = hsum_256_epi32(sum_i32) + net.output_bias;
-
-    (final_sum / 16) + 20
-}
 
 // --- TRACE (Required for Tuning) ---
 pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
