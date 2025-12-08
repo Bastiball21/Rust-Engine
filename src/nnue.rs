@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, Read, BufReader};
 use std::path::PathBuf;
 use std::env;
-use std::sync::RwLock;
+use std::sync::OnceLock; // Use OnceLock instead of RwLock
 
 // Architecture Constants
 pub const LAYER1_SIZE: usize = 256;
@@ -11,7 +11,7 @@ pub const INPUT_SIZE: usize = 41024;
 pub const HIDDEN_SIZE: usize = 32;
 
 // SAFE GLOBAL
-pub static NNUE: RwLock<Option<NnueWeights>> = RwLock::new(None);
+pub static NNUE: OnceLock<NnueWeights> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug)]
 #[repr(align(64))]
@@ -25,35 +25,38 @@ impl Accumulator {
     }
 
     pub fn refresh(&mut self, state: &crate::state::GameState, perspective: usize) {
-        if let Ok(guard) = NNUE.read() {
-            if let Some(net) = guard.as_ref() {
-                // FIXED: Use Unaligned Store (storeu) to prevent stack misalignment crashes
-                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-                unsafe {
-                     use std::arch::x86_64::*;
-                     let dst = self.v.as_mut_ptr();
-                     let src = net.feature_biases.as_ptr();
-                     for i in (0..LAYER1_SIZE).step_by(16) {
-                         // loadu is safer for src (though heap is usually aligned)
-                         let reg = _mm256_loadu_si256(src.add(i) as *const __m256i);
-                         // storeu is CRITICAL for dst (stack memory)
-                         _mm256_storeu_si256(dst.add(i) as *mut __m256i, reg);
-                     }
-                }
-                #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-                self.v.copy_from_slice(&net.feature_biases);
+        if let Some(net) = NNUE.get() {
+            self.refresh_with_weights(state, perspective, net);
+        }
+    }
 
-                let king_sq = state.bitboards[if perspective == crate::state::WHITE { crate::state::K } else { crate::state::k }].get_lsb_index() as usize;
+    // New helper to avoid double locking (now redundant but kept for API)
+    pub fn refresh_with_weights(&mut self, state: &crate::state::GameState, perspective: usize, net: &NnueWeights) {
+        // FIXED: Use Unaligned Store (storeu) to prevent stack misalignment crashes
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        unsafe {
+             use std::arch::x86_64::*;
+             let dst = self.v.as_mut_ptr();
+             let src = net.feature_biases.as_ptr();
+             for i in (0..LAYER1_SIZE).step_by(16) {
+                 // loadu is safer for src (though heap is usually aligned)
+                 let reg = _mm256_loadu_si256(src.add(i) as *const __m256i);
+                 // storeu is CRITICAL for dst (stack memory)
+                 _mm256_storeu_si256(dst.add(i) as *mut __m256i, reg);
+             }
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        self.v.copy_from_slice(&net.feature_biases);
 
-                for piece in 0..12 {
-                    let mut bb = state.bitboards[piece];
-                    while bb.0 != 0 {
-                        let sq = bb.get_lsb_index() as usize;
-                        bb.pop_bit(sq as u8);
-                        if let Some(idx) = make_halfkp_index(perspective, king_sq, piece, sq) {
-                            self.add_feature(idx, net);
-                        }
-                    }
+        let king_sq = state.bitboards[if perspective == crate::state::WHITE { crate::state::K } else { crate::state::k }].get_lsb_index() as usize;
+
+        for piece in 0..12 {
+            let mut bb = state.bitboards[piece];
+            while bb.0 != 0 {
+                let sq = bb.get_lsb_index() as usize;
+                bb.pop_bit(sq as u8);
+                if let Some(idx) = make_halfkp_index(perspective, king_sq, piece, sq) {
+                    self.add_feature(idx, net);
                 }
             }
         }
@@ -210,9 +213,10 @@ pub fn init_nnue(filename: &str) {
              if weights.feature_weights.iter().take(100).all(|&x| x == 0) {
                  println!("WARNING: Weights look empty. Check generation.");
              }
-             if let Ok(mut guard) = NNUE.write() {
-                *guard = Some(weights);
-            }
+             // Using OnceLock, set only once
+             if NNUE.set(weights).is_err() {
+                 println!("NNUE already initialized.");
+             }
             println!("NNUE Loaded Successfully (AVX2 Enabled).");
         },
         Err(e) => {

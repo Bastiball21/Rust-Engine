@@ -5,6 +5,25 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import struct
 import os
+import multiprocessing
+from tqdm import tqdm
+
+# --- DEVICE DETECTION ---
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+    print(f"Using NVIDIA CUDA ({torch.cuda.get_device_name(0)})")
+elif torch.backends.mps.is_available():
+    device = "mps"
+    print("Using Apple MPS (Metal)")
+else:
+    # Try DirectML for Windows Integrated/AMD/Intel Graphics
+    try:
+        import torch_directml
+        device = torch_directml.device()
+        print("Using DirectML (Windows Integrated/Discrete Graphics)")
+    except ImportError:
+        print("Using CPU (No CUDA/MPS/DirectML found)")
 
 # --- ARCHITECTURE CONFIG ---
 # Must match nnue.rs constants
@@ -30,14 +49,20 @@ class ChessDataset(Dataset):
     def __init__(self, filename):
         self.samples = []
         print(f"Loading data from {filename}...")
-        with open(filename, "r") as f:
-            for line in f:
-                parts = line.strip().split("|")
-                if len(parts) < 3: continue
-                fen = parts[0].strip()
-                score = float(parts[1].strip())
-                result = float(parts[2].strip())
-                self.samples.append((fen, score, result))
+        # Pre-allocate if possible or stream?
+        # For 100M lines, reading into memory takes ~10GB RAM.
+        # If RAM is tight, file streaming is better, but training is slower due to IO.
+        # We assume 16GB+ RAM is common for training.
+        try:
+            with open(filename, "r") as f:
+                for line in tqdm(f, desc="Reading file"):
+                    parts = line.strip().split("|")
+                    if len(parts) < 3: continue
+                    # Store as tuple to save memory compared to objects
+                    self.samples.append((parts[0].strip(), float(parts[1].strip()), float(parts[2].strip())))
+        except FileNotFoundError:
+            print("Data file not found.")
+
         print(f"Loaded {len(self.samples)} samples.")
 
     def __len__(self):
@@ -125,6 +150,9 @@ class NNUE(nn.Module):
 def export_net(model, filename="nn-aether.nnue"):
     print(f"Exporting to {filename}...")
 
+    # Ensure model is on CPU for export
+    model.cpu()
+
     # Weights are floats. We scale them to integers.
     # Feature Transformer
     ft_w = (model.feature_weights.weight.data * QA).round().to(torch.int16).cpu().numpy().flatten()
@@ -175,27 +203,63 @@ def train():
         export_net(model)
         return
 
-    dataset = ChessDataset("aether_data.txt")
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn)
+    # Use multiprocessing cpu count
+    num_workers = min(8, os.cpu_count() or 1)
 
-    model = NNUE()
+    # Use larger batch size for throughput
+    batch_size = 4096
+
+    print(f"Initializing Dataset (Workers: {num_workers}, Batch Size: {batch_size})...")
+    dataset = ChessDataset("aether_data.txt")
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=(device != "cpu"),
+        prefetch_factor=2 if num_workers > 0 else None
+    )
+
+    model = NNUE().to(device)
+
+    # Compile model for speedup (PyTorch 2.0+)
+    try:
+        model = torch.compile(model)
+        print("Model compiled with torch.compile()")
+    except:
+        pass
+
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.MSELoss()
 
-    print("Starting Training...")
-    for epoch in range(1):
+    epochs = 1
+    print(f"Starting Training for {epochs} epoch(s)...")
+
+    for epoch in range(epochs):
+        model.train()
         total_loss = 0
-        for stm, nstm, target in dataloader:
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+
+        for stm, nstm, target in progress_bar:
+            stm, nstm, target = stm.to(device), nstm.to(device), target.to(device)
+
             optimizer.zero_grad()
             output = model(stm, nstm)
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
 
-        print(f"Epoch {epoch+1} Loss: {total_loss / len(dataloader)}")
+            total_loss += loss.item()
+            progress_bar.set_postfix(loss=loss.item())
+
+        avg_loss = total_loss / len(dataloader)
+        print(f"Epoch {epoch+1} Average Loss: {avg_loss:.6f}")
 
     export_net(model)
 
 if __name__ == "__main__":
+    # Required for Windows multiprocessing
+    multiprocessing.freeze_support()
     train()
