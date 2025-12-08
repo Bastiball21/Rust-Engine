@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, Read, BufReader};
 use std::path::PathBuf;
 use std::env;
-use std::sync::OnceLock; // Use OnceLock instead of RwLock
+use std::sync::RwLock;
 
 // Architecture Constants
 pub const LAYER1_SIZE: usize = 256;
@@ -11,7 +11,7 @@ pub const INPUT_SIZE: usize = 41024;
 pub const HIDDEN_SIZE: usize = 32;
 
 // SAFE GLOBAL
-pub static NNUE: OnceLock<NnueWeights> = OnceLock::new();
+pub static NNUE: RwLock<Option<NnueWeights>> = RwLock::new(None);
 
 #[derive(Clone, Copy, Debug)]
 #[repr(align(64))]
@@ -25,38 +25,35 @@ impl Accumulator {
     }
 
     pub fn refresh(&mut self, state: &crate::state::GameState, perspective: usize) {
-        if let Some(net) = NNUE.get() {
-            self.refresh_with_weights(state, perspective, net);
-        }
-    }
+        if let Ok(guard) = NNUE.read() {
+            if let Some(net) = guard.as_ref() {
+                // FIXED: Use Unaligned Store (storeu) to prevent stack misalignment crashes
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                unsafe {
+                     use std::arch::x86_64::*;
+                     let dst = self.v.as_mut_ptr();
+                     let src = net.feature_biases.as_ptr();
+                     for i in (0..LAYER1_SIZE).step_by(16) {
+                         // loadu is safer for src (though heap is usually aligned)
+                         let reg = _mm256_loadu_si256(src.add(i) as *const __m256i);
+                         // storeu is CRITICAL for dst (stack memory)
+                         _mm256_storeu_si256(dst.add(i) as *mut __m256i, reg);
+                     }
+                }
+                #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+                self.v.copy_from_slice(&net.feature_biases);
 
-    // New helper to avoid double locking (now redundant but kept for API)
-    pub fn refresh_with_weights(&mut self, state: &crate::state::GameState, perspective: usize, net: &NnueWeights) {
-        // FIXED: Use Unaligned Store (storeu) to prevent stack misalignment crashes
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        unsafe {
-             use std::arch::x86_64::*;
-             let dst = self.v.as_mut_ptr();
-             let src = net.feature_biases.as_ptr();
-             for i in (0..LAYER1_SIZE).step_by(16) {
-                 // loadu is safer for src (though heap is usually aligned)
-                 let reg = _mm256_loadu_si256(src.add(i) as *const __m256i);
-                 // storeu is CRITICAL for dst (stack memory)
-                 _mm256_storeu_si256(dst.add(i) as *mut __m256i, reg);
-             }
-        }
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        self.v.copy_from_slice(&net.feature_biases);
+                let king_sq = state.bitboards[if perspective == crate::state::WHITE { crate::state::K } else { crate::state::k }].get_lsb_index() as usize;
 
-        let king_sq = state.bitboards[if perspective == crate::state::WHITE { crate::state::K } else { crate::state::k }].get_lsb_index() as usize;
-
-        for piece in 0..12 {
-            let mut bb = state.bitboards[piece];
-            while bb.0 != 0 {
-                let sq = bb.get_lsb_index() as usize;
-                bb.pop_bit(sq as u8);
-                if let Some(idx) = make_halfkp_index(perspective, king_sq, piece, sq) {
-                    self.add_feature(idx, net);
+                for piece in 0..12 {
+                    let mut bb = state.bitboards[piece];
+                    while bb.0 != 0 {
+                        let sq = bb.get_lsb_index() as usize;
+                        bb.pop_bit(sq as u8);
+                        if let Some(idx) = make_halfkp_index(perspective, king_sq, piece, sq) {
+                            self.add_feature(idx, net);
+                        }
+                    }
                 }
             }
         }
@@ -105,10 +102,7 @@ unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
     _mm_cvtsi128_si32(v32)
 }
 
-pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) -> i32 {
-    let acc_us = &state.accumulator[state.side_to_move];
-    let acc_them = &state.accumulator[1 - state.side_to_move];
-
+pub fn evaluate_nnue_avx2(acc_us: &Accumulator, acc_them: &Accumulator, net: &NnueWeights) -> i32 {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     unsafe {
         let mut input = [0i8; 512];
@@ -116,8 +110,8 @@ pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) ->
 
         // Clamp and Pack
         for i in 0..256 {
-            *input_ptr.add(i) = acc_us.v[i].clamp(0, 127) as i8;
-            *input_ptr.add(256+i) = acc_them.v[i].clamp(0, 127) as i8;
+            *input_ptr.add(i) = acc_us.v[i].clamp(0, 255) as i8;
+            *input_ptr.add(256+i) = acc_them.v[i].clamp(0, 255) as i8;
         }
 
         // --- LAYER 1 ---
@@ -129,18 +123,25 @@ pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) ->
             let weights_ptr = net.layer1_weights.as_ptr().add(row_offset);
 
             for k in (0..512).step_by(32) {
-                // Use Unaligned Loads
+                // Safe Implementation for QA=255 (Avoid maddubs saturation)
                 let inp = _mm256_loadu_si256(input_ptr.add(k) as *const __m256i);
                 let w = _mm256_loadu_si256(weights_ptr.add(k) as *const __m256i);
 
-                let product = _mm256_maddubs_epi16(inp, w);
-                let ones = _mm256_set1_epi16(1);
-                let sum_i32 = _mm256_madd_epi16(product, ones);
-                sum_vec = _mm256_add_epi32(sum_vec, sum_i32);
+                // Lower 128 bits
+                let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(inp));
+                let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(w));
+                let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
+
+                // Upper 128 bits
+                let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(inp, 1));
+                let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 1));
+                let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
+
+                sum_vec = _mm256_add_epi32(sum_vec, _mm256_add_epi32(prod_lo, prod_hi));
             }
 
             let total = hsum_256_epi32(sum_vec) + net.layer1_biases[i];
-            layer1_out[i] = (total >> 6).clamp(0, 127) as i8;
+            layer1_out[i] = (total >> 6).clamp(0, 255) as i8;
         }
 
         // --- LAYER 2 ---
@@ -151,25 +152,42 @@ pub fn evaluate_nnue_avx2(state: &crate::state::GameState, net: &NnueWeights) ->
             let row_offset = i * 32;
             let w = _mm256_loadu_si256(net.layer2_weights.as_ptr().add(row_offset) as *const __m256i);
 
-            let product = _mm256_maddubs_epi16(l1_vec, w);
-            let ones = _mm256_set1_epi16(1);
-            let sum_i32 = _mm256_madd_epi16(product, ones);
+            // Safe Implementation
+            let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(l1_vec));
+            let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(w));
+            let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
+
+            let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(l1_vec, 1));
+            let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 1));
+            let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
+
+            let sum_i32 = _mm256_add_epi32(prod_lo, prod_hi);
 
             let total = hsum_256_epi32(sum_i32) + net.layer2_biases[i];
-            layer2_out[i] = (total >> 6).clamp(0, 127) as i8;
+            layer2_out[i] = (total >> 6).clamp(0, 255) as i8;
         }
 
         // --- OUTPUT ---
         let l2_vec = _mm256_loadu_si256(layer2_out.as_ptr() as *const __m256i);
         let out_w = _mm256_loadu_si256(net.output_weights.as_ptr() as *const __m256i);
 
-        let product = _mm256_maddubs_epi16(l2_vec, out_w);
-        let ones = _mm256_set1_epi16(1);
-        let sum_i32 = _mm256_madd_epi16(product, ones);
+        // Safe Implementation
+        let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(l2_vec));
+        let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(out_w));
+        let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
+
+        let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(l2_vec, 1));
+        let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(out_w, 1));
+        let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
+
+        let sum_i32 = _mm256_add_epi32(prod_lo, prod_hi);
 
         let final_sum = hsum_256_epi32(sum_i32) + net.output_bias;
 
-        return (final_sum / 16) + 20;
+        // Scaling for QA=255/QB=64 to approx centipawns
+        // 16 was too small, yielding very high scores (e.g. 166cp for startpos).
+        // 64 is more reasonable (166 / 4 ~= 41).
+        return (final_sum / 64) + 10;
     }
 
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -213,10 +231,9 @@ pub fn init_nnue(filename: &str) {
              if weights.feature_weights.iter().take(100).all(|&x| x == 0) {
                  println!("WARNING: Weights look empty. Check generation.");
              }
-             // Using OnceLock, set only once
-             if NNUE.set(weights).is_err() {
-                 println!("NNUE already initialized.");
-             }
+             if let Ok(mut guard) = NNUE.write() {
+                *guard = Some(weights);
+            }
             println!("NNUE Loaded Successfully (AVX2 Enabled).");
         },
         Err(e) => {

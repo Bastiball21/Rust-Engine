@@ -43,24 +43,25 @@ pub fn run_datagen(games: usize) {
             let depth = if state.fullmove_number < 8 { 1 } else { 6 };
 
             let tm = TimeManager::new(TimeControl::MoveTime(50), state.side_to_move, 0);
-
-            // Pass true for main_thread to see output if needed, but for now we keep false to reduce spam.
-            // If it hangs, we can change to true.
             search::search(&state, tm, &tt, stop.clone(), depth, false, vec![]);
 
             // 3. Get Score & Best Move
             let (tt_score, _, _, best_move_opt) = tt.probe_data(state.hash).unwrap_or((0, 0, 0, None));
             let best_move = best_move_opt.unwrap_or(moves.list.moves[0]);
 
-            // --- ADJUDICATION ---
+            // --- CRITICAL FIX: ADJUDICATION ---
+            // If we see a mate score (>20000), claim the win NOW. Do not play it out.
             if tt_score.abs() > 20000 {
                 if tt_score > 0 {
+                    // Positive score = Current side is winning
                     result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
                 } else {
+                    // Negative score = Current side is losing
                     result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
                 }
                 break;
             }
+            // ----------------------------------
 
             // Save Data: FEN | SCORE | RESULT
             let white_relative_score = if state.side_to_move == WHITE { tt_score } else { -tt_score };

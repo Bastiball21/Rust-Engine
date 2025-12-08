@@ -19,10 +19,13 @@ pub fn uci_loop() {
     let mut game_state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let mut game_history: Vec<u64> = Vec::new();
     game_history.push(game_state.hash);
-
+    
     let mut num_threads = 1;
     let mut move_overhead = 10;
-    
+
+    // Initialize NNUE by default
+    crate::nnue::init_nnue("nn-aether.nnue");
+
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
 

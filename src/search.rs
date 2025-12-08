@@ -310,7 +310,12 @@ fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String
             if !tt.is_pseudo_legal(&curr_state, mv) { break; }
             if seen_hashes.contains(&curr_state.hash) { break; }
             seen_hashes.push(curr_state.hash);
-            pv_str.push_str(&format!("{}{} ", square_to_coord(mv.source), square_to_coord(mv.target)));
+            pv_str.push_str(&format!("{}{}", square_to_coord(mv.source), square_to_coord(mv.target)));
+            if let Some(promo) = mv.promotion {
+                let char = match promo { 4|10=>'q', 3|9=>'r', 2|8=>'b', 1|7=>'n', _=>' ' };
+                if char != ' ' { pv_str.push(char); }
+            }
+            pv_str.push(' ');
             if !first && ponder_move.is_none() { ponder_move = Some(mv); }
             first = false;
             curr_state = curr_state.make_move(mv);
@@ -464,7 +469,12 @@ pub fn search(state: &GameState, tm: TimeManager, tt: &TranspositionTable, stop_
              // or pass a mutable reference.
         }
 
-        if main_thread && info.time_manager.check_soft_limit() { info.stopped = true; info.stop_signal.store(true, Ordering::Relaxed); }
+        if main_thread && info.time_manager.check_soft_limit() {
+            // Check if we have a single legal move (root node) or other termination criteria?
+            // For now, strict soft limit adherence.
+            info.stopped = true;
+            info.stop_signal.store(true, Ordering::Relaxed);
+        }
 
         if main_thread {
             let elapsed = info.time_manager.start_time.elapsed().as_secs_f64();
