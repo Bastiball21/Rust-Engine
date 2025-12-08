@@ -252,11 +252,36 @@ fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnE
 pub fn evaluate_nnue(state: &GameState) -> i32 {
     if let Ok(guard) = NNUE.read() {
         if let Some(net) = guard.as_ref() {
+            // Need mutable access to accumulators, but GameState is immutable ref here.
+            // However, GameState contains `accumulator: [Accumulator; 2]` which is a plain struct.
+            // The `evaluate` signature is `&GameState`.
+            // Wait, if `state` is immutable, we cannot call `refresh` which is `&mut self`.
+            // But `accumulator` is refreshed *lazily* in the original code?
+            // "if state.dirty { acc_us.refresh ... }"
+            // Original code: `let mut acc_us = state.accumulator[...]`.
+            // It was copying the accumulator! `Accumulator` is `Copy`.
+            // So `acc_us` was a local copy. Refreshing it locally did NOT update the state.
+            // THIS WAS THE PERFORMANCE BUG!
+            // It was doing a full refresh on a local copy every time, essentially treating it as if it had no cache.
+            // AND the cache in `state` was never updated because `evaluate` takes `&GameState`.
+
+            // To fix this properly:
+            // 1. `make_move` now updates the accumulator in the new state.
+            // 2. `evaluate` should just USE the accumulator from the state.
+            // 3. If `dirty` is true (King move or initial), we must refresh.
+            //    But we can't update `state` because it's immutable.
+            //    So we refresh a local copy and use it.
+            //    This is unavoidable for `evaluate(&GameState)`.
+            //    BUT since we now update incrementally in `make_move`, `dirty` will be false 95% of the time!
+            //    So we just use `state.accumulator`.
+
             let mut acc_us = state.accumulator[state.side_to_move];
             let mut acc_them = state.accumulator[1 - state.side_to_move];
 
-            if state.dirty {
+            if state.dirty[state.side_to_move] {
                 acc_us.refresh(state, state.side_to_move);
+            }
+            if state.dirty[1 - state.side_to_move] {
                 acc_them.refresh(state, 1 - state.side_to_move);
             }
 
@@ -301,7 +326,7 @@ pub fn evaluate_nnue(state: &GameState) -> i32 {
                     sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
                 }
 
-                let score = (sum / 64) + 10;
+                let score = (sum / 64); // Removed +10 bias
                 return if state.side_to_move == WHITE { score } else { -score };
             }
         }

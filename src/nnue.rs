@@ -84,6 +84,45 @@ impl Accumulator {
             self.v[i] = self.v[i].wrapping_add(net.feature_weights[offset + i]);
         }
     }
+
+    fn sub_feature(&mut self, idx: usize, net: &NnueWeights) {
+        let offset = idx * LAYER1_SIZE;
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            let dst = self.v.as_mut_ptr();
+            let src = net.feature_weights.as_ptr().add(offset);
+
+            // Unroll loop 16 items (256 bits) at a time
+            for i in (0..LAYER1_SIZE).step_by(16) {
+                // FIXED: Use loadu/storeu everywhere
+                let v_acc = _mm256_loadu_si256(dst.add(i) as *const __m256i);
+                let v_weight = _mm256_loadu_si256(src.add(i) as *const __m256i);
+
+                let v_sub = _mm256_sub_epi16(v_acc, v_weight);
+                _mm256_storeu_si256(dst.add(i) as *mut __m256i, v_sub);
+            }
+        }
+
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        for i in 0..LAYER1_SIZE {
+            self.v[i] = self.v[i].wrapping_sub(net.feature_weights[offset + i]);
+        }
+    }
+
+    pub fn update(&mut self, added: &[usize], removed: &[usize]) {
+        if let Ok(guard) = NNUE.read() {
+            if let Some(net) = guard.as_ref() {
+                for &idx in removed {
+                    self.sub_feature(idx, net);
+                }
+                for &idx in added {
+                    self.add_feature(idx, net);
+                }
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------
@@ -187,7 +226,7 @@ pub fn evaluate_nnue_avx2(acc_us: &Accumulator, acc_them: &Accumulator, net: &Nn
         // Scaling for QA=255/QB=64 to approx centipawns
         // 16 was too small, yielding very high scores (e.g. 166cp for startpos).
         // 64 is more reasonable (166 / 4 ~= 41).
-        return (final_sum / 64) + 10;
+        return final_sum / 64; // Removed +10 bias
     }
 
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -210,7 +249,7 @@ pub struct NnueWeights {
     pub output_weights: [i8; HIDDEN_SIZE],
 }
 
-fn make_halfkp_index(perspective: usize, king_sq: usize, piece: usize, sq: usize) -> Option<usize> {
+pub fn make_halfkp_index(perspective: usize, king_sq: usize, piece: usize, sq: usize) -> Option<usize> {
     let orient_sq = if perspective == crate::state::WHITE { sq } else { sq ^ 56 };
     let orient_king = if perspective == crate::state::WHITE { king_sq } else { king_sq ^ 56 };
     let piece_color = if piece < 6 { crate::state::WHITE } else { crate::state::BLACK };

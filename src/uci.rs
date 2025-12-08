@@ -86,7 +86,13 @@ pub fn uci_loop() {
                 let (tm, depth) = parse_go(game_state.side_to_move, &parts, move_overhead);
                 
                 for i in 0..num_threads {
-                    let state_clone = game_state;
+                    let mut state_clone = game_state;
+
+                    // CRITICAL: Ensure the root state has a fresh accumulator.
+                    // This sets dirty=false and calculates the initial accumulator from scratch.
+                    // Subsequent incremental updates will keep it valid.
+                    state_clone.refresh_accumulator();
+
                     let stop_clone = stop_signal.clone();
                     let tm_clone = tm;
                     let history_clone = game_history.clone();
