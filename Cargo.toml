@@ -1,14 +1,15 @@
-
-
 [package]
-name = "aether_engine"
-version = "0.0.1"
+name = "aether"
+version = "1.0.0"
 edition = "2021"
 
-# 1. Define the custom binary output name using underscores
-[[bin]]
-name = "Aether_v0_0_1"         # FIX: Replaced spaces and dots with underscores
-path = "src/main.rs"
-
 [dependencies]
-# ... existing dependencies ...
+# No external dependencies found in the source code so far.
+# rand is implemented via a local PRNG in zobrist.rs
+# lazy_static or once_cell are replaced by std::sync::OnceLock (Rust 1.70+)
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

@@ -1,7 +1,7 @@
 use std::io::{self, BufRead};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::thread;
-use crate::state::{GameState, Move, WHITE, BLACK};
+use crate::state::{GameState, Move};
 use crate::search;
 use crate::tt::TranspositionTable;
 use crate::movegen::{self, MoveGenerator};
@@ -11,15 +11,20 @@ pub fn uci_loop() {
     let stdin = io::stdin();
     let mut buffer = String::new();
     
-    let mut tt = TranspositionTable::new(64); 
+    // Default 64MB Hash
+    // SAFE: Wrapped in Arc. TranspositionTable handles internal mutability via Atomics.
+    // It implements Sync manually.
+    let mut tt = Arc::new(TranspositionTable::new(64));
+
     let mut game_state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let mut game_history: Vec<u64> = Vec::new();
+    game_history.push(game_state.hash);
+
+    let mut num_threads = 1;
+    let mut move_overhead = 10;
     
     let stop_signal = Arc::new(AtomicBool::new(false));
-    let mut search_thread: Option<thread::JoinHandle<()>> = None;
-
-    crate::zobrist::init_zobrist();
-    crate::bitboard::init_magic_tables();
-    crate::movegen::init_move_tables();
+    let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
 
     loop {
         buffer.clear();
@@ -37,51 +42,92 @@ pub fn uci_loop() {
 
         match command {
             "uci" => {
-                println!("id name Flash");
-                println!("id author bastiball");
+                println!("id name Aether 1.0.0");
+                println!("id author Basti Dangca");
                 println!("option name Hash type spin default 64 min 1 max 1024");
+                println!("option name Threads type spin default 1 min 1 max 64");
+                println!("option name SyzygyPath type string default <empty>");
+                println!("option name Move Overhead type spin default 10 min 0 max 5000");
+                println!("option name EvalFile type string default nn-aether.nnue");
                 println!("uciok");
             },
             "isready" => println!("readyok"),
             "ucinewgame" => {
+                // To clear, we can just reallocate or use a clear method.
+                // Since tt is shared via Arc, we can't easily replace it if threads are holding it.
+                // But threads are joined before we get here.
+                // Best way: Use clear() method with interior mutability
+                // However, our `tt` variable is local.
+                // Note: TranspositionTable::clear() requires &mut self.
+                // Arc::get_mut works only if we are the only owner.
+                if let Some(tt_mut) = Arc::get_mut(&mut tt) {
+                    tt_mut.clear();
+                } else {
+                    // Fallback: If for some reason Arc is shared (unlikely here), create new one.
+                    tt = Arc::new(TranspositionTable::new(64));
+                }
+
                 game_state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                tt = TranspositionTable::new(64); 
+                game_history.clear();
+                game_history.push(game_state.hash);
             },
             "position" => {
-                handle_position(&mut game_state, &parts);
+                game_history = handle_position(&mut game_state, &parts);
             },
             "go" => {
                 stop_signal.store(true, Ordering::Relaxed);
-                if let Some(h) = search_thread.take() { h.join().unwrap(); }
+                for h in search_threads.drain(..) { h.join().unwrap(); }
                 
                 stop_signal.store(false, Ordering::Relaxed);
 
-                let state_clone = game_state;
-                let stop_clone = stop_signal.clone();
+                let (tm, depth) = parse_go(game_state.side_to_move, &parts, move_overhead);
                 
-                let (tm, depth) = parse_go(game_state.side_to_move, &parts);
-                
-                let tt_ref: &'static mut TranspositionTable = unsafe { std::mem::transmute(&mut tt) };
+                for i in 0..num_threads {
+                    let state_clone = game_state;
+                    let stop_clone = stop_signal.clone();
+                    let tm_clone = tm;
+                    let history_clone = game_history.clone();
+                    let is_main = i == 0;
+                    let tt_clone = tt.clone(); // Arc clone
 
-                search_thread = Some(thread::spawn(move || {
-                    // FIXED: Added 'depth' argument here
-                    search::search(&state_clone, tm, tt_ref, stop_clone, depth);
-                }));
+                    search_threads.push(thread::spawn(move || {
+                        // Pass reference to the TT inside the Arc
+                        search::search(&state_clone, tm_clone, &tt_clone, stop_clone, depth, is_main, history_clone);
+                    }));
+                }
             },
             "stop" => {
                 stop_signal.store(true, Ordering::Relaxed);
-                if let Some(h) = search_thread.take() { h.join().unwrap(); }
+                for h in search_threads.drain(..) { h.join().unwrap(); }
             },
             "setoption" => {
-                if parts.len() > 4 && parts[1] == "name" && parts[2] == "Hash" && parts[3] == "value" {
-                    if let Ok(mb) = parts[4].parse::<usize>() {
-                        tt = TranspositionTable::new(mb);
+                if parts.len() > 4 && parts[1] == "name" {
+                    if parts[2] == "Hash" && parts[3] == "value" {
+                        if let Ok(mb) = parts[4].parse::<usize>() {
+                            // Reallocate TT safely
+                            // Ensure no threads are running
+                            stop_signal.store(true, Ordering::Relaxed);
+                            for h in search_threads.drain(..) { h.join().unwrap(); }
+
+                            tt = Arc::new(TranspositionTable::new(mb));
+                        }
+                    } else if parts[2] == "Threads" && parts[3] == "value" {
+                        if let Ok(t) = parts[4].parse::<usize>() {
+                            num_threads = t;
+                        }
+                    } else if parts[2] == "Move" && parts[3] == "Overhead" && parts[4] == "value" {
+                         if let Ok(ov) = parts[5].parse::<u128>() {
+                             move_overhead = ov;
+                         }
+                    } else if parts[2] == "EvalFile" && parts[3] == "value" {
+                        let path = parts[4..].join(" ");
+                        crate::nnue::init_nnue(&path);
                     }
                 }
             },
             "quit" => {
                 stop_signal.store(true, Ordering::Relaxed);
-                if let Some(h) = search_thread.take() { h.join().unwrap(); }
+                for h in search_threads.drain(..) { h.join().unwrap(); }
                 break;
             },
             _ => {}
@@ -89,8 +135,9 @@ pub fn uci_loop() {
     }
 }
 
-fn handle_position(state: &mut GameState, parts: &[&str]) {
+fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
     let mut move_index = 0;
+    let mut history = Vec::new();
     
     if parts[1] == "startpos" {
         *state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
@@ -111,15 +158,25 @@ fn handle_position(state: &mut GameState, parts: &[&str]) {
         }
     }
 
+    history.push(state.hash);
+
     if move_index > 0 && move_index < parts.len() {
         for i in move_index..parts.len() {
             let move_str = parts[i];
             let parsed_move = parse_move(state, move_str);
             if let Some(mv) = parsed_move {
                 *state = state.make_move(mv);
+                history.push(state.hash);
+
+                // Reset history on capture or pawn move (50-move rule reset)
+                if mv.is_capture || (state.bitboards[crate::state::P].get_bit(mv.target) || state.bitboards[crate::state::p].get_bit(mv.target)) {
+                    history.clear();
+                    history.push(state.hash);
+                }
             }
         }
     }
+    history
 }
 
 fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
@@ -155,7 +212,7 @@ fn square_from_str(s: &str) -> u8 {
     rank * 8 + file
 }
 
-fn parse_go(side: usize, parts: &[&str]) -> (TimeManager, u8) {
+fn parse_go(side: usize, parts: &[&str], overhead: u128) -> (TimeManager, u8) {
     let mut depth = 64;
     let mut wtime: Option<u128> = None;
     let mut btime: Option<u128> = None;
@@ -197,5 +254,5 @@ fn parse_go(side: usize, parts: &[&str]) -> (TimeManager, u8) {
         TimeControl::Infinite
     };
 
-    (TimeManager::new(tc, side), depth)
+    (TimeManager::new(tc, side, overhead), depth)
 }
