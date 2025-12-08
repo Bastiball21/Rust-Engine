@@ -79,65 +79,9 @@ pub fn init_eval() {
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState) -> i32 {
     // 1. NNUE (If available)
-    if let Some(net) = NNUE.get() {
-        // Check if AVX2 is available via crate feature or architecture
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            // Ensure accumulators are fresh
-            let mut acc_us = state.accumulator[state.side_to_move];
-            let mut acc_them = state.accumulator[1 - state.side_to_move];
-
-            if state.dirty {
-                acc_us.refresh_with_weights(state, state.side_to_move, net);
-                acc_them.refresh_with_weights(state, 1 - state.side_to_move, net);
-            }
-
-            return unsafe {
-                 evaluate_nnue_avx2_inline(&acc_us, &acc_them, net)
-            };
-        }
-
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        {
-            // Fallback (Original Slow Code)
-            let mut acc_us = state.accumulator[state.side_to_move];
-            let mut acc_them = state.accumulator[1 - state.side_to_move];
-
-            if state.dirty {
-                acc_us.refresh_with_weights(state, state.side_to_move, net);
-                acc_them.refresh_with_weights(state, 1 - state.side_to_move, net);
-            }
-
-            let mut input = [0i8; 512];
-            for i in 0..256 {
-                input[i] = acc_us.v[i].clamp(0, 127) as i8;
-                input[256 + i] = acc_them.v[i].clamp(0, 127) as i8;
-            }
-
-            let mut layer1_out = [0i8; 32];
-            for i in 0..32 {
-                let mut sum = net.layer1_biases[i];
-                for j in 0..512 {
-                    sum += (input[j] as i32) * (net.layer1_weights[i * 512 + j] as i32);
-                }
-                layer1_out[i] = (sum >> 6).clamp(0, 127) as i8;
-            }
-
-            let mut layer2_out = [0i8; 32];
-            for i in 0..32 {
-                let mut sum = net.layer2_biases[i];
-                for j in 0..32 {
-                    sum += (layer1_out[j] as i32) * (net.layer2_weights[i * 32 + j] as i32);
-                }
-                layer2_out[i] = (sum >> 6).clamp(0, 127) as i8;
-            }
-
-            let mut sum = net.output_bias;
-            for j in 0..32 {
-                sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
-            }
-
-            return (sum / 16) + 20;
+    if let Ok(guard) = NNUE.read() {
+        if guard.is_some() {
+            return evaluate_nnue(state);
         }
     }
     // 2. HCE Fallback
@@ -306,71 +250,63 @@ fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnE
 
 // --- NNUE ---
 pub fn evaluate_nnue(state: &GameState) -> i32 {
-    if let Some(net) = NNUE.get() {
-        // Check if AVX2 is available via crate feature or architecture
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            // Ensure accumulators are fresh
+    if let Ok(guard) = NNUE.read() {
+        if let Some(net) = guard.as_ref() {
             let mut acc_us = state.accumulator[state.side_to_move];
             let mut acc_them = state.accumulator[1 - state.side_to_move];
 
             if state.dirty {
-                // SAFE: We do NOT hold the lock inside refresh_with_weights (it just uses 'net')
-                // 'acc_us' is local copy (Accumulator is Copy)
-                acc_us.refresh_with_weights(state, state.side_to_move, net);
-                acc_them.refresh_with_weights(state, 1 - state.side_to_move, net);
+                acc_us.refresh(state, state.side_to_move);
+                acc_them.refresh(state, 1 - state.side_to_move);
             }
 
-            return unsafe {
-                 evaluate_nnue_avx2_inline(&acc_us, &acc_them, net)
-            };
-        }
-
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        {
-            // Fallback (Original Slow Code)
-            let mut acc_us = state.accumulator[state.side_to_move];
-            let mut acc_them = state.accumulator[1 - state.side_to_move];
-
-            if state.dirty {
-                acc_us.refresh_with_weights(state, state.side_to_move, net);
-                acc_them.refresh_with_weights(state, 1 - state.side_to_move, net);
+            // Check if AVX2 is available via crate feature or architecture
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                let score = nnue::evaluate_nnue_avx2(&acc_us, &acc_them, net);
+                return if state.side_to_move == WHITE { score } else { -score };
             }
 
-            let mut input = [0i8; 512];
-            for i in 0..256 {
-                input[i] = acc_us.v[i].clamp(0, 127) as i8;
-                input[256 + i] = acc_them.v[i].clamp(0, 127) as i8;
-            }
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            {
+                // Fallback (Original Slow Code)
+                // Note: Accumulators are already refreshed above (acc_us, acc_them)
 
-            let mut layer1_out = [0i8; 32];
-            for i in 0..32 {
-                let mut sum = net.layer1_biases[i];
-                for j in 0..512 {
-                    sum += (input[j] as i32) * (net.layer1_weights[i * 512 + j] as i32);
+                let mut input = [0i8; 512];
+                for i in 0..256 {
+                    input[i] = acc_us.v[i].clamp(0, 255) as i8;
+                    input[256 + i] = acc_them.v[i].clamp(0, 255) as i8;
                 }
-                layer1_out[i] = (sum >> 6).clamp(0, 127) as i8;
-            }
 
-            let mut layer2_out = [0i8; 32];
-            for i in 0..32 {
-                let mut sum = net.layer2_biases[i];
+                let mut layer1_out = [0i8; 32];
+                for i in 0..32 {
+                    let mut sum = net.layer1_biases[i];
+                    for j in 0..512 {
+                        sum += (input[j] as i32) * (net.layer1_weights[i * 512 + j] as i32);
+                    }
+                    layer1_out[i] = (sum >> 6).clamp(0, 255) as i8;
+                }
+
+                let mut layer2_out = [0i8; 32];
+                for i in 0..32 {
+                    let mut sum = net.layer2_biases[i];
+                    for j in 0..32 {
+                        sum += (layer1_out[j] as i32) * (net.layer2_weights[i * 32 + j] as i32);
+                    }
+                    layer2_out[i] = (sum >> 6).clamp(0, 255) as i8;
+                }
+
+                let mut sum = net.output_bias;
                 for j in 0..32 {
-                    sum += (layer1_out[j] as i32) * (net.layer2_weights[i * 32 + j] as i32);
+                    sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
                 }
-                layer2_out[i] = (sum >> 6).clamp(0, 127) as i8;
-            }
 
-            let mut sum = net.output_bias;
-            for j in 0..32 {
-                sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
+                let score = (sum / 64) + 10;
+                return if state.side_to_move == WHITE { score } else { -score };
             }
-
-            return (sum / 16) + 20;
         }
     }
-    // 2. HCE Fallback
-    evaluate_hce(state)
+    0
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -385,67 +321,6 @@ unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
     _mm_cvtsi128_si32(v32)
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-unsafe fn evaluate_nnue_avx2_inline(acc_us: &crate::nnue::Accumulator, acc_them: &crate::nnue::Accumulator, net: &crate::nnue::NnueWeights) -> i32 {
-    let mut input = [0i8; 512];
-    let input_ptr = input.as_mut_ptr();
-
-    // Clamp and Pack
-    for i in 0..256 {
-        *input_ptr.add(i) = acc_us.v[i].clamp(0, 127) as i8;
-        *input_ptr.add(256+i) = acc_them.v[i].clamp(0, 127) as i8;
-    }
-
-    // --- LAYER 1 ---
-    let mut layer1_out = [0i8; 32];
-
-    for i in 0..32 {
-        let mut sum_vec = _mm256_setzero_si256();
-        let row_offset = i * 512;
-        let weights_ptr = net.layer1_weights.as_ptr().add(row_offset);
-
-        for idx in (0..512).step_by(32) {
-            let inp = _mm256_loadu_si256(input_ptr.add(idx) as *const __m256i);
-            let w = _mm256_loadu_si256(weights_ptr.add(idx) as *const __m256i);
-
-            let product = _mm256_maddubs_epi16(inp, w);
-            let ones = _mm256_set1_epi16(1);
-            let sum_i32 = _mm256_madd_epi16(product, ones);
-            sum_vec = _mm256_add_epi32(sum_vec, sum_i32);
-        }
-
-        let total = hsum_256_epi32(sum_vec) + net.layer1_biases[i];
-        layer1_out[i] = (total >> 6).clamp(0, 127) as i8;
-    }
-
-    // --- LAYER 2 ---
-    let mut layer2_out = [0i8; 32];
-    let l1_vec = _mm256_loadu_si256(layer1_out.as_ptr() as *const __m256i);
-
-    for i in 0..32 {
-        let row_offset = i * 32;
-        let w = _mm256_loadu_si256(net.layer2_weights.as_ptr().add(row_offset) as *const __m256i);
-
-        let product = _mm256_maddubs_epi16(l1_vec, w);
-        let ones = _mm256_set1_epi16(1);
-        let sum_i32 = _mm256_madd_epi16(product, ones);
-
-        let total = hsum_256_epi32(sum_i32) + net.layer2_biases[i];
-        layer2_out[i] = (total >> 6).clamp(0, 127) as i8;
-    }
-
-    // --- OUTPUT ---
-    let l2_vec = _mm256_loadu_si256(layer2_out.as_ptr() as *const __m256i);
-    let out_w = _mm256_loadu_si256(net.output_weights.as_ptr() as *const __m256i);
-
-    let product = _mm256_maddubs_epi16(l2_vec, out_w);
-    let ones = _mm256_set1_epi16(1);
-    let sum_i32 = _mm256_madd_epi16(product, ones);
-
-    let final_sum = hsum_256_epi32(sum_i32) + net.output_bias;
-
-    (final_sum / 16) + 20
-}
 
 // --- TRACE (Required for Tuning) ---
 pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
