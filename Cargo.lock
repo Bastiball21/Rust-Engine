@@ -6,8 +6,14 @@ version = 4
 name = "aether"
 version = "1.0.0"
 dependencies = [
+ "bulletformat",
  "smallvec",
 ]
+
+[[package]]
+name = "bulletformat"
+version = "1.8.0"
+source = "git+https://github.com/jw1912/bulletformat#cb6a3602d70b0b6c3abc88fb876810a7bdf0b428"
 
 [[package]]
 name = "smallvec"
