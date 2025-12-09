@@ -3,7 +3,7 @@
 
 use crate::bitboard::Bitboard;
 use crate::zobrist;
-use crate::nnue::{Accumulator, make_halfkp_index};
+use crate::nnue::{Accumulator, make_index};
 
 pub const P: usize = 0; pub const N: usize = 1; pub const B: usize = 2; 
 pub const R: usize = 3; pub const Q: usize = 4; pub const K: usize = 5;
@@ -253,30 +253,18 @@ impl GameState {
         let mut w_removed = smallvec::SmallVec::<[usize; 8]>::new();
         let mut b_added = smallvec::SmallVec::<[usize; 8]>::new();
         let mut b_removed = smallvec::SmallVec::<[usize; 8]>::new();
-        let mut w_dirty = self.dirty[0];
-        let mut b_dirty = self.dirty[1];
+        let w_dirty = self.dirty[0];
+        let b_dirty = self.dirty[1];
 
         // Helper to queue updates
         let mut queue_update = |piece: usize, sq: usize, is_add: bool| {
             // White Perspective
-            if piece == K {
-                 w_dirty = true;
-            } else {
-                 let k_sq = self.bitboards[K].get_lsb_index() as usize;
-                 if let Some(idx) = make_halfkp_index(WHITE, k_sq, piece, sq) {
-                     if is_add { w_added.push(idx); } else { w_removed.push(idx); }
-                 }
-            }
+            let idx = make_index(WHITE, piece, sq);
+            if is_add { w_added.push(idx); } else { w_removed.push(idx); }
 
             // Black Perspective
-            if piece == k {
-                 b_dirty = true;
-            } else {
-                 let k_sq = self.bitboards[k].get_lsb_index() as usize;
-                 if let Some(idx) = make_halfkp_index(BLACK, k_sq, piece, sq) {
-                     if is_add { b_added.push(idx); } else { b_removed.push(idx); }
-                 }
-            }
+            let idx = make_index(BLACK, piece, sq);
+            if is_add { b_added.push(idx); } else { b_removed.push(idx); }
         };
 
         // 1. Remove Moving Piece from Source

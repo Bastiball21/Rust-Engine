@@ -285,65 +285,11 @@ pub fn evaluate_nnue(state: &GameState) -> i32 {
                 acc_them.refresh(state, 1 - state.side_to_move);
             }
 
-            // Check if AVX2 is available via crate feature or architecture
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                let score = nnue::evaluate_nnue_avx2(&acc_us, &acc_them, net);
-                return if state.side_to_move == WHITE { score } else { -score };
-            }
-
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-            {
-                // Fallback (Original Slow Code)
-                // Note: Accumulators are already refreshed above (acc_us, acc_them)
-
-                let mut input = [0i8; 512];
-                for i in 0..256 {
-                    input[i] = acc_us.v[i].clamp(0, 255) as i8;
-                    input[256 + i] = acc_them.v[i].clamp(0, 255) as i8;
-                }
-
-                let mut layer1_out = [0i8; 32];
-                for i in 0..32 {
-                    let mut sum = net.layer1_biases[i];
-                    for j in 0..512 {
-                        sum += (input[j] as i32) * (net.layer1_weights[i * 512 + j] as i32);
-                    }
-                    layer1_out[i] = (sum >> 6).clamp(0, 255) as i8;
-                }
-
-                let mut layer2_out = [0i8; 32];
-                for i in 0..32 {
-                    let mut sum = net.layer2_biases[i];
-                    for j in 0..32 {
-                        sum += (layer1_out[j] as i32) * (net.layer2_weights[i * 32 + j] as i32);
-                    }
-                    layer2_out[i] = (sum >> 6).clamp(0, 255) as i8;
-                }
-
-                let mut sum = net.output_bias;
-                for j in 0..32 {
-                    sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
-                }
-
-                let score = (sum / 64); // Removed +10 bias
-                return if state.side_to_move == WHITE { score } else { -score };
-            }
+            let score = nnue::evaluate(&acc_us, &acc_them, net);
+            return if state.side_to_move == WHITE { score } else { -score };
         }
     }
     0
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use std::arch::x86_64::*;
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
-    let v128 = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
-    let v64 = _mm_add_epi32(v128, _mm_shuffle_epi32(v128, 0b00_00_11_10));
-    let v32 = _mm_add_epi32(v64, _mm_shuffle_epi32(v64, 0b00_00_00_01));
-    _mm_cvtsi128_si32(v32)
 }
 
 
