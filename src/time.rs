@@ -28,23 +28,39 @@ impl TimeManager {
             TimeControl::MoveTime(t) => {
                 // If movetime is very small, don't subtract overhead to avoid underflow/zero
                 let effective_t = t.saturating_sub(overhead);
-                if effective_t == 0 { (t, t) } else { (effective_t, effective_t) }
-            },
-            TimeControl::GameTime { wtime, btime, winc, binc, moves_to_go } => {
-                let (mut time, inc) = if side == 0 { (wtime, winc) } else { (btime, binc) };
-                
+                if effective_t == 0 {
+                    (t, t)
+                } else {
+                    (effective_t, effective_t)
+                }
+            }
+            TimeControl::GameTime {
+                wtime,
+                btime,
+                winc,
+                binc,
+                moves_to_go,
+            } => {
+                let (mut time, inc) = if side == 0 {
+                    (wtime, winc)
+                } else {
+                    (btime, binc)
+                };
+
                 // Subtract overhead from current time to be safe
                 time = time.saturating_sub(overhead);
-                if time == 0 { time = 50; } // Emergency buffer if less than overhead
+                if time == 0 {
+                    time = 50;
+                } // Emergency buffer if less than overhead
 
                 let mtg = moves_to_go.unwrap_or(40).clamp(20, 50) as u128;
-                
+
                 // Basic time management formula
                 let base = (time / mtg) + (inc * 3 / 4);
-                
+
                 // Don't use more than 80% of remaining time
                 let max_alloc = time * 8 / 10;
-                
+
                 let soft = base.min(max_alloc);
                 let hard = (base * 2).min(max_alloc);
                 (hard, soft)

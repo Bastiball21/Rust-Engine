@@ -1,6 +1,6 @@
 // src/tuning.rs
-use crate::state::GameState;
 use crate::eval::{self, Trace};
+use crate::state::GameState;
 use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::Ordering;
@@ -60,19 +60,25 @@ pub fn run_tuning() {
 
             for &(idx, count) in &entry.trace.terms {
                 if idx < params.len() {
-                    if idx < 6 { mg_score += params[idx].val * count as f64; }
-                    else if idx < 12 { eg_score += params[idx].val * count as f64; }
-                    else {
+                    if idx < 6 {
+                        mg_score += params[idx].val * count as f64;
+                    } else if idx < 12 {
+                        eg_score += params[idx].val * count as f64;
+                    } else {
                         let relative = idx - 12;
                         let block_offset = relative % 128;
-                        if block_offset < 64 { mg_score += params[idx].val * count as f64; }
-                        else { eg_score += params[idx].val * count as f64; }
+                        if block_offset < 64 {
+                            mg_score += params[idx].val * count as f64;
+                        } else {
+                            eg_score += params[idx].val * count as f64;
+                        }
                     }
                 }
             }
 
             for p in 0..6 {
-                let c = (entry.state.bitboards[p] | entry.state.bitboards[p+6]).count_bits() as i32;
+                let c =
+                    (entry.state.bitboards[p] | entry.state.bitboards[p + 6]).count_bits() as i32;
                 phase += c * eval::PHASE_WEIGHTS[p];
             }
             phase = phase.clamp(0, 24);
@@ -90,13 +96,18 @@ pub fn run_tuning() {
                 let eg_weight = (24 - phase) as f64 / 24.0;
                 let local_grad = gradient_term * count as f64;
 
-                if idx < 6 { gradients[idx] += local_grad * mg_weight; }
-                else if idx < 12 { gradients[idx] += local_grad * eg_weight; }
-                else {
-                     let relative = idx - 12;
-                     let block_offset = relative % 128;
-                     if block_offset < 64 { gradients[idx] += local_grad * mg_weight; }
-                     else { gradients[idx] += local_grad * eg_weight; }
+                if idx < 6 {
+                    gradients[idx] += local_grad * mg_weight;
+                } else if idx < 12 {
+                    gradients[idx] += local_grad * eg_weight;
+                } else {
+                    let relative = idx - 12;
+                    let block_offset = relative % 128;
+                    if block_offset < 64 {
+                        gradients[idx] += local_grad * mg_weight;
+                    } else {
+                        gradients[idx] += local_grad * eg_weight;
+                    }
                 }
             }
 
@@ -123,12 +134,34 @@ pub fn run_tuning() {
 fn init_parameters() -> Vec<Parameter> {
     let mut params = Vec::new();
     // Use Relaxed loading from Atomics
-    for i in 0..6 { params.push(Parameter { val: eval::MG_VALS[i].load(Ordering::Relaxed) as f64, ptype: ParamType::MaterialMG(i) }); }
-    for i in 0..6 { params.push(Parameter { val: eval::EG_VALS[i].load(Ordering::Relaxed) as f64, ptype: ParamType::MaterialEG(i) }); }
+    for i in 0..6 {
+        params.push(Parameter {
+            val: eval::MG_VALS[i].load(Ordering::Relaxed) as f64,
+            ptype: ParamType::MaterialMG(i),
+        });
+    }
+    for i in 0..6 {
+        params.push(Parameter {
+            val: eval::EG_VALS[i].load(Ordering::Relaxed) as f64,
+            ptype: ParamType::MaterialEG(i),
+        });
+    }
 
-    let mut add_table = |mg_table: &[std::sync::atomic::AtomicI32; 64], eg_table: &[std::sync::atomic::AtomicI32; 64], piece_idx: usize| {
-            for sq in 0..64 { params.push(Parameter { val: mg_table[sq].load(Ordering::Relaxed) as f64, ptype: ParamType::PsqtMG(piece_idx, sq) }); }
-            for sq in 0..64 { params.push(Parameter { val: eg_table[sq].load(Ordering::Relaxed) as f64, ptype: ParamType::PsqtEG(piece_idx, sq) }); }
+    let mut add_table = |mg_table: &[std::sync::atomic::AtomicI32; 64],
+                         eg_table: &[std::sync::atomic::AtomicI32; 64],
+                         piece_idx: usize| {
+        for sq in 0..64 {
+            params.push(Parameter {
+                val: mg_table[sq].load(Ordering::Relaxed) as f64,
+                ptype: ParamType::PsqtMG(piece_idx, sq),
+            });
+        }
+        for sq in 0..64 {
+            params.push(Parameter {
+                val: eg_table[sq].load(Ordering::Relaxed) as f64,
+                ptype: ParamType::PsqtEG(piece_idx, sq),
+            });
+        }
     };
 
     add_table(&eval::MG_PAWN_TABLE, &eval::EG_PAWN_TABLE, 0);
@@ -144,20 +177,26 @@ fn load_entries(path: &str) -> Vec<TunerEntry> {
     let mut entries = Vec::new();
     if let Ok(file) = File::open(path) {
         for line in io::BufReader::new(file).lines().flatten() {
-             let parts: Vec<&str> = line.split(" c").collect();
-             if parts.len() < 2 { continue; }
-             let fen = parts[0];
-             let result_part = parts[1];
+            let parts: Vec<&str> = line.split(" c").collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let fen = parts[0];
+            let result_part = parts[1];
 
-             let result = if result_part.contains("\"1.0\"") { 1.0 }
-                          else if result_part.contains("\"0.5\"") { 0.5 }
-                          else { 0.0 };
+            let result = if result_part.contains("\"1.0\"") {
+                1.0
+            } else if result_part.contains("\"0.5\"") {
+                0.5
+            } else {
+                0.0
+            };
 
-             entries.push(TunerEntry {
-                 state: GameState::parse_fen(fen),
-                 result,
-                 trace: Trace::new(),
-             });
+            entries.push(TunerEntry {
+                state: GameState::parse_fen(fen),
+                result,
+                trace: Trace::new(),
+            });
         }
     }
     entries
@@ -169,31 +208,27 @@ fn save_parameters(params: &[Parameter]) {
         match p.ptype {
             ParamType::MaterialMG(i) => eval::MG_VALS[i].store(int_val, Ordering::Relaxed),
             ParamType::MaterialEG(i) => eval::EG_VALS[i].store(int_val, Ordering::Relaxed),
-            ParamType::PsqtMG(piece, sq) => {
-                match piece {
-                    0 => eval::MG_PAWN_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    1 => eval::MG_KNIGHT_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    2 => eval::MG_BISHOP_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    3 => eval::MG_ROOK_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    4 => eval::MG_QUEEN_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    5 => eval::MG_KING_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    _ => {}
-                }
+            ParamType::PsqtMG(piece, sq) => match piece {
+                0 => eval::MG_PAWN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                1 => eval::MG_KNIGHT_TABLE[sq].store(int_val, Ordering::Relaxed),
+                2 => eval::MG_BISHOP_TABLE[sq].store(int_val, Ordering::Relaxed),
+                3 => eval::MG_ROOK_TABLE[sq].store(int_val, Ordering::Relaxed),
+                4 => eval::MG_QUEEN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                5 => eval::MG_KING_TABLE[sq].store(int_val, Ordering::Relaxed),
+                _ => {}
             },
-            ParamType::PsqtEG(piece, sq) => {
-                match piece {
-                    0 => eval::EG_PAWN_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    1 => eval::EG_KNIGHT_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    2 => eval::EG_BISHOP_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    3 => eval::EG_ROOK_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    4 => eval::EG_QUEEN_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    5 => eval::EG_KING_TABLE[sq].store(int_val, Ordering::Relaxed),
-                    _ => {}
-                }
+            ParamType::PsqtEG(piece, sq) => match piece {
+                0 => eval::EG_PAWN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                1 => eval::EG_KNIGHT_TABLE[sq].store(int_val, Ordering::Relaxed),
+                2 => eval::EG_BISHOP_TABLE[sq].store(int_val, Ordering::Relaxed),
+                3 => eval::EG_ROOK_TABLE[sq].store(int_val, Ordering::Relaxed),
+                4 => eval::EG_QUEEN_TABLE[sq].store(int_val, Ordering::Relaxed),
+                5 => eval::EG_KING_TABLE[sq].store(int_val, Ordering::Relaxed),
+                _ => {}
             },
         }
     }
-    
+
     // Printing is tricky with atomics, we need to load them first.
     // For simplicity, we just dump generic info.
     let mut file = File::create("tuned_params.txt").unwrap();

@@ -2,17 +2,25 @@
 #![allow(non_upper_case_globals)]
 
 use crate::bitboard::Bitboard;
+use crate::nnue::{make_index, Accumulator};
 use crate::zobrist;
-use crate::nnue::{Accumulator, make_halfkp_index};
 
-pub const P: usize = 0; pub const N: usize = 1; pub const B: usize = 2; 
-pub const R: usize = 3; pub const Q: usize = 4; pub const K: usize = 5;
-pub const p: usize = 6; pub const n: usize = 7; pub const b: usize = 8; 
-pub const r: usize = 9; pub const q: usize = 10; pub const k: usize = 11;
+pub const P: usize = 0;
+pub const N: usize = 1;
+pub const B: usize = 2;
+pub const R: usize = 3;
+pub const Q: usize = 4;
+pub const K: usize = 5;
+pub const p: usize = 6;
+pub const n: usize = 7;
+pub const b: usize = 8;
+pub const r: usize = 9;
+pub const q: usize = 10;
+pub const k: usize = 11;
 
 pub const WHITE: usize = 0;
 pub const BLACK: usize = 1;
-pub const BOTH:  usize = 2;
+pub const BOTH: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Move {
@@ -25,7 +33,7 @@ pub struct Move {
 #[derive(Debug, Clone, Copy)]
 pub struct GameState {
     pub bitboards: [Bitboard; 12],
-    pub occupancies: [Bitboard; 3], 
+    pub occupancies: [Bitboard; 3],
     pub side_to_move: usize,
     pub castling_rights: u8,
     pub en_passant: u8,
@@ -65,7 +73,9 @@ impl GameState {
             }
         }
         h ^= zobrist::castling_key(self.castling_rights);
-        if self.side_to_move == BLACK { h ^= zobrist::side_key(); }
+        if self.side_to_move == BLACK {
+            h ^= zobrist::side_key();
+        }
         if self.en_passant != 64 {
             let file = (self.en_passant % 8) as u8;
             h ^= zobrist::en_passant_key(file);
@@ -98,20 +108,36 @@ impl GameState {
         let mut file = 0;
 
         for char in board_part.chars() {
-            if char == '/' { rank -= 1; file = 0; }
-            else if char.is_digit(10) { file += char.to_digit(10).unwrap(); }
-            else {
+            if char == '/' {
+                rank -= 1;
+                file = 0;
+            } else if char.is_digit(10) {
+                file += char.to_digit(10).unwrap();
+            } else {
                 let square = rank * 8 + file;
                 let piece = match char {
-                    'P'=>P, 'N'=>N, 'B'=>B, 'R'=>R, 'Q'=>Q, 'K'=>K,
-                    'p'=>p, 'n'=>n, 'b'=>b, 'r'=>r, 'q'=>q, 'k'=>k, _=>0
+                    'P' => P,
+                    'N' => N,
+                    'B' => B,
+                    'R' => R,
+                    'Q' => Q,
+                    'K' => K,
+                    'p' => p,
+                    'n' => n,
+                    'b' => b,
+                    'r' => r,
+                    'q' => q,
+                    'k' => k,
+                    _ => 0,
                 };
                 state.bitboards[piece].set_bit(square as u8);
                 file += 1;
             }
         }
-        if parts[1] == "b" { state.side_to_move = BLACK; }
-        
+        if parts[1] == "b" {
+            state.side_to_move = BLACK;
+        }
+
         if parts[2] != "-" {
             for c in parts[2].chars() {
                 match c {
@@ -140,10 +166,14 @@ impl GameState {
             state.fullmove_number = parts[5].parse().unwrap_or(1);
         }
 
-        for piece in P..=K { state.occupancies[WHITE] = state.occupancies[WHITE] | state.bitboards[piece]; }
-        for piece in p..=k { state.occupancies[BLACK] = state.occupancies[BLACK] | state.bitboards[piece]; }
+        for piece in P..=K {
+            state.occupancies[WHITE] = state.occupancies[WHITE] | state.bitboards[piece];
+        }
+        for piece in p..=k {
+            state.occupancies[BLACK] = state.occupancies[BLACK] | state.bitboards[piece];
+        }
         state.occupancies[BOTH] = state.occupancies[WHITE] | state.occupancies[BLACK];
-        
+
         state.compute_hash();
         state
     }
@@ -156,28 +186,48 @@ impl GameState {
                 let sq = rank * 8 + file;
                 let mut piece_char = ' ';
 
-                if self.bitboards[P].get_bit(sq) { piece_char = 'P'; }
-                else if self.bitboards[N].get_bit(sq) { piece_char = 'N'; }
-                else if self.bitboards[B].get_bit(sq) { piece_char = 'B'; }
-                else if self.bitboards[R].get_bit(sq) { piece_char = 'R'; }
-                else if self.bitboards[Q].get_bit(sq) { piece_char = 'Q'; }
-                else if self.bitboards[K].get_bit(sq) { piece_char = 'K'; }
-                else if self.bitboards[p].get_bit(sq) { piece_char = 'p'; }
-                else if self.bitboards[n].get_bit(sq) { piece_char = 'n'; }
-                else if self.bitboards[b].get_bit(sq) { piece_char = 'b'; }
-                else if self.bitboards[r].get_bit(sq) { piece_char = 'r'; }
-                else if self.bitboards[q].get_bit(sq) { piece_char = 'q'; }
-                else if self.bitboards[k].get_bit(sq) { piece_char = 'k'; }
+                if self.bitboards[P].get_bit(sq) {
+                    piece_char = 'P';
+                } else if self.bitboards[N].get_bit(sq) {
+                    piece_char = 'N';
+                } else if self.bitboards[B].get_bit(sq) {
+                    piece_char = 'B';
+                } else if self.bitboards[R].get_bit(sq) {
+                    piece_char = 'R';
+                } else if self.bitboards[Q].get_bit(sq) {
+                    piece_char = 'Q';
+                } else if self.bitboards[K].get_bit(sq) {
+                    piece_char = 'K';
+                } else if self.bitboards[p].get_bit(sq) {
+                    piece_char = 'p';
+                } else if self.bitboards[n].get_bit(sq) {
+                    piece_char = 'n';
+                } else if self.bitboards[b].get_bit(sq) {
+                    piece_char = 'b';
+                } else if self.bitboards[r].get_bit(sq) {
+                    piece_char = 'r';
+                } else if self.bitboards[q].get_bit(sq) {
+                    piece_char = 'q';
+                } else if self.bitboards[k].get_bit(sq) {
+                    piece_char = 'k';
+                }
 
                 if piece_char == ' ' {
                     empty += 1;
                 } else {
-                    if empty > 0 { fen.push_str(&empty.to_string()); empty = 0; }
+                    if empty > 0 {
+                        fen.push_str(&empty.to_string());
+                        empty = 0;
+                    }
                     fen.push(piece_char);
                 }
             }
-            if empty > 0 { fen.push_str(&empty.to_string()); }
-            if rank > 0 { fen.push('/'); }
+            if empty > 0 {
+                fen.push_str(&empty.to_string());
+            }
+            if rank > 0 {
+                fen.push('/');
+            }
         }
 
         fen.push(' ');
@@ -185,24 +235,38 @@ impl GameState {
         fen.push(' ');
 
         let mut rights = String::new();
-        if (self.castling_rights & 1) != 0 { rights.push('K'); }
-        if (self.castling_rights & 2) != 0 { rights.push('Q'); }
-        if (self.castling_rights & 4) != 0 { rights.push('k'); }
-        if (self.castling_rights & 8) != 0 { rights.push('q'); }
-        if rights.is_empty() { rights.push('-'); }
+        if (self.castling_rights & 1) != 0 {
+            rights.push('K');
+        }
+        if (self.castling_rights & 2) != 0 {
+            rights.push('Q');
+        }
+        if (self.castling_rights & 4) != 0 {
+            rights.push('k');
+        }
+        if (self.castling_rights & 8) != 0 {
+            rights.push('q');
+        }
+        if rights.is_empty() {
+            rights.push('-');
+        }
         fen.push_str(&rights);
 
         fen.push(' ');
         if self.en_passant != 64 {
             let f = (b'a' + (self.en_passant % 8)) as char;
             let rank_char = (b'1' + (self.en_passant / 8)) as char;
-            fen.push(f); fen.push(rank_char);
+            fen.push(f);
+            fen.push(rank_char);
         } else {
             fen.push('-');
         }
 
         // CHANGE: Use real fullmove number
-        fen.push_str(&format!(" {} {}", self.halfmove_clock, self.fullmove_number));
+        fen.push_str(&format!(
+            " {} {}",
+            self.halfmove_clock, self.fullmove_number
+        ));
         fen
     }
 
@@ -218,7 +282,9 @@ impl GameState {
         new_state.halfmove_clock = 0;
 
         // CHANGE: Increment fullmove after Black moves
-        if self.side_to_move == BLACK { new_state.fullmove_number += 1; }
+        if self.side_to_move == BLACK {
+            new_state.fullmove_number += 1;
+        }
 
         new_state.dirty = self.dirty;
         new_state
@@ -227,14 +293,16 @@ impl GameState {
     pub fn make_move(&self, mv: Move) -> GameState {
         let mut new_state = *self;
         let side = self.side_to_move;
-        
-        if side == BLACK { new_state.fullmove_number += 1; }
+
+        if side == BLACK {
+            new_state.fullmove_number += 1;
+        }
 
         new_state.halfmove_clock += 1;
 
         let mut piece_type = 12;
         let start_range = if side == WHITE { P } else { p };
-        let end_range   = if side == WHITE { K } else { k };
+        let end_range = if side == WHITE { K } else { k };
 
         // Identify moving piece
         for pp in start_range..=end_range {
@@ -253,29 +321,25 @@ impl GameState {
         let mut w_removed = smallvec::SmallVec::<[usize; 8]>::new();
         let mut b_added = smallvec::SmallVec::<[usize; 8]>::new();
         let mut b_removed = smallvec::SmallVec::<[usize; 8]>::new();
-        let mut w_dirty = self.dirty[0];
-        let mut b_dirty = self.dirty[1];
+        let w_dirty = self.dirty[0];
+        let b_dirty = self.dirty[1];
 
         // Helper to queue updates
         let mut queue_update = |piece: usize, sq: usize, is_add: bool| {
             // White Perspective
-            if piece == K {
-                 w_dirty = true;
+            let idx = make_index(WHITE, piece, sq);
+            if is_add {
+                w_added.push(idx);
             } else {
-                 let k_sq = self.bitboards[K].get_lsb_index() as usize;
-                 if let Some(idx) = make_halfkp_index(WHITE, k_sq, piece, sq) {
-                     if is_add { w_added.push(idx); } else { w_removed.push(idx); }
-                 }
+                w_removed.push(idx);
             }
 
             // Black Perspective
-            if piece == k {
-                 b_dirty = true;
+            let idx = make_index(BLACK, piece, sq);
+            if is_add {
+                b_added.push(idx);
             } else {
-                 let k_sq = self.bitboards[k].get_lsb_index() as usize;
-                 if let Some(idx) = make_halfkp_index(BLACK, k_sq, piece, sq) {
-                     if is_add { b_added.push(idx); } else { b_removed.push(idx); }
-                 }
+                b_removed.push(idx);
             }
         };
 
@@ -285,12 +349,16 @@ impl GameState {
         // 2. Remove Captured Piece (if any)
         if mv.is_capture {
             let enemy_start = if side == WHITE { p } else { P };
-            let enemy_end   = if side == WHITE { k } else { K };
+            let enemy_end = if side == WHITE { k } else { K };
             let mut captured_piece = 12;
             let mut capture_sq = mv.target;
 
             if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
-                capture_sq = if side == WHITE { mv.target - 8 } else { mv.target + 8 };
+                capture_sq = if side == WHITE {
+                    mv.target - 8
+                } else {
+                    mv.target + 8
+                };
                 captured_piece = if side == WHITE { p } else { P };
             } else {
                 for pp in enemy_start..=enemy_end {
@@ -307,7 +375,11 @@ impl GameState {
 
         // 3. Add Moving Piece to Target (Handle Promotion)
         let final_piece = if let Some(promo) = mv.promotion {
-            if side == WHITE { promo } else { promo + 6 }
+            if side == WHITE {
+                promo
+            } else {
+                promo + 6
+            }
         } else {
             piece_type
         };
@@ -315,10 +387,15 @@ impl GameState {
 
         // 4. Handle Castling (Rook Move)
         if (piece_type == K || piece_type == k) && (mv.target as i8 - mv.source as i8).abs() == 2 {
-            let (rook_src, rook_dst) = if mv.target == 6 { (7, 5) }
-            else if mv.target == 2 { (0, 3) }
-            else if mv.target == 62 { (63, 61) }
-            else { (56, 59) }; // target == 58
+            let (rook_src, rook_dst) = if mv.target == 6 {
+                (7, 5)
+            } else if mv.target == 2 {
+                (0, 3)
+            } else if mv.target == 62 {
+                (63, 61)
+            } else {
+                (56, 59)
+            }; // target == 58
 
             let rook_piece = if side == WHITE { R } else { r };
             queue_update(rook_piece, rook_src, false);
@@ -326,8 +403,12 @@ impl GameState {
         }
 
         // Apply Updates
-        if !w_dirty { new_state.accumulator[WHITE].update(&w_added, &w_removed); }
-        if !b_dirty { new_state.accumulator[BLACK].update(&b_added, &b_removed); }
+        if !w_dirty {
+            new_state.accumulator[WHITE].update(&w_added, &w_removed);
+        }
+        if !b_dirty {
+            new_state.accumulator[BLACK].update(&b_added, &b_removed);
+        }
         new_state.dirty = [w_dirty, b_dirty];
 
         // --- END NNUE UPDATE ---
@@ -340,10 +421,14 @@ impl GameState {
 
         if mv.is_capture {
             let enemy_start = if side == WHITE { p } else { P };
-            let enemy_end   = if side == WHITE { k } else { K };
+            let enemy_end = if side == WHITE { k } else { K };
 
             if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
-                let cap_sq = if side == WHITE { mv.target - 8 } else { mv.target + 8 };
+                let cap_sq = if side == WHITE {
+                    mv.target - 8
+                } else {
+                    mv.target + 8
+                };
                 let enemy_pawn = if side == WHITE { p } else { P };
                 new_state.bitboards[enemy_pawn].pop_bit(cap_sq);
                 new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
@@ -369,20 +454,25 @@ impl GameState {
 
         if (piece_type == K || piece_type == k) && (mv.target as i8 - mv.source as i8).abs() == 2 {
             if mv.target == 6 {
-                new_state.bitboards[R].pop_bit(7); new_state.hash ^= zobrist::piece_key(R, 7);
-                new_state.bitboards[R].set_bit(5); new_state.hash ^= zobrist::piece_key(R, 5);
-            }
-            else if mv.target == 2 {
-                new_state.bitboards[R].pop_bit(0); new_state.hash ^= zobrist::piece_key(R, 0);
-                new_state.bitboards[R].set_bit(3); new_state.hash ^= zobrist::piece_key(R, 3);
-            }
-            else if mv.target == 62 {
-                new_state.bitboards[r].pop_bit(63); new_state.hash ^= zobrist::piece_key(r, 63);
-                new_state.bitboards[r].set_bit(61); new_state.hash ^= zobrist::piece_key(r, 61);
-            }
-            else if mv.target == 58 {
-                new_state.bitboards[r].pop_bit(56); new_state.hash ^= zobrist::piece_key(r, 56);
-                new_state.bitboards[r].set_bit(59); new_state.hash ^= zobrist::piece_key(r, 59);
+                new_state.bitboards[R].pop_bit(7);
+                new_state.hash ^= zobrist::piece_key(R, 7);
+                new_state.bitboards[R].set_bit(5);
+                new_state.hash ^= zobrist::piece_key(R, 5);
+            } else if mv.target == 2 {
+                new_state.bitboards[R].pop_bit(0);
+                new_state.hash ^= zobrist::piece_key(R, 0);
+                new_state.bitboards[R].set_bit(3);
+                new_state.hash ^= zobrist::piece_key(R, 3);
+            } else if mv.target == 62 {
+                new_state.bitboards[r].pop_bit(63);
+                new_state.hash ^= zobrist::piece_key(r, 63);
+                new_state.bitboards[r].set_bit(61);
+                new_state.hash ^= zobrist::piece_key(r, 61);
+            } else if mv.target == 58 {
+                new_state.bitboards[r].pop_bit(56);
+                new_state.hash ^= zobrist::piece_key(r, 56);
+                new_state.bitboards[r].set_bit(59);
+                new_state.hash ^= zobrist::piece_key(r, 59);
             }
         }
 
@@ -395,7 +485,11 @@ impl GameState {
         if piece_type == P || piece_type == p {
             let diff = (mv.target as i8 - mv.source as i8).abs();
             if diff == 16 {
-                let ep_sq = if side == WHITE { mv.target - 8 } else { mv.target + 8 };
+                let ep_sq = if side == WHITE {
+                    mv.target - 8
+                } else {
+                    mv.target + 8
+                };
                 new_state.en_passant = ep_sq;
                 new_state.hash ^= zobrist::en_passant_key((ep_sq % 8) as u8);
             }
@@ -403,14 +497,26 @@ impl GameState {
 
         new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
 
-        if piece_type == K { new_state.castling_rights &= !3; }
-        if piece_type == k { new_state.castling_rights &= !12; }
+        if piece_type == K {
+            new_state.castling_rights &= !3;
+        }
+        if piece_type == k {
+            new_state.castling_rights &= !12;
+        }
 
-        if mv.source == 7 || mv.target == 7 { new_state.castling_rights &= !1; }
-        if mv.source == 0 || mv.target == 0 { new_state.castling_rights &= !2; }
+        if mv.source == 7 || mv.target == 7 {
+            new_state.castling_rights &= !1;
+        }
+        if mv.source == 0 || mv.target == 0 {
+            new_state.castling_rights &= !2;
+        }
 
-        if mv.source == 63 || mv.target == 63 { new_state.castling_rights &= !4; }
-        if mv.source == 56 || mv.target == 56 { new_state.castling_rights &= !8; }
+        if mv.source == 63 || mv.target == 63 {
+            new_state.castling_rights &= !4;
+        }
+        if mv.source == 56 || mv.target == 56 {
+            new_state.castling_rights &= !8;
+        }
 
         new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
 
@@ -418,8 +524,12 @@ impl GameState {
         new_state.hash ^= zobrist::side_key();
 
         new_state.occupancies = [Bitboard(0); 3];
-        for pp in P..=K { new_state.occupancies[WHITE] = new_state.occupancies[WHITE] | new_state.bitboards[pp]; }
-        for pp in p..=k { new_state.occupancies[BLACK] = new_state.occupancies[BLACK] | new_state.bitboards[pp]; }
+        for pp in P..=K {
+            new_state.occupancies[WHITE] = new_state.occupancies[WHITE] | new_state.bitboards[pp];
+        }
+        for pp in p..=k {
+            new_state.occupancies[BLACK] = new_state.occupancies[BLACK] | new_state.bitboards[pp];
+        }
         new_state.occupancies[BOTH] = new_state.occupancies[WHITE] | new_state.occupancies[BLACK];
 
         new_state

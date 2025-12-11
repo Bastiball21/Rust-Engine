@@ -1,6 +1,6 @@
 // src/pawn.rs
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
-use crate::state::{GameState, WHITE, BLACK, P, p};
+use crate::state::{p, GameState, BLACK, P, WHITE};
 use std::sync::RwLock;
 
 const PAWN_HASH_SIZE: usize = 16384;
@@ -53,7 +53,10 @@ impl PawnTable {
     }
 
     fn evaluate_structure(&self, state: &GameState) -> PawnEntry {
-        let mut entry = PawnEntry { key: state.hash, ..Default::default() };
+        let mut entry = PawnEntry {
+            key: state.hash,
+            ..Default::default()
+        };
         let w_pawns = state.bitboards[P];
         let b_pawns = state.bitboards[p];
 
@@ -69,19 +72,22 @@ impl PawnTable {
 
             // Connected
             if entry.pawn_attacks[WHITE].get_bit(sq as u8) {
-                entry.score_mg += 10; entry.score_eg += 15;
+                entry.score_mg += 10;
+                entry.score_eg += 15;
             }
 
             // Isolated
             let file_mask = bitboard::file_mask(sq);
             let adj_mask = ((file_mask.0 << 1) & !FILE_A) | ((file_mask.0 >> 1) & !FILE_H);
             if (w_pawns.0 & adj_mask) == 0 {
-                entry.score_mg -= 15; entry.score_eg -= 20;
+                entry.score_mg -= 15;
+                entry.score_eg -= 20;
             }
 
             // Doubled
             if (w_pawns.0 & file_mask.0).count_ones() > 1 {
-                entry.score_mg -= 10; entry.score_eg -= 15;
+                entry.score_mg -= 10;
+                entry.score_eg -= 15;
             }
 
             // Passed
@@ -103,17 +109,20 @@ impl PawnTable {
             let rel_rank = 7 - rank;
 
             if entry.pawn_attacks[BLACK].get_bit(sq as u8) {
-                entry.score_mg -= 10; entry.score_eg -= 15;
+                entry.score_mg -= 10;
+                entry.score_eg -= 15;
             }
 
             let file_mask = bitboard::file_mask(sq);
             let adj_mask = ((file_mask.0 << 1) & !FILE_A) | ((file_mask.0 >> 1) & !FILE_H);
             if (b_pawns.0 & adj_mask) == 0 {
-                entry.score_mg += 15; entry.score_eg += 20;
+                entry.score_mg += 15;
+                entry.score_eg += 20;
             }
 
             if (b_pawns.0 & file_mask.0).count_ones() > 1 {
-                entry.score_mg += 10; entry.score_eg += 15;
+                entry.score_mg += 10;
+                entry.score_eg += 15;
             }
 
             let passed_mask = bitboard::passed_pawn_mask(BLACK, sq);

@@ -1,5 +1,5 @@
-use crate::state::{GameState, WHITE, K, k};
-use crate::movegen::{MoveGenerator, is_square_attacked};
+use crate::movegen::{is_square_attacked, MoveGenerator};
+use crate::state::{k, GameState, K, WHITE};
 use std::time::Instant;
 
 pub fn run_perft_suite() {
@@ -9,27 +9,27 @@ pub fn run_perft_suite() {
         (
             "Start Position",
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            [1, 20, 400, 8902, 197281, 4865609] // Depths 0-5
+            [1, 20, 400, 8902, 197281, 4865609], // Depths 0-5
         ),
         (
             "Position 2 (Kiwipete)",
             "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-            [1, 48, 2039, 97862, 4085603, 193690690]
+            [1, 48, 2039, 97862, 4085603, 193690690],
         ),
         (
             "Position 3",
             "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
-            [1, 14, 191, 2812, 43238, 674624]
+            [1, 14, 191, 2812, 43238, 674624],
         ),
         (
             "Position 4 (Passer/En Passant)",
             "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
-            [1, 6, 264, 9467, 422333, 15833292]
+            [1, 6, 264, 9467, 422333, 15833292],
         ),
         (
             "Position 5 (Mirrored Mate)",
             "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
-            [1, 44, 1486, 62379, 2103487, 89941194]
+            [1, 44, 1486, 62379, 2103487, 89941194],
         ),
     ];
 
@@ -42,7 +42,9 @@ pub fn run_perft_suite() {
 
         // Run Depth 5 (or 4 if 5 is too slow for quick tests)
         let depth = 5;
-        if expected.len() <= depth { continue; }
+        if expected.len() <= depth {
+            continue;
+        }
 
         let start = Instant::now();
         let nodes = perft(&mut state, depth as u8);
@@ -66,12 +68,17 @@ pub fn run_perft_suite() {
     println!("\n--- SUITE COMPLETE ---");
     println!("Total Nodes: {}", total_nodes);
     println!("Total Time:  {}ms", total_time);
-    println!("NPS:         {}", (total_nodes as u128 * 1000) / (total_time.max(1)));
+    println!(
+        "NPS:         {}",
+        (total_nodes as u128 * 1000) / (total_time.max(1))
+    );
 }
 
 // Recursive perft function
 pub fn perft(state: &GameState, depth: u8) -> u64 {
-    if depth == 0 { return 1; }
+    if depth == 0 {
+        return 1;
+    }
 
     let mut nodes = 0;
     let mut generator = MoveGenerator::new();
@@ -111,7 +118,8 @@ pub fn perft_divide(state: &GameState, depth: u8) {
 
         if !is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
             let count = perft(&next_state, depth - 1);
-            println!("{}{}: {}",
+            println!(
+                "{}{}: {}",
                 crate::search::square_to_coord(mv.source),
                 crate::search::square_to_coord(mv.target),
                 count

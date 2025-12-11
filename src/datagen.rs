@@ -1,22 +1,27 @@
 // src/datagen.rs
-use crate::state::{GameState, WHITE};
 use crate::search;
+use crate::state::{GameState, WHITE};
+use crate::time::{TimeControl, TimeManager};
 use crate::tt::TranspositionTable;
-use crate::time::{TimeManager, TimeControl};
-use std::sync::{Arc, atomic::AtomicBool};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::{atomic::AtomicBool, Arc};
 
 pub fn run_datagen(games: usize) {
     println!("Starting Datagen for {} games at Depth 6...", games);
-    let mut file = OpenOptions::new().create(true).append(true).open("aether_data.txt").unwrap();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("aether_data.txt")
+        .unwrap();
 
     // 64MB TT is good for Depth 6
     let mut tt = TranspositionTable::new(64);
     let stop = Arc::new(AtomicBool::new(false));
 
     for i in 0..games {
-        let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let mut state =
+            GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         let mut fens = Vec::new();
         let result_val;
 
@@ -27,7 +32,11 @@ pub fn run_datagen(games: usize) {
             // 1. Check Game Over
             if moves.list.count == 0 {
                 if crate::search::is_in_check(&state) {
-                    result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
+                    result_val = if state.side_to_move == WHITE {
+                        0.0
+                    } else {
+                        1.0
+                    };
                 } else {
                     result_val = 0.5;
                 }
@@ -46,7 +55,8 @@ pub fn run_datagen(games: usize) {
             search::search(&state, tm, &tt, stop.clone(), depth, false, vec![]);
 
             // 3. Get Score & Best Move
-            let (tt_score, _, _, best_move_opt) = tt.probe_data(state.hash).unwrap_or((0, 0, 0, None));
+            let (tt_score, _, _, best_move_opt) =
+                tt.probe_data(state.hash).unwrap_or((0, 0, 0, None));
             let best_move = best_move_opt.unwrap_or(moves.list.moves[0]);
 
             // --- CRITICAL FIX: ADJUDICATION ---
@@ -54,17 +64,29 @@ pub fn run_datagen(games: usize) {
             if tt_score.abs() > 20000 {
                 if tt_score > 0 {
                     // Positive score = Current side is winning
-                    result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
+                    result_val = if state.side_to_move == WHITE {
+                        1.0
+                    } else {
+                        0.0
+                    };
                 } else {
                     // Negative score = Current side is losing
-                    result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
+                    result_val = if state.side_to_move == WHITE {
+                        0.0
+                    } else {
+                        1.0
+                    };
                 }
                 break;
             }
             // ----------------------------------
 
             // Save Data: FEN | SCORE | RESULT
-            let white_relative_score = if state.side_to_move == WHITE { tt_score } else { -tt_score };
+            let white_relative_score = if state.side_to_move == WHITE {
+                tt_score
+            } else {
+                -tt_score
+            };
 
             if state.fullmove_number > 8 {
                 fens.push(format!("{} | {} | ", state.to_fen(), white_relative_score));
@@ -79,7 +101,12 @@ pub fn run_datagen(games: usize) {
         }
 
         // Print progress
-        println!("Generated game {} / {} (Result: {})", i+1, games, result_val);
+        println!(
+            "Generated game {} / {} (Result: {})",
+            i + 1,
+            games,
+            result_val
+        );
 
         tt.clear();
     }

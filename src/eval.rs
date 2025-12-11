@@ -1,10 +1,10 @@
 // src/eval.rs
-use crate::state::{GameState, WHITE, BLACK, BOTH, P, N, B, R, Q, K, p, n, b, r, q, k};
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
-use crate::pawn::PawnTable;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicI32, Ordering};
 use crate::nnue::{self, NNUE};
+use crate::pawn::PawnTable;
+use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::OnceLock;
 
 // --- MACRO FOR ATOMIC ARRAYS ---
 macro_rules! a { ($($x:expr),*) => { [ $(AtomicI32::new($x)),* ] } }
@@ -19,7 +19,7 @@ pub const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
 pub const TOTAL_PHASE: i32 = 24;
 
 // King Safety Weights
-pub const KING_TROPISM_PENALTY: [i32; 8] = [ 10, 8, 5, 2, 0, 0, 0, 0 ];
+pub const KING_TROPISM_PENALTY: [i32; 8] = [10, 8, 5, 2, 0, 0, 0, 0];
 pub const SHIELD_MISSING_PENALTY: i32 = -20;
 pub const SHIELD_OPEN_FILE_PENALTY: i32 = -30;
 pub const SAFE_CHECK_BONUS: i32 = 15;
@@ -60,7 +60,11 @@ pub struct Trace {
 
 impl Trace {
     pub fn new() -> Self {
-        Self { terms: Vec::with_capacity(64), fixed_mg: 0, fixed_eg: 0 }
+        Self {
+            terms: Vec::with_capacity(64),
+            fixed_mg: 0,
+            fixed_eg: 0,
+        }
     }
 
     #[inline(always)]
@@ -78,14 +82,8 @@ pub fn init_eval() {
 
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState) -> i32 {
-    // 1. NNUE (If available)
-    if let Ok(guard) = NNUE.read() {
-        if guard.is_some() {
-            return evaluate_nnue(state);
-        }
-    }
-    // 2. HCE Fallback
-    evaluate_hce(state)
+    // 1. NNUE (Always available now)
+    evaluate_nnue(state)
 }
 
 // --- HCE LOGIC ---
@@ -102,7 +100,7 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     // B. Phase Calculation
     for i in 0..6 {
         let w_cnt = state.bitboards[i].count_bits() as i32;
-        let b_cnt = state.bitboards[i+6].count_bits() as i32;
+        let b_cnt = state.bitboards[i + 6].count_bits() as i32;
         phase += (w_cnt + b_cnt) * PHASE_WEIGHTS[i];
     }
 
@@ -125,11 +123,15 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     // E. Scaling
     let phase = phase.clamp(0, 24);
     let mut score = (mg * phase + eg * (24 - phase)) / 24;
-    
+
     let scale = crate::endgame::get_scale_factor(state, score);
     score = (score * scale) / 128;
 
-    if state.side_to_move == WHITE { score } else { -score }
+    if state.side_to_move == WHITE {
+        score
+    } else {
+        -score
+    }
 }
 
 fn evaluate_fixed(state: &GameState) -> (i32, i32) {
@@ -139,13 +141,15 @@ fn evaluate_fixed(state: &GameState) -> (i32, i32) {
     for piece in 0..6 {
         let mut bb = state.bitboards[piece];
         while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize; bb.pop_bit(sq as u8);
+            let sq = bb.get_lsb_index() as usize;
+            bb.pop_bit(sq as u8);
             mg += MG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, WHITE, true);
             eg += EG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, WHITE, false);
         }
-        let mut bb = state.bitboards[piece+6];
+        let mut bb = state.bitboards[piece + 6];
         while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize; bb.pop_bit(sq as u8);
+            let sq = bb.get_lsb_index() as usize;
+            bb.pop_bit(sq as u8);
             mg -= MG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, BLACK, true);
             eg -= EG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, BLACK, false);
         }
@@ -156,13 +160,49 @@ fn evaluate_fixed(state: &GameState) -> (i32, i32) {
 fn get_pst(piece: usize, sq: usize, side: usize, is_mg: bool) -> i32 {
     let index = if side == WHITE { sq ^ 56 } else { sq };
     match piece {
-        P => if is_mg { MG_PAWN_TABLE[index].load(Ordering::Relaxed) } else { EG_PAWN_TABLE[index].load(Ordering::Relaxed) },
-        N => if is_mg { MG_KNIGHT_TABLE[index].load(Ordering::Relaxed) } else { EG_KNIGHT_TABLE[index].load(Ordering::Relaxed) },
-        B => if is_mg { MG_BISHOP_TABLE[index].load(Ordering::Relaxed) } else { EG_BISHOP_TABLE[index].load(Ordering::Relaxed) },
-        R => if is_mg { MG_ROOK_TABLE[index].load(Ordering::Relaxed) } else { EG_ROOK_TABLE[index].load(Ordering::Relaxed) },
-        Q => if is_mg { MG_QUEEN_TABLE[index].load(Ordering::Relaxed) } else { EG_QUEEN_TABLE[index].load(Ordering::Relaxed) },
-        K => if is_mg { MG_KING_TABLE[index].load(Ordering::Relaxed) } else { EG_KING_TABLE[index].load(Ordering::Relaxed) },
-        _ => 0
+        P => {
+            if is_mg {
+                MG_PAWN_TABLE[index].load(Ordering::Relaxed)
+            } else {
+                EG_PAWN_TABLE[index].load(Ordering::Relaxed)
+            }
+        }
+        N => {
+            if is_mg {
+                MG_KNIGHT_TABLE[index].load(Ordering::Relaxed)
+            } else {
+                EG_KNIGHT_TABLE[index].load(Ordering::Relaxed)
+            }
+        }
+        B => {
+            if is_mg {
+                MG_BISHOP_TABLE[index].load(Ordering::Relaxed)
+            } else {
+                EG_BISHOP_TABLE[index].load(Ordering::Relaxed)
+            }
+        }
+        R => {
+            if is_mg {
+                MG_ROOK_TABLE[index].load(Ordering::Relaxed)
+            } else {
+                EG_ROOK_TABLE[index].load(Ordering::Relaxed)
+            }
+        }
+        Q => {
+            if is_mg {
+                MG_QUEEN_TABLE[index].load(Ordering::Relaxed)
+            } else {
+                EG_QUEEN_TABLE[index].load(Ordering::Relaxed)
+            }
+        }
+        K => {
+            if is_mg {
+                MG_KING_TABLE[index].load(Ordering::Relaxed)
+            } else {
+                EG_KING_TABLE[index].load(Ordering::Relaxed)
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -185,24 +225,30 @@ fn evaluate_mobility(state: &GameState, side: usize) -> (i32, i32) {
     for &(piece, idx) in &pieces {
         let mut bb = state.bitboards[piece];
         while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as u8; bb.pop_bit(sq);
+            let sq = bb.get_lsb_index() as u8;
+            bb.pop_bit(sq);
             let attacks = match idx {
                 0 => crate::movegen::get_knight_attacks(sq),
                 1 => bitboard::get_bishop_attacks(sq, both_bb),
                 2 => bitboard::get_rook_attacks(sq, both_bb),
                 3 => bitboard::get_queen_attacks(sq, both_bb),
-                _ => Bitboard(0)
+                _ => Bitboard(0),
             };
             let mob = (attacks & !us_bb).count_bits() as i32;
             let (offset, weight) = MOBILITY_BONUS[idx];
             let score = (mob - offset) * weight;
-            mg += score; eg += score;
+            mg += score;
+            eg += score;
         }
     }
     (mg, eg)
 }
 
-fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnEntry) -> (i32, i32) {
+fn evaluate_king(
+    state: &GameState,
+    side: usize,
+    pawn_entry: &crate::pawn::PawnEntry,
+) -> (i32, i32) {
     let mut mg = 0;
     let mut eg = 0;
     let king_pc = if side == WHITE { K } else { k };
@@ -210,8 +256,16 @@ fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnE
     let king_file = king_sq % 8;
     let king_rank = king_sq / 8;
 
-    let my_pawns = if side == WHITE { state.bitboards[P] } else { state.bitboards[p] };
-    let enemy_pawns = if side == WHITE { state.bitboards[p] } else { state.bitboards[P] };
+    let my_pawns = if side == WHITE {
+        state.bitboards[P]
+    } else {
+        state.bitboards[p]
+    };
+    let enemy_pawns = if side == WHITE {
+        state.bitboards[p]
+    } else {
+        state.bitboards[P]
+    };
 
     // 1. SHIELD
     if (side == WHITE && king_rank < 3) || (side == BLACK && king_rank > 4) {
@@ -221,14 +275,18 @@ fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnE
                 let file_mask = bitboard::file_mask(f as usize);
                 if (my_pawns.0 & file_mask.0).count_ones() == 0 {
                     mg += SHIELD_MISSING_PENALTY;
-                    if (enemy_pawns.0 & file_mask.0).count_ones() == 0 { mg += SHIELD_OPEN_FILE_PENALTY; }
+                    if (enemy_pawns.0 & file_mask.0).count_ones() == 0 {
+                        mg += SHIELD_OPEN_FILE_PENALTY;
+                    }
                 }
             }
         }
     }
 
     // 2. STORM
-    if pawn_entry.pawn_attacks[1 - side].get_bit(king_sq as u8) { mg -= 50; }
+    if pawn_entry.pawn_attacks[1 - side].get_bit(king_sq as u8) {
+        mg -= 50;
+    }
 
     // 3. TROPISM
     let enemy_start = if side == WHITE { n } else { N };
@@ -236,7 +294,8 @@ fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnE
     for pc in enemy_start..=enemy_end {
         let mut bb = state.bitboards[pc];
         while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize; bb.pop_bit(sq as u8);
+            let sq = bb.get_lsb_index() as usize;
+            bb.pop_bit(sq as u8);
             let dist_file = (king_file as i32 - (sq % 8) as i32).abs();
             let dist_rank = (king_rank as i32 - (sq / 8) as i32).abs();
             let dist = dist_file.max(dist_rank) as usize;
@@ -250,88 +309,27 @@ fn evaluate_king(state: &GameState, side: usize, pawn_entry: &crate::pawn::PawnE
 
 // --- NNUE ---
 pub fn evaluate_nnue(state: &GameState) -> i32 {
-    if let Ok(guard) = NNUE.read() {
-        if let Some(net) = guard.as_ref() {
-            // Need mutable access to accumulators, but GameState is immutable ref here.
-            // However, GameState contains `accumulator: [Accumulator; 2]` which is a plain struct.
-            // The `evaluate` signature is `&GameState`.
-            // Wait, if `state` is immutable, we cannot call `refresh` which is `&mut self`.
-            // But `accumulator` is refreshed *lazily* in the original code?
-            // "if state.dirty { acc_us.refresh ... }"
-            // Original code: `let mut acc_us = state.accumulator[...]`.
-            // It was copying the accumulator! `Accumulator` is `Copy`.
-            // So `acc_us` was a local copy. Refreshing it locally did NOT update the state.
-            // THIS WAS THE PERFORMANCE BUG!
-            // It was doing a full refresh on a local copy every time, essentially treating it as if it had no cache.
-            // AND the cache in `state` was never updated because `evaluate` takes `&GameState`.
+    // 1. Get Accumulators (Local Copies)
+    let mut acc_us = state.accumulator[state.side_to_move];
+    let mut acc_them = state.accumulator[1 - state.side_to_move];
 
-            // To fix this properly:
-            // 1. `make_move` now updates the accumulator in the new state.
-            // 2. `evaluate` should just USE the accumulator from the state.
-            // 3. If `dirty` is true (King move or initial), we must refresh.
-            //    But we can't update `state` because it's immutable.
-            //    So we refresh a local copy and use it.
-            //    This is unavoidable for `evaluate(&GameState)`.
-            //    BUT since we now update incrementally in `make_move`, `dirty` will be false 95% of the time!
-            //    So we just use `state.accumulator`.
-
-            let mut acc_us = state.accumulator[state.side_to_move];
-            let mut acc_them = state.accumulator[1 - state.side_to_move];
-
-            if state.dirty[state.side_to_move] {
-                acc_us.refresh(state, state.side_to_move);
-            }
-            if state.dirty[1 - state.side_to_move] {
-                acc_them.refresh(state, 1 - state.side_to_move);
-            }
-
-            // Check if AVX2 is available via crate feature or architecture
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                let score = nnue::evaluate_nnue_avx2(&acc_us, &acc_them, net);
-                return if state.side_to_move == WHITE { score } else { -score };
-            }
-
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-            {
-                // Fallback (Original Slow Code)
-                // Note: Accumulators are already refreshed above (acc_us, acc_them)
-
-                let mut input = [0i8; 512];
-                for i in 0..256 {
-                    input[i] = acc_us.v[i].clamp(0, 255) as i8;
-                    input[256 + i] = acc_them.v[i].clamp(0, 255) as i8;
-                }
-
-                let mut layer1_out = [0i8; 32];
-                for i in 0..32 {
-                    let mut sum = net.layer1_biases[i];
-                    for j in 0..512 {
-                        sum += (input[j] as i32) * (net.layer1_weights[i * 512 + j] as i32);
-                    }
-                    layer1_out[i] = (sum >> 6).clamp(0, 255) as i8;
-                }
-
-                let mut layer2_out = [0i8; 32];
-                for i in 0..32 {
-                    let mut sum = net.layer2_biases[i];
-                    for j in 0..32 {
-                        sum += (layer1_out[j] as i32) * (net.layer2_weights[i * 32 + j] as i32);
-                    }
-                    layer2_out[i] = (sum >> 6).clamp(0, 255) as i8;
-                }
-
-                let mut sum = net.output_bias;
-                for j in 0..32 {
-                    sum += (layer2_out[j] as i32) * (net.output_weights[j] as i32);
-                }
-
-                let score = (sum / 64); // Removed +10 bias
-                return if state.side_to_move == WHITE { score } else { -score };
-            }
-        }
+    // 2. Refresh if dirty
+    // Since we are inside evaluate (immutable), we can only refresh the local copy.
+    // Efficiency Note: incremental updates in make_move should keep dirty=false mostly.
+    if state.dirty[state.side_to_move] {
+        acc_us.refresh(state, state.side_to_move);
     }
-    0
+    if state.dirty[1 - state.side_to_move] {
+        acc_them.refresh(state, 1 - state.side_to_move);
+    }
+
+    // 3. Evaluate
+    let score = nnue::evaluate_nnue(&acc_us, &acc_them);
+    if state.side_to_move == WHITE {
+        score
+    } else {
+        -score
+    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -345,7 +343,6 @@ unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
     let v32 = _mm_add_epi32(v64, _mm_shuffle_epi32(v64, 0b00_00_00_01));
     _mm_cvtsi128_si32(v32)
 }
-
 
 // --- TRACE (Required for Tuning) ---
 pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
