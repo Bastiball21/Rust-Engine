@@ -1,17 +1,12 @@
 // src/nnue.rs
-use std::fs::File;
-use std::io::{self, Read, BufReader};
-use std::path::PathBuf;
-use std::env;
 use std::sync::RwLock;
 
 // Architecture Constants
-pub const LAYER1_SIZE: usize = 256;
-pub const INPUT_SIZE: usize = 41024;
-pub const HIDDEN_SIZE: usize = 32;
+pub const LAYER1_SIZE: usize = 128; // Hidden size
+pub const INPUT_SIZE: usize = 768; // Input size (Chess768)
 
 // SAFE GLOBAL
-pub static NNUE: RwLock<Option<NnueWeights>> = RwLock::new(None);
+pub static NNUE: RwLock<NnueWeights> = RwLock::new(NnueWeights::new());
 
 #[derive(Clone, Copy, Debug)]
 #[repr(align(64))]
@@ -21,40 +16,26 @@ pub struct Accumulator {
 
 impl Accumulator {
     pub fn default() -> Self {
-        Accumulator { v: [0; LAYER1_SIZE] }
+        Accumulator {
+            v: [0; LAYER1_SIZE],
+        }
     }
 
     pub fn refresh(&mut self, state: &crate::state::GameState, perspective: usize) {
-        if let Ok(guard) = NNUE.read() {
-            if let Some(net) = guard.as_ref() {
-                // FIXED: Use Unaligned Store (storeu) to prevent stack misalignment crashes
-                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-                unsafe {
-                     use std::arch::x86_64::*;
-                     let dst = self.v.as_mut_ptr();
-                     let src = net.feature_biases.as_ptr();
-                     for i in (0..LAYER1_SIZE).step_by(16) {
-                         // loadu is safer for src (though heap is usually aligned)
-                         let reg = _mm256_loadu_si256(src.add(i) as *const __m256i);
-                         // storeu is CRITICAL for dst (stack memory)
-                         _mm256_storeu_si256(dst.add(i) as *mut __m256i, reg);
-                     }
-                }
-                #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-                self.v.copy_from_slice(&net.feature_biases);
+        let net = NNUE.read().unwrap();
 
-                let king_sq = state.bitboards[if perspective == crate::state::WHITE { crate::state::K } else { crate::state::k }].get_lsb_index() as usize;
+        // Initialize with biases
+        self.v.copy_from_slice(&net.feature_biases);
 
-                for piece in 0..12 {
-                    let mut bb = state.bitboards[piece];
-                    while bb.0 != 0 {
-                        let sq = bb.get_lsb_index() as usize;
-                        bb.pop_bit(sq as u8);
-                        if let Some(idx) = make_halfkp_index(perspective, king_sq, piece, sq) {
-                            self.add_feature(idx, net);
-                        }
-                    }
-                }
+        // Iterate all pieces
+        for piece in 0..12 {
+            let mut bb = state.bitboards[piece];
+            while bb.0 != 0 {
+                let sq = bb.get_lsb_index() as usize;
+                bb.pop_bit(sq as u8);
+
+                let idx = make_index(perspective, piece, sq);
+                self.add_feature(idx, &net);
             }
         }
     }
@@ -68,12 +49,9 @@ impl Accumulator {
             let dst = self.v.as_mut_ptr();
             let src = net.feature_weights.as_ptr().add(offset);
 
-            // Unroll loop 16 items (256 bits) at a time
             for i in (0..LAYER1_SIZE).step_by(16) {
-                // FIXED: Use loadu/storeu everywhere
                 let v_acc = _mm256_loadu_si256(dst.add(i) as *const __m256i);
                 let v_weight = _mm256_loadu_si256(src.add(i) as *const __m256i);
-
                 let v_sum = _mm256_add_epi16(v_acc, v_weight);
                 _mm256_storeu_si256(dst.add(i) as *mut __m256i, v_sum);
             }
@@ -94,12 +72,9 @@ impl Accumulator {
             let dst = self.v.as_mut_ptr();
             let src = net.feature_weights.as_ptr().add(offset);
 
-            // Unroll loop 16 items (256 bits) at a time
             for i in (0..LAYER1_SIZE).step_by(16) {
-                // FIXED: Use loadu/storeu everywhere
                 let v_acc = _mm256_loadu_si256(dst.add(i) as *const __m256i);
                 let v_weight = _mm256_loadu_si256(src.add(i) as *const __m256i);
-
                 let v_sub = _mm256_sub_epi16(v_acc, v_weight);
                 _mm256_storeu_si256(dst.add(i) as *mut __m256i, v_sub);
             }
@@ -112,21 +87,50 @@ impl Accumulator {
     }
 
     pub fn update(&mut self, added: &[usize], removed: &[usize]) {
-        if let Ok(guard) = NNUE.read() {
-            if let Some(net) = guard.as_ref() {
-                for &idx in removed {
-                    self.sub_feature(idx, net);
-                }
-                for &idx in added {
-                    self.add_feature(idx, net);
-                }
-            }
+        let net = NNUE.read().unwrap();
+        for &idx in removed {
+            self.sub_feature(idx, &net);
+        }
+        for &idx in added {
+            self.add_feature(idx, &net);
         }
     }
 }
 
 // --------------------------------------------------------
-// SIMD Inference Logic
+// Feature Indexer (Chess768)
+// --------------------------------------------------------
+
+pub fn make_index(perspective: usize, piece: usize, sq: usize) -> usize {
+    // piece: 0..11 (P, N, B, R, Q, K, p, n, b, r, q, k)
+    // sq: 0..63
+    // Perspective: WHITE=0, BLACK=1
+
+    let piece_color = if piece < 6 {
+        crate::state::WHITE
+    } else {
+        crate::state::BLACK
+    };
+    let piece_type = piece % 6; // 0..5 (P..K)
+
+    // Relative Square
+    let orient_sq = if perspective == crate::state::WHITE {
+        sq
+    } else {
+        sq ^ 56
+    };
+
+    // Feature Offset
+    // If piece_color == perspective -> Friendly (0..383)
+    // If piece_color != perspective -> Enemy (384..767)
+    let context_offset = if piece_color == perspective { 0 } else { 384 };
+
+    // Index = Context + PieceType * 64 + Square
+    context_offset + piece_type * 64 + orient_sq
+}
+
+// --------------------------------------------------------
+// SIMD Inference Logic (SCReLU)
 // --------------------------------------------------------
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -141,229 +145,179 @@ unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
     _mm_cvtsi128_si32(v32)
 }
 
-pub fn evaluate_nnue_avx2(acc_us: &Accumulator, acc_them: &Accumulator, net: &NnueWeights) -> i32 {
+pub fn evaluate_nnue(acc_us: &Accumulator, acc_them: &Accumulator) -> i32 {
+    let net = NNUE.read().unwrap();
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     unsafe {
-        let mut input = [0i8; 512];
-        let input_ptr = input.as_mut_ptr();
+        // SCReLU Implementation: (clamp(x, 0, 255)^2) / 255
+        let mut sum_vec = _mm256_setzero_si256();
 
-        // Clamp and Pack
-        for i in 0..256 {
-            *input_ptr.add(i) = acc_us.v[i].clamp(0, 255) as i8;
-            *input_ptr.add(256+i) = acc_them.v[i].clamp(0, 255) as i8;
+        // Process 'Us' (0..128)
+        for i in (0..LAYER1_SIZE).step_by(16) {
+            let v_us = _mm256_loadu_si256(acc_us.v.as_ptr().add(i) as *const __m256i);
+
+            // Clamp 0..255
+            let v_us_clamped = _mm256_max_epi16(v_us, _mm256_setzero_si256());
+            let v_us_clamped = _mm256_min_epi16(v_us_clamped, _mm256_set1_epi16(255));
+
+            // Square: (x * x)
+            let v_us_sq = _mm256_mullo_epi16(v_us_clamped, v_us_clamped);
+
+            let v_us_sq_lo = _mm256_unpacklo_epi16(v_us_sq, _mm256_setzero_si256());
+            let v_us_sq_hi = _mm256_unpackhi_epi16(v_us_sq, _mm256_setzero_si256());
+
+            // Divide by 255.0f
+            let v_inv_255 = _mm256_set1_ps(1.0 / 255.0);
+
+            let v_us_f_lo = _mm256_cvtepi32_ps(v_us_sq_lo);
+            let v_us_f_hi = _mm256_cvtepi32_ps(v_us_sq_hi);
+
+            let v_us_scaled_lo = _mm256_cvtps_epi32(_mm256_mul_ps(v_us_f_lo, v_inv_255));
+            let v_us_scaled_hi = _mm256_cvtps_epi32(_mm256_mul_ps(v_us_f_hi, v_inv_255));
+
+            let v_act = _mm256_packus_epi32(v_us_scaled_lo, v_us_scaled_hi);
+
+            // Multiply by L1 weights (Us: 0..128)
+            let w_us = _mm256_loadu_si256(net.output_weights.as_ptr().add(i) as *const __m256i);
+
+            let prod = _mm256_madd_epi16(v_act, w_us);
+            sum_vec = _mm256_add_epi32(sum_vec, prod);
         }
 
-        // --- LAYER 1 ---
-        let mut layer1_out = [0i8; 32];
+        // Process 'Them' (0..128)
+        for i in (0..LAYER1_SIZE).step_by(16) {
+            let v_them = _mm256_loadu_si256(acc_them.v.as_ptr().add(i) as *const __m256i);
 
-        for i in 0..32 {
-            let mut sum_vec = _mm256_setzero_si256();
-            let row_offset = i * 512;
-            let weights_ptr = net.layer1_weights.as_ptr().add(row_offset);
+            let v_clamped = _mm256_max_epi16(v_them, _mm256_setzero_si256());
+            let v_clamped = _mm256_min_epi16(v_clamped, _mm256_set1_epi16(255));
 
-            for k in (0..512).step_by(32) {
-                // Safe Implementation for QA=255 (Avoid maddubs saturation)
-                let inp = _mm256_loadu_si256(input_ptr.add(k) as *const __m256i);
-                let w = _mm256_loadu_si256(weights_ptr.add(k) as *const __m256i);
+            let v_sq = _mm256_mullo_epi16(v_clamped, v_clamped);
 
-                // Lower 128 bits
-                let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(inp));
-                let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(w));
-                let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
+            let v_sq_lo = _mm256_unpacklo_epi16(v_sq, _mm256_setzero_si256());
+            let v_sq_hi = _mm256_unpackhi_epi16(v_sq, _mm256_setzero_si256());
 
-                // Upper 128 bits
-                let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(inp, 1));
-                let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 1));
-                let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
+            let v_inv_255 = _mm256_set1_ps(1.0 / 255.0);
 
-                sum_vec = _mm256_add_epi32(sum_vec, _mm256_add_epi32(prod_lo, prod_hi));
-            }
+            let v_f_lo = _mm256_cvtepi32_ps(v_sq_lo);
+            let v_f_hi = _mm256_cvtepi32_ps(v_sq_hi);
 
-            let total = hsum_256_epi32(sum_vec) + net.layer1_biases[i];
-            layer1_out[i] = (total >> 6).clamp(0, 255) as i8;
+            let v_scaled_lo = _mm256_cvtps_epi32(_mm256_mul_ps(v_f_lo, v_inv_255));
+            let v_scaled_hi = _mm256_cvtps_epi32(_mm256_mul_ps(v_f_hi, v_inv_255));
+
+            let v_act = _mm256_packus_epi32(v_scaled_lo, v_scaled_hi);
+
+            // Multiply by L1 weights (Them: 128..256)
+            let w_them =
+                _mm256_loadu_si256(net.output_weights.as_ptr().add(128 + i) as *const __m256i);
+
+            let prod = _mm256_madd_epi16(v_act, w_them);
+            sum_vec = _mm256_add_epi32(sum_vec, prod);
         }
 
-        // --- LAYER 2 ---
-        let mut layer2_out = [0i8; 32];
-        let l1_vec = _mm256_loadu_si256(layer1_out.as_ptr() as *const __m256i);
+        let total = hsum_256_epi32(sum_vec) + (net.output_bias as i32);
 
-        for i in 0..32 {
-            let row_offset = i * 32;
-            let w = _mm256_loadu_si256(net.layer2_weights.as_ptr().add(row_offset) as *const __m256i);
-
-            // Safe Implementation
-            let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(l1_vec));
-            let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(w));
-            let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
-
-            let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(l1_vec, 1));
-            let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(w, 1));
-            let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
-
-            let sum_i32 = _mm256_add_epi32(prod_lo, prod_hi);
-
-            let total = hsum_256_epi32(sum_i32) + net.layer2_biases[i];
-            layer2_out[i] = (total >> 6).clamp(0, 255) as i8;
-        }
-
-        // --- OUTPUT ---
-        let l2_vec = _mm256_loadu_si256(layer2_out.as_ptr() as *const __m256i);
-        let out_w = _mm256_loadu_si256(net.output_weights.as_ptr() as *const __m256i);
-
-        // Safe Implementation
-        let inp_lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(l2_vec));
-        let w_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(out_w));
-        let prod_lo = _mm256_madd_epi16(inp_lo, w_lo);
-
-        let inp_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(l2_vec, 1));
-        let w_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(out_w, 1));
-        let prod_hi = _mm256_madd_epi16(inp_hi, w_hi);
-
-        let sum_i32 = _mm256_add_epi32(prod_lo, prod_hi);
-
-        let final_sum = hsum_256_epi32(sum_i32) + net.output_bias;
-
-        // Scaling for QA=255/QB=64 to approx centipawns
-        // 16 was too small, yielding very high scores (e.g. 166cp for startpos).
-        // 64 is more reasonable (166 / 4 ~= 41).
-        return final_sum / 64; // Removed +10 bias
+        return total / 64;
     }
 
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    return 0;
+    {
+        // Fallback
+        let mut sum = net.output_bias as i32;
+
+        // Us
+        for i in 0..LAYER1_SIZE {
+            let val = acc_us.v[i].clamp(0, 255) as i32;
+            let act = (val * val) / 255;
+            sum += act * (net.output_weights[i] as i32);
+        }
+
+        // Them
+        for i in 0..LAYER1_SIZE {
+            let val = acc_them.v[i].clamp(0, 255) as i32;
+            let act = (val * val) / 255;
+            sum += act * (net.output_weights[128 + i] as i32);
+        }
+
+        return sum / 64;
+    }
 }
 
 // --------------------------------------------------------
-// Standard Loading Code
+// Weights & Loading
 // --------------------------------------------------------
 
-#[repr(align(64))]
 pub struct NnueWeights {
     pub feature_biases: [i16; LAYER1_SIZE],
-    pub feature_weights: Vec<i16>,
-    pub layer1_biases: [i32; HIDDEN_SIZE],
-    pub layer1_weights: [i8; HIDDEN_SIZE * 512],
-    pub layer2_biases: [i32; HIDDEN_SIZE],
-    pub layer2_weights: [i8; HIDDEN_SIZE * 32],
-    pub output_bias: i32,
-    pub output_weights: [i8; HIDDEN_SIZE],
+    pub feature_weights: Vec<i16>, // 768 * 128
+    pub output_weights: Vec<i16>,  // 256 (128 + 128)
+    pub output_bias: i16,
 }
 
-pub fn make_halfkp_index(perspective: usize, king_sq: usize, piece: usize, sq: usize) -> Option<usize> {
-    let orient_sq = if perspective == crate::state::WHITE { sq } else { sq ^ 56 };
-    let orient_king = if perspective == crate::state::WHITE { king_sq } else { king_sq ^ 56 };
-    let piece_color = if piece < 6 { crate::state::WHITE } else { crate::state::BLACK };
-    let piece_type = piece % 6;
-
-    if piece_type == 5 { return None; }
-
-    let kp_idx = if piece_color == perspective { piece_type } else { piece_type + 5 };
-    Some(orient_king * 641 + kp_idx * 64 + orient_sq)
+impl NnueWeights {
+    pub const fn new() -> Self {
+        NnueWeights {
+            feature_biases: [0; LAYER1_SIZE],
+            feature_weights: Vec::new(),
+            output_weights: Vec::new(),
+            output_bias: 0,
+        }
+    }
 }
 
-pub fn init_nnue(filename: &str) {
-    let path = resolve_path(filename);
-    println!("Loading NNUE from: {:?}", path);
+// Embed the binary
+const NNUE_DATA: &[u8] = include_bytes!("resources/quantised.bin");
 
-    match load_nnue_file(&path) {
-        Ok(weights) => {
-             if weights.feature_weights.iter().take(100).all(|&x| x == 0) {
-                 println!("WARNING: Weights look empty. Check generation.");
-             }
-             if let Ok(mut guard) = NNUE.write() {
-                *guard = Some(weights);
+pub fn init_nnue() {
+    let mut reader = std::io::Cursor::new(NNUE_DATA);
+    use std::io::Read;
+
+    // Helper to read i16
+    fn read_i16<R: Read>(r: &mut R) -> std::io::Result<i16> {
+        let mut buf = [0u8; 2];
+        r.read_exact(&mut buf)?;
+        Ok(i16::from_le_bytes(buf))
+    }
+
+    // Helper to read buffer
+    fn read_buf<R: Read>(r: &mut R, buf: &mut [i16]) -> std::io::Result<()> {
+        let ptr = buf.as_mut_ptr() as *mut u8;
+        let len = buf.len() * 2;
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        r.read_exact(slice)?;
+        // Ensure LE
+        if cfg!(target_endian = "big") {
+            for x in buf {
+                *x = x.to_le();
             }
-            println!("NNUE Loaded Successfully (AVX2 Enabled).");
-        },
-        Err(e) => {
-            println!("Error Loading NNUE: {}. Defaulting to HCE.", e);
         }
+        Ok(())
     }
-}
 
-fn resolve_path(filename: &str) -> PathBuf {
-    let path = PathBuf::from(filename);
-    if path.exists() { return path; }
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let alt_path = exe_dir.join(filename);
-            if alt_path.exists() { return alt_path; }
-        }
-    }
-    path
-}
-
-fn load_nnue_file(path: &PathBuf) -> io::Result<NnueWeights> {
-    let f = File::open(path)?;
-    let mut reader = BufReader::new(f);
-
-    let _version = read_u32(&mut reader)?;
-    let _hash = read_u32(&mut reader)?;
-    let desc_len = read_u32(&mut reader)?;
-    for _ in 0..desc_len { read_u8(&mut reader)?; }
-    let _hash_transformer = read_u32(&mut reader)?;
-
-    let mut feature_biases = [0i16; LAYER1_SIZE];
-    read_i16_buf(&mut reader, &mut feature_biases)?;
-
+    // 1. Read Feature Weights (l0w): 768 * 128
     let count = INPUT_SIZE * LAYER1_SIZE;
     let mut feature_weights = vec![0i16; count];
-    read_i16_buf(&mut reader, &mut feature_weights)?;
+    read_buf(&mut reader, &mut feature_weights).expect("Failed to read feature weights");
 
-    let _hash_network = read_u32(&mut reader)?;
+    // 2. Read Feature Biases (l0b): 128
+    let mut feature_biases = [0i16; LAYER1_SIZE];
+    read_buf(&mut reader, &mut feature_biases).expect("Failed to read feature biases");
 
-    let mut layer1_biases = [0i32; HIDDEN_SIZE];
-    read_i32_buf(&mut reader, &mut layer1_biases)?;
-    let mut layer1_weights = [0i8; HIDDEN_SIZE * 512];
-    read_i8_buf(&mut reader, &mut layer1_weights)?;
+    // 3. Read Output Weights (l1w): 256 (128 * 2)
+    let mut output_weights = vec![0i16; 2 * LAYER1_SIZE];
+    read_buf(&mut reader, &mut output_weights).expect("Failed to read output weights");
 
-    let mut layer2_biases = [0i32; HIDDEN_SIZE];
-    read_i32_buf(&mut reader, &mut layer2_biases)?;
-    let mut layer2_weights = [0i8; HIDDEN_SIZE * 32];
-    read_i8_buf(&mut reader, &mut layer2_weights)?;
+    // 4. Read Output Bias (l1b): 1
+    let output_bias = read_i16(&mut reader).expect("Failed to read output bias");
 
-    let mut output_bias_buf = [0i32; 1];
-    read_i32_buf(&mut reader, &mut output_bias_buf)?;
-    let mut output_weights = [0i8; HIDDEN_SIZE];
-    read_i8_buf(&mut reader, &mut output_weights)?;
+    println!("NNUE Embedded Architecture Loaded: 768 -> 128x2 -> 1");
 
-    Ok(NnueWeights {
-        feature_biases, feature_weights,
-        layer1_biases, layer1_weights,
-        layer2_biases, layer2_weights,
-        output_bias: output_bias_buf[0], output_weights,
-    })
-}
+    let weights = NnueWeights {
+        feature_biases,
+        feature_weights,
+        output_weights,
+        output_bias,
+    };
 
-// Low-level readers
-fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
-}
-fn read_u8<R: Read>(reader: &mut R) -> io::Result<u8> {
-    let mut buf = [0u8; 1];
-    reader.read_exact(&mut buf)?;
-    Ok(buf[0])
-}
-fn read_i16_buf<R: Read>(reader: &mut R, buf: &mut [i16]) -> io::Result<()> {
-    let byte_count = buf.len() * 2;
-    let ptr = buf.as_mut_ptr() as *mut u8;
-    let slice = unsafe { std::slice::from_raw_parts_mut(ptr, byte_count) };
-    reader.read_exact(slice)?;
-    if cfg!(target_endian = "big") { for x in buf { *x = x.to_le(); } }
-    Ok(())
-}
-fn read_i32_buf<R: Read>(reader: &mut R, buf: &mut [i32]) -> io::Result<()> {
-    let byte_count = buf.len() * 4;
-    let ptr = buf.as_mut_ptr() as *mut u8;
-    let slice = unsafe { std::slice::from_raw_parts_mut(ptr, byte_count) };
-    reader.read_exact(slice)?;
-    if cfg!(target_endian = "big") { for x in buf { *x = x.to_le(); } }
-    Ok(())
-}
-fn read_i8_buf<R: Read>(reader: &mut R, buf: &mut [i8]) -> io::Result<()> {
-    let ptr = buf.as_mut_ptr() as *mut u8;
-    let slice = unsafe { std::slice::from_raw_parts_mut(ptr, buf.len()) };
-    reader.read_exact(slice)
+    *NNUE.write().unwrap() = weights;
 }

@@ -1,24 +1,24 @@
 // src/main.rs
 #![allow(unused_imports, unused_variables, dead_code)]
 mod bitboard;
-mod state;
-mod movegen;
-mod search;
-mod eval;
-mod zobrist;
-mod tt;
-mod uci;
-mod time;
-mod tuning;
-mod pawn;
-mod endgame;
-mod perft;
-mod tests;
-mod nnue;
 mod datagen;
+mod endgame;
+mod eval;
+mod movegen;
+mod nnue;
+mod pawn;
+mod perft;
+mod search;
+mod state;
+mod tests;
+mod time;
+mod tt;
+mod tuning;
+mod uci;
+mod zobrist;
 
-use std::thread;
 use std::env;
+use std::thread;
 
 fn main() {
     // 1. Initialize Global Tables
@@ -28,7 +28,7 @@ fn main() {
     eval::init_eval();
 
     // 2. Load NNUE
-    nnue::init_nnue("nn-aether.nnue");
+    nnue::init_nnue();
 
     // 3. Check for arguments (CLI Mode)
     let args: Vec<String> = env::args().collect();
@@ -46,7 +46,9 @@ fn main() {
             return;
         }
         if args[1] == "eval" {
-            let state = state::GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+            let state = state::GameState::parse_fen(
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            );
             println!("--- Debugging Eval ---");
             let score = eval::evaluate(&state);
             println!("Final Score (CP): {}", score);
@@ -60,7 +62,11 @@ fn main() {
         // --- FIX: Moved inside the main function logic ---
         if args[1] == "datagen" {
             // Usage: "Aether datagen 1000"
-            let count = if args.len() > 2 { args[2].parse().unwrap_or(100) } else { 100 };
+            let count = if args.len() > 2 {
+                args[2].parse().unwrap_or(100)
+            } else {
+                100
+            };
             datagen::run_datagen(count);
             return;
         }
@@ -69,11 +75,13 @@ fn main() {
     // 4. Normal Mode: Launch UCI
     let builder = thread::Builder::new()
         .name("uci_thread".into())
-        .stack_size(32 * 1024 * 1024); 
+        .stack_size(32 * 1024 * 1024);
 
-    let handler = builder.spawn(|| {
-        uci::uci_loop();
-    }).unwrap();
+    let handler = builder
+        .spawn(|| {
+            uci::uci_loop();
+        })
+        .unwrap();
 
     handler.join().unwrap();
 }

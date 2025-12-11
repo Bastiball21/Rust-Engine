@@ -1,4 +1,3 @@
-
 use std::sync::OnceLock;
 
 #[cfg(target_arch = "x86_64")]
@@ -53,12 +52,29 @@ pub fn king_zone_mask(sq: usize) -> Bitboard {
 }
 
 impl Bitboard {
-    pub fn new() -> Self { Bitboard(0) }
-    #[inline(always)] pub fn set_bit(&mut self, square: u8) { self.0 |= 1u64 << square; }
-    #[inline(always)] pub fn get_bit(&self, square: u8) -> bool { (self.0 & (1u64 << square)) != 0 }
-    #[inline(always)] pub fn pop_bit(&mut self, square: u8) { self.0 &= !(1u64 << square); }
-    #[inline(always)] pub fn count_bits(&self) -> u32 { self.0.count_ones() }
-    #[inline(always)] pub fn get_lsb_index(&self) -> u32 { self.0.trailing_zeros() }
+    pub fn new() -> Self {
+        Bitboard(0)
+    }
+    #[inline(always)]
+    pub fn set_bit(&mut self, square: u8) {
+        self.0 |= 1u64 << square;
+    }
+    #[inline(always)]
+    pub fn get_bit(&self, square: u8) -> bool {
+        (self.0 & (1u64 << square)) != 0
+    }
+    #[inline(always)]
+    pub fn pop_bit(&mut self, square: u8) {
+        self.0 &= !(1u64 << square);
+    }
+    #[inline(always)]
+    pub fn count_bits(&self) -> u32 {
+        self.0.count_ones()
+    }
+    #[inline(always)]
+    pub fn get_lsb_index(&self) -> u32 {
+        self.0.trailing_zeros()
+    }
 
     pub fn print(&self) {
         println!("  a b c d e f g h");
@@ -77,14 +93,36 @@ impl Bitboard {
     }
 }
 
-impl std::ops::BitOr for Bitboard { type Output = Self; fn bitor(self, rhs: Self) -> Self { Bitboard(self.0 | rhs.0) } }
-impl std::ops::BitAnd for Bitboard { type Output = Self; fn bitand(self, rhs: Self) -> Self { Bitboard(self.0 & rhs.0) } }
-impl std::ops::BitXor for Bitboard { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Bitboard(self.0 ^ rhs.0) } }
-impl std::ops::Not for Bitboard { type Output = Self; fn not(self) -> Self { Bitboard(!self.0) } }
+impl std::ops::BitOr for Bitboard {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Bitboard(self.0 | rhs.0)
+    }
+}
+impl std::ops::BitAnd for Bitboard {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        Bitboard(self.0 & rhs.0)
+    }
+}
+impl std::ops::BitXor for Bitboard {
+    type Output = Self;
+    fn bitxor(self, rhs: Self) -> Self {
+        Bitboard(self.0 ^ rhs.0)
+    }
+}
+impl std::ops::Not for Bitboard {
+    type Output = Self;
+    fn not(self) -> Self {
+        Bitboard(!self.0)
+    }
+}
 
 // --- INITIALIZATION ---
 pub fn init_magic_tables() {
-    if ROOK_TABLE.get().is_some() { return; }
+    if ROOK_TABLE.get().is_some() {
+        return;
+    }
 
     init_eval_masks();
 
@@ -122,12 +160,14 @@ pub fn init_magic_tables() {
         // Iterate all submasks
         let mut map = Bitboard(0);
         loop {
-             let idx = pext_safe(map.0, r_mask.0) as usize;
-             let attacks = generate_rook_attacks_slow(sq as u8, map);
-             r_table[r_current_offset + idx] = attacks;
+            let idx = pext_safe(map.0, r_mask.0) as usize;
+            let attacks = generate_rook_attacks_slow(sq as u8, map);
+            r_table[r_current_offset + idx] = attacks;
 
-             map.0 = map.0.wrapping_sub(r_mask.0) & r_mask.0;
-             if map.0 == 0 { break; }
+            map.0 = map.0.wrapping_sub(r_mask.0) & r_mask.0;
+            if map.0 == 0 {
+                break;
+            }
         }
         r_current_offset += r_size;
 
@@ -141,12 +181,14 @@ pub fn init_magic_tables() {
 
         let mut map = Bitboard(0);
         loop {
-             let idx = pext_safe(map.0, b_mask.0) as usize;
-             let attacks = generate_bishop_attacks_slow(sq as u8, map);
-             b_table[b_current_offset + idx] = attacks;
+            let idx = pext_safe(map.0, b_mask.0) as usize;
+            let attacks = generate_bishop_attacks_slow(sq as u8, map);
+            b_table[b_current_offset + idx] = attacks;
 
-             map.0 = map.0.wrapping_sub(b_mask.0) & b_mask.0;
-             if map.0 == 0 { break; }
+            map.0 = map.0.wrapping_sub(b_mask.0) & b_mask.0;
+            if map.0 == 0 {
+                break;
+            }
         }
         b_current_offset += b_size;
     }
@@ -166,22 +208,34 @@ fn init_eval_masks() {
     for r in 0..8 {
         for f in 0..8 {
             let sq = r * 8 + f;
-            for r2 in 0..8 { f_masks[sq].set_bit((r2 * 8 + f) as u8); }
-            for f2 in 0..8 { r_masks[sq].set_bit((r * 8 + f2) as u8); }
+            for r2 in 0..8 {
+                f_masks[sq].set_bit((r2 * 8 + f) as u8);
+            }
+            for f2 in 0..8 {
+                r_masks[sq].set_bit((r * 8 + f2) as u8);
+            }
 
             let mut w_passed = Bitboard(0);
             for r2 in (r + 1)..8 {
                 w_passed.set_bit((r2 * 8 + f) as u8);
-                if f > 0 { w_passed.set_bit((r2 * 8 + (f - 1)) as u8); }
-                if f < 7 { w_passed.set_bit((r2 * 8 + (f + 1)) as u8); }
+                if f > 0 {
+                    w_passed.set_bit((r2 * 8 + (f - 1)) as u8);
+                }
+                if f < 7 {
+                    w_passed.set_bit((r2 * 8 + (f + 1)) as u8);
+                }
             }
             passed[0][sq] = w_passed;
 
             let mut b_passed = Bitboard(0);
             for r2 in 0..r {
                 b_passed.set_bit((r2 * 8 + f) as u8);
-                if f > 0 { b_passed.set_bit((r2 * 8 + (f - 1)) as u8); }
-                if f < 7 { b_passed.set_bit((r2 * 8 + (f + 1)) as u8); }
+                if f > 0 {
+                    b_passed.set_bit((r2 * 8 + (f - 1)) as u8);
+                }
+                if f < 7 {
+                    b_passed.set_bit((r2 * 8 + (f + 1)) as u8);
+                }
             }
             passed[1][sq] = b_passed;
 
@@ -189,7 +243,9 @@ fn init_eval_masks() {
             let king_bb = 1u64 << sq;
             let attacks = mask_king_attacks(sq as u8);
             zone.0 |= attacks.0 | king_bb;
-            if r < 6 { zone.0 |= (zone.0 << 8) | (zone.0 << 16); }
+            if r < 6 {
+                zone.0 |= (zone.0 << 8) | (zone.0 << 16);
+            }
             k_zones[sq] = zone;
         }
     }
@@ -226,7 +282,9 @@ pub fn get_queen_attacks(square: u8, occupancy: Bitboard) -> Bitboard {
 #[inline(always)]
 fn pext_safe(val: u64, mask: u64) -> u64 {
     #[cfg(target_arch = "x86_64")]
-    unsafe { _pext_u64(val, mask) }
+    unsafe {
+        _pext_u64(val, mask)
+    }
 
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -236,25 +294,34 @@ fn pext_safe(val: u64, mask: u64) -> u64 {
         let mut m = mask;
         let mut bit = 1;
         while m != 0 {
-             if (m & 1) != 0 {
-                 if (bb & 1) != 0 { res |= bit; }
-                 bit <<= 1;
-             }
-             bb >>= 1;
-             m >>= 1;
+            if (m & 1) != 0 {
+                if (bb & 1) != 0 {
+                    res |= bit;
+                }
+                bit <<= 1;
+            }
+            bb >>= 1;
+            m >>= 1;
         }
         res
     }
 }
-
 
 // --- GENERATORS (SLOW) ---
 pub fn mask_rook_attacks(square: u8) -> Bitboard {
     let mut attacks = Bitboard(0);
     let r = square / 8;
     let f = square % 8;
-    for r_itr in 1..7 { if r_itr != r { attacks.set_bit(r_itr * 8 + f); } }
-    for f_itr in 1..7 { if f_itr != f { attacks.set_bit(r * 8 + f_itr); } }
+    for r_itr in 1..7 {
+        if r_itr != r {
+            attacks.set_bit(r_itr * 8 + f);
+        }
+    }
+    for f_itr in 1..7 {
+        if f_itr != f {
+            attacks.set_bit(r * 8 + f_itr);
+        }
+    }
     attacks
 }
 
@@ -264,10 +331,12 @@ pub fn mask_bishop_attacks(square: u8) -> Bitboard {
     let file = (square % 8) as i8;
     let directions = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
     for (r_step, f_step) in directions {
-        let mut r = rank + r_step; let mut f = file + f_step;
+        let mut r = rank + r_step;
+        let mut f = file + f_step;
         while r > 0 && r < 7 && f > 0 && f < 7 {
             attacks.set_bit((r * 8 + f) as u8);
-            r += r_step; f += f_step;
+            r += r_step;
+            f += f_step;
         }
     }
     attacks
@@ -275,37 +344,68 @@ pub fn mask_bishop_attacks(square: u8) -> Bitboard {
 
 pub fn mask_knight_attacks(square: u8) -> Bitboard {
     let mut attacks = Bitboard(0);
-    let rank = (square / 8) as i8; let file = (square % 8) as i8;
-    let jumps = [(2, 1), (1, 2), (-1, 2), (-2, 1), (-2, -1), (-1, -2), (1, -2), (2, -1)];
+    let rank = (square / 8) as i8;
+    let file = (square % 8) as i8;
+    let jumps = [
+        (2, 1),
+        (1, 2),
+        (-1, 2),
+        (-2, 1),
+        (-2, -1),
+        (-1, -2),
+        (1, -2),
+        (2, -1),
+    ];
     for (r_off, f_off) in jumps {
-        let tr = rank + r_off; let tf = file + f_off;
-        if tr >= 0 && tr <= 7 && tf >= 0 && tf <= 7 { attacks.set_bit((tr * 8 + tf) as u8); }
+        let tr = rank + r_off;
+        let tf = file + f_off;
+        if tr >= 0 && tr <= 7 && tf >= 0 && tf <= 7 {
+            attacks.set_bit((tr * 8 + tf) as u8);
+        }
     }
     attacks
 }
 
 pub fn mask_king_attacks(square: u8) -> Bitboard {
     let mut attacks = Bitboard(0);
-    let rank = (square / 8) as i8; let file = (square % 8) as i8;
-    let steps = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
+    let rank = (square / 8) as i8;
+    let file = (square % 8) as i8;
+    let steps = [
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+    ];
     for (r_off, f_off) in steps {
-        let tr = rank + r_off; let tf = file + f_off;
-        if tr >= 0 && tr <= 7 && tf >= 0 && tf <= 7 { attacks.set_bit((tr * 8 + tf) as u8); }
+        let tr = rank + r_off;
+        let tf = file + f_off;
+        if tr >= 0 && tr <= 7 && tf >= 0 && tf <= 7 {
+            attacks.set_bit((tr * 8 + tf) as u8);
+        }
     }
     attacks
 }
 
 pub fn generate_rook_attacks_slow(square: u8, blockers: Bitboard) -> Bitboard {
     let mut attacks = Bitboard(0);
-    let rank = (square / 8) as i8; let file = (square % 8) as i8;
+    let rank = (square / 8) as i8;
+    let file = (square % 8) as i8;
     let directions = [(1, 0), (-1, 0), (0, 1), (0, -1)];
     for (r_step, f_step) in directions {
-        let mut r = rank + r_step; let mut f = file + f_step;
+        let mut r = rank + r_step;
+        let mut f = file + f_step;
         while r >= 0 && r <= 7 && f >= 0 && f <= 7 {
             let target = (r * 8 + f) as u8;
             attacks.set_bit(target);
-            if blockers.get_bit(target) { break; }
-            r += r_step; f += f_step;
+            if blockers.get_bit(target) {
+                break;
+            }
+            r += r_step;
+            f += f_step;
         }
     }
     attacks
@@ -313,15 +413,20 @@ pub fn generate_rook_attacks_slow(square: u8, blockers: Bitboard) -> Bitboard {
 
 pub fn generate_bishop_attacks_slow(square: u8, blockers: Bitboard) -> Bitboard {
     let mut attacks = Bitboard(0);
-    let rank = (square / 8) as i8; let file = (square % 8) as i8;
+    let rank = (square / 8) as i8;
+    let file = (square % 8) as i8;
     let directions = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
     for (r_step, f_step) in directions {
-        let mut r = rank + r_step; let mut f = file + f_step;
+        let mut r = rank + r_step;
+        let mut f = file + f_step;
         while r >= 0 && r <= 7 && f >= 0 && f <= 7 {
             let target = (r * 8 + f) as u8;
             attacks.set_bit(target);
-            if blockers.get_bit(target) { break; }
-            r += r_step; f += f_step;
+            if blockers.get_bit(target) {
+                break;
+            }
+            r += r_step;
+            f += f_step;
         }
     }
     attacks

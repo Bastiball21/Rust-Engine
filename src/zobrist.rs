@@ -18,7 +18,9 @@ impl PRNG {
     }
     fn get_u32(&mut self) -> u32 {
         let mut x = self.state;
-        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
         self.state = x;
         x
     }
@@ -43,11 +45,15 @@ pub fn init_zobrist() {
     let _ = PIECE_KEYS.set(p_keys);
 
     let mut c_keys = [0; 16];
-    for i in 0..16 { c_keys[i] = rng.get_u64(); }
+    for i in 0..16 {
+        c_keys[i] = rng.get_u64();
+    }
     let _ = CASTLING_KEYS.set(c_keys);
 
     let mut ep_keys = [0; 8];
-    for i in 0..8 { ep_keys[i] = rng.get_u64(); }
+    for i in 0..8 {
+        ep_keys[i] = rng.get_u64();
+    }
     let _ = EN_PASSANT_KEYS.set(ep_keys);
 
     let _ = SIDE_KEY.set(rng.get_u64());

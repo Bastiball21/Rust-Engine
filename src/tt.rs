@@ -1,13 +1,13 @@
 #![allow(non_upper_case_globals)]
 
-use crate::state::{Move, Q, R, B, N, P, K, q, r, b, n, p, k, WHITE};
+use crate::bitboard;
+use crate::state::{b, k, n, p, q, r, Move, B, K, N, P, Q, R, WHITE};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use crate::bitboard;
 
 pub struct TTEntry {
-    pub key: AtomicU64,  
-    pub data: AtomicU64, 
+    pub key: AtomicU64,
+    pub data: AtomicU64,
 }
 
 pub const FLAG_NONE: u8 = 0;
@@ -15,7 +15,7 @@ pub const FLAG_EXACT: u8 = 1;
 pub const FLAG_ALPHA: u8 = 2;
 pub const FLAG_BETA: u8 = 3;
 
-#[repr(C, align(64))] 
+#[repr(C, align(64))]
 pub struct Cluster {
     pub entries: [TTEntry; 4],
 }
@@ -61,7 +61,9 @@ impl TranspositionTable {
     }
 
     pub fn clear(&mut self) {
-        unsafe { std::ptr::write_bytes(self.table, 0, self.count); }
+        unsafe {
+            std::ptr::write_bytes(self.table, 0, self.count);
+        }
         self.generation.store(0, Ordering::Relaxed);
     }
 
@@ -78,18 +80,24 @@ impl TranspositionTable {
     fn pack(score: i32, depth: u8, flag: u8, age: u8, mv: Option<Move>) -> u64 {
         let move_u16 = if let Some(m) = mv {
             let promo_bits = match m.promotion {
-                Some(Q) | Some(q) => 1, Some(R) | Some(r) => 2, Some(B) | Some(b) => 3, Some(N) | Some(n) => 4, _ => 0
+                Some(Q) | Some(q) => 1,
+                Some(R) | Some(r) => 2,
+                Some(B) | Some(b) => 3,
+                Some(N) | Some(n) => 4,
+                _ => 0,
             };
             ((m.source as u16) << 6) | (m.target as u16) | (promo_bits << 12)
-        } else { 0 };
-        
+        } else {
+            0
+        };
+
         let score_u16 = (score.clamp(-32000, 32000) + 32000) as u16;
 
-        (move_u16 as u64) |
-        ((score_u16 as u64) << 16) |
-        ((depth as u64) << 32) |
-        ((flag as u64) << 40) |
-        ((age as u64) << 48)
+        (move_u16 as u64)
+            | ((score_u16 as u64) << 16)
+            | ((depth as u64) << 32)
+            | ((flag as u64) << 40)
+            | ((age as u64) << 48)
     }
 
     // Unpack: Returns (score, depth, flag, age, move)
@@ -105,12 +113,25 @@ impl TranspositionTable {
             let to = move_u16 & 0x3F;
             let promo_bits = (move_u16 >> 12) & 0xF;
             let promotion = match promo_bits {
-                1 => Some(Q), 2 => Some(R), 3 => Some(B), 4 => Some(N), _ => None
+                1 => Some(Q),
+                2 => Some(R),
+                3 => Some(B),
+                4 => Some(N),
+                _ => None,
             };
             if from != to {
-                Some(Move { source: from as u8, target: to as u8, promotion, is_capture: false })
-            } else { None }
-        } else { None };
+                Some(Move {
+                    source: from as u8,
+                    target: to as u8,
+                    promotion,
+                    is_capture: false,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         (score, depth, flag, age, mv)
     }
@@ -135,7 +156,11 @@ impl TranspositionTable {
                     let (_, _, _, _, old_move) = Self::unpack(old_data);
 
                     // Keep old move if new one is missing
-                    let final_move = if best_move.is_none() { old_move } else { best_move };
+                    let final_move = if best_move.is_none() {
+                        old_move
+                    } else {
+                        best_move
+                    };
                     let final_data = Self::pack(score, depth, flag, current_gen, final_move);
 
                     entry.data.store(final_data, Ordering::Relaxed);
@@ -153,7 +178,7 @@ impl TranspositionTable {
                 // 3. Evaluate replacement candidates (Aging logic)
                 let data = entry.data.load(Ordering::Relaxed);
                 let (_, d, _, age, _) = Self::unpack(data);
-                
+
                 // Calculate "Value": Deep entries are valuable, Old entries lose value.
                 // Age diff is wrapped u8, handled by masking.
                 let age_diff = current_gen.wrapping_sub(age);
@@ -199,44 +224,83 @@ impl TranspositionTable {
         let side = state.side_to_move;
         let occ = state.occupancies[2]; // BOTH
 
-        if from >= 64 || to >= 64 || from == to { return false; }
+        if from >= 64 || to >= 64 || from == to {
+            return false;
+        }
 
         let mut piece_type = 12;
         let start = if side == WHITE { P } else { p };
         let end = if side == WHITE { K } else { k };
 
         for piece in start..=end {
-            if state.bitboards[piece].get_bit(from) { piece_type = piece; break; }
+            if state.bitboards[piece].get_bit(from) {
+                piece_type = piece;
+                break;
+            }
         }
-        if piece_type == 12 { return false; }
+        if piece_type == 12 {
+            return false;
+        }
 
         // Basic capture check (own piece)
-        if state.occupancies[side].get_bit(to) { return false; }
+        if state.occupancies[side].get_bit(to) {
+            return false;
+        }
 
         match piece_type {
             N | n => bitboard::mask_knight_attacks(from).get_bit(to),
             K | k => {
                 let attacks = bitboard::mask_king_attacks(from);
-                if attacks.get_bit(to) { return true; }
-                if (from as i8 - to as i8).abs() == 2 { return true; }
+                if attacks.get_bit(to) {
+                    return true;
+                }
+                if (from as i8 - to as i8).abs() == 2 {
+                    return true;
+                }
                 false
-            },
+            }
             P => {
-                if to == from + 8 && !occ.get_bit(to) { return true; }
-                if from >= 8 && from <= 15 && to == from + 16 && !occ.get_bit(from+8) && !occ.get_bit(to) { return true; }
-                if (to == from + 7 || to == from + 9) && (state.occupancies[1].get_bit(to) || to == state.en_passant) { return true; }
+                if to == from + 8 && !occ.get_bit(to) {
+                    return true;
+                }
+                if from >= 8
+                    && from <= 15
+                    && to == from + 16
+                    && !occ.get_bit(from + 8)
+                    && !occ.get_bit(to)
+                {
+                    return true;
+                }
+                if (to == from + 7 || to == from + 9)
+                    && (state.occupancies[1].get_bit(to) || to == state.en_passant)
+                {
+                    return true;
+                }
                 false
-            },
+            }
             p => {
-                if to == from.wrapping_sub(8) && !occ.get_bit(to) { return true; }
-                if from >= 48 && from <= 55 && to == from.wrapping_sub(16) && !occ.get_bit(from.wrapping_sub(8)) && !occ.get_bit(to) { return true; }
-                if (to == from.wrapping_sub(7) || to == from.wrapping_sub(9)) && (state.occupancies[0].get_bit(to) || to == state.en_passant) { return true; }
+                if to == from.wrapping_sub(8) && !occ.get_bit(to) {
+                    return true;
+                }
+                if from >= 48
+                    && from <= 55
+                    && to == from.wrapping_sub(16)
+                    && !occ.get_bit(from.wrapping_sub(8))
+                    && !occ.get_bit(to)
+                {
+                    return true;
+                }
+                if (to == from.wrapping_sub(7) || to == from.wrapping_sub(9))
+                    && (state.occupancies[0].get_bit(to) || to == state.en_passant)
+                {
+                    return true;
+                }
                 false
-            },
+            }
             R | r => bitboard::get_rook_attacks(from, occ).get_bit(to),
             B | b => bitboard::get_bishop_attacks(from, occ).get_bit(to),
             Q | q => bitboard::get_queen_attacks(from, occ).get_bit(to),
-            _ => false
+            _ => false,
         }
     }
 
@@ -247,7 +311,9 @@ impl TranspositionTable {
             unsafe {
                 let cluster = &*self.table.add(i);
                 for entry in &cluster.entries {
-                    if entry.key.load(Ordering::Relaxed) != 0 { used += 1; }
+                    if entry.key.load(Ordering::Relaxed) != 0 {
+                        used += 1;
+                    }
                 }
             }
         }

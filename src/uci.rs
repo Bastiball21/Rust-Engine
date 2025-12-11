@@ -1,30 +1,34 @@
-use std::io::{self, BufRead};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::thread;
-use crate::state::{GameState, Move};
-use crate::search;
-use crate::tt::TranspositionTable;
 use crate::movegen::{self, MoveGenerator};
-use crate::time::{TimeManager, TimeControl};
+use crate::search;
+use crate::state::{GameState, Move};
+use crate::time::{TimeControl, TimeManager};
+use crate::tt::TranspositionTable;
+use std::io::{self, BufRead};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 
 pub fn uci_loop() {
     let stdin = io::stdin();
     let mut buffer = String::new();
-    
+
     // Default 64MB Hash
     // SAFE: Wrapped in Arc. TranspositionTable handles internal mutability via Atomics.
     // It implements Sync manually.
     let mut tt = Arc::new(TranspositionTable::new(64));
 
-    let mut game_state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let mut game_state =
+        GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let mut game_history: Vec<u64> = Vec::new();
     game_history.push(game_state.hash);
-    
+
     let mut num_threads = 1;
     let mut move_overhead = 10;
 
     // Initialize NNUE by default
-    crate::nnue::init_nnue("nn-aether.nnue");
+    crate::nnue::init_nnue();
 
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -33,13 +37,15 @@ pub fn uci_loop() {
         buffer.clear();
         match stdin.lock().read_line(&mut buffer) {
             Ok(0) => break,
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => break,
         }
 
         let cmd = buffer.trim();
-        if cmd.is_empty() { continue; }
-        
+        if cmd.is_empty() {
+            continue;
+        }
+
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let command = parts[0];
 
@@ -53,7 +59,7 @@ pub fn uci_loop() {
                 println!("option name Move Overhead type spin default 10 min 0 max 5000");
                 println!("option name EvalFile type string default nn-aether.nnue");
                 println!("uciok");
-            },
+            }
             "isready" => println!("readyok"),
             "ucinewgame" => {
                 // To clear, we can just reallocate or use a clear method.
@@ -70,21 +76,25 @@ pub fn uci_loop() {
                     tt = Arc::new(TranspositionTable::new(64));
                 }
 
-                game_state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+                game_state = GameState::parse_fen(
+                    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                );
                 game_history.clear();
                 game_history.push(game_state.hash);
-            },
+            }
             "position" => {
                 game_history = handle_position(&mut game_state, &parts);
-            },
+            }
             "go" => {
                 stop_signal.store(true, Ordering::Relaxed);
-                for h in search_threads.drain(..) { h.join().unwrap(); }
-                
+                for h in search_threads.drain(..) {
+                    h.join().unwrap();
+                }
+
                 stop_signal.store(false, Ordering::Relaxed);
 
                 let (tm, depth) = parse_go(game_state.side_to_move, &parts, move_overhead);
-                
+
                 for i in 0..num_threads {
                     let mut state_clone = game_state;
 
@@ -101,14 +111,24 @@ pub fn uci_loop() {
 
                     search_threads.push(thread::spawn(move || {
                         // Pass reference to the TT inside the Arc
-                        search::search(&state_clone, tm_clone, &tt_clone, stop_clone, depth, is_main, history_clone);
+                        search::search(
+                            &state_clone,
+                            tm_clone,
+                            &tt_clone,
+                            stop_clone,
+                            depth,
+                            is_main,
+                            history_clone,
+                        );
                     }));
                 }
-            },
+            }
             "stop" => {
                 stop_signal.store(true, Ordering::Relaxed);
-                for h in search_threads.drain(..) { h.join().unwrap(); }
-            },
+                for h in search_threads.drain(..) {
+                    h.join().unwrap();
+                }
+            }
             "setoption" => {
                 if parts.len() > 4 && parts[1] == "name" {
                     if parts[2] == "Hash" && parts[3] == "value" {
@@ -116,7 +136,9 @@ pub fn uci_loop() {
                             // Reallocate TT safely
                             // Ensure no threads are running
                             stop_signal.store(true, Ordering::Relaxed);
-                            for h in search_threads.drain(..) { h.join().unwrap(); }
+                            for h in search_threads.drain(..) {
+                                h.join().unwrap();
+                            }
 
                             tt = Arc::new(TranspositionTable::new(mb));
                         }
@@ -125,20 +147,22 @@ pub fn uci_loop() {
                             num_threads = t;
                         }
                     } else if parts[2] == "Move" && parts[3] == "Overhead" && parts[4] == "value" {
-                         if let Ok(ov) = parts[5].parse::<u128>() {
-                             move_overhead = ov;
-                         }
+                        if let Ok(ov) = parts[5].parse::<u128>() {
+                            move_overhead = ov;
+                        }
                     } else if parts[2] == "EvalFile" && parts[3] == "value" {
-                        let path = parts[4..].join(" ");
-                        crate::nnue::init_nnue(&path);
+                        // Ignoring EvalFile setoption for embedded
+                        println!("Embedded NNUE. Ignoring EvalFile.");
                     }
                 }
-            },
+            }
             "quit" => {
                 stop_signal.store(true, Ordering::Relaxed);
-                for h in search_threads.drain(..) { h.join().unwrap(); }
+                for h in search_threads.drain(..) {
+                    h.join().unwrap();
+                }
                 break;
-            },
+            }
             _ => {}
         }
     }
@@ -147,7 +171,7 @@ pub fn uci_loop() {
 fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
     let mut move_index = 0;
     let mut history = Vec::new();
-    
+
     if parts[1] == "startpos" {
         *state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         if parts.len() > 2 && parts[2] == "moves" {
@@ -178,7 +202,10 @@ fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
                 history.push(state.hash);
 
                 // Reset history on capture or pawn move (50-move rule reset)
-                if mv.is_capture || (state.bitboards[crate::state::P].get_bit(mv.target) || state.bitboards[crate::state::p].get_bit(mv.target)) {
+                if mv.is_capture
+                    || (state.bitboards[crate::state::P].get_bit(mv.target)
+                        || state.bitboards[crate::state::p].get_bit(mv.target))
+                {
                     history.clear();
                     history.push(state.hash);
                 }
@@ -197,17 +224,27 @@ fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
     let tgt = square_from_str(tgt_str);
     let promo = if move_str.len() > 4 {
         match move_str.chars().nth(4).unwrap() {
-            'q' => Some(4), 'r' => Some(3), 'b' => Some(2), 'n' => Some(1), _ => None,
+            'q' => Some(4),
+            'r' => Some(3),
+            'b' => Some(2),
+            'n' => Some(1),
+            _ => None,
         }
-    } else { None };
+    } else {
+        None
+    };
 
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
         if mv.source == src && mv.target == tgt {
             if let Some(p) = mv.promotion {
-                if let Some(user_p) = promo { return Some(mv); }
+                if let Some(user_p) = promo {
+                    return Some(mv);
+                }
             } else {
-                if promo.is_none() { return Some(mv); }
+                if promo.is_none() {
+                    return Some(mv);
+                }
             }
         }
     }
@@ -234,14 +271,37 @@ fn parse_go(side: usize, parts: &[&str], overhead: u128) -> (TimeManager, u8) {
     let mut i = 1;
     while i < parts.len() {
         match parts[i] {
-            "depth" => { depth = parts[i+1].parse().unwrap_or(64); i += 1; },
-            "wtime" => { wtime = Some(parts[i+1].parse().unwrap_or(0)); i += 1; },
-            "btime" => { btime = Some(parts[i+1].parse().unwrap_or(0)); i += 1; },
-            "winc" => { winc = Some(parts[i+1].parse().unwrap_or(0)); i += 1; },
-            "binc" => { binc = Some(parts[i+1].parse().unwrap_or(0)); i += 1; },
-            "movestogo" => { movestogo = Some(parts[i+1].parse().unwrap_or(30)); i += 1; },
-            "movetime" => { movetime = Some(parts[i+1].parse().unwrap_or(1000)); i += 1; },
-            "infinite" => { infinite = true; },
+            "depth" => {
+                depth = parts[i + 1].parse().unwrap_or(64);
+                i += 1;
+            }
+            "wtime" => {
+                wtime = Some(parts[i + 1].parse().unwrap_or(0));
+                i += 1;
+            }
+            "btime" => {
+                btime = Some(parts[i + 1].parse().unwrap_or(0));
+                i += 1;
+            }
+            "winc" => {
+                winc = Some(parts[i + 1].parse().unwrap_or(0));
+                i += 1;
+            }
+            "binc" => {
+                binc = Some(parts[i + 1].parse().unwrap_or(0));
+                i += 1;
+            }
+            "movestogo" => {
+                movestogo = Some(parts[i + 1].parse().unwrap_or(30));
+                i += 1;
+            }
+            "movetime" => {
+                movetime = Some(parts[i + 1].parse().unwrap_or(1000));
+                i += 1;
+            }
+            "infinite" => {
+                infinite = true;
+            }
             _ => {}
         }
         i += 1;
