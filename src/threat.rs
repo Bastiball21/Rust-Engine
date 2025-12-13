@@ -2,7 +2,7 @@
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
 use crate::eval;
 use crate::movegen;
-use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
+use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use std::sync::OnceLock;
 
 // --- CONSTANTS & THRESHOLDS ---
@@ -10,7 +10,7 @@ pub const THREAT_EXTENSION_THRESHOLD: i32 = 120;
 pub const THREAT_KING_DANGER_THRESHOLD: i32 = 150;
 pub const THREAT_INSTABILITY_THRESHOLD: i32 = 200;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct ThreatInfo {
     pub attacks_by_side: [Bitboard; 2],
     pub king_ring_3x3: [Bitboard; 2],
@@ -27,6 +27,14 @@ pub struct ThreatInfo {
     pub undefended_count: [i32; 2],
     pub pinned_pieces: [Bitboard; 2],
     pub check_proximity: i32,
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ThreatDeltaScore {
+    pub threat_score: i32,     // Raw "threat created" score
+    pub dominance_bonus: i32,  // Dominant square bonus
+    pub defensive_bonus: i32,  // Defensive value (evasion)
+    pub is_tactical: bool,     // Whether this move is "Tactical" enough to affect search
 }
 
 // --- INITIALIZATION ---
@@ -75,6 +83,196 @@ pub fn analyze(state: &GameState) -> ThreatInfo {
     }
 
     info
+}
+
+// --- LIGHTWEIGHT TACTICAL ANALYSIS ---
+
+/// Checks if a move creates threats, is defensive, or improves dominance.
+/// This is designed to be lightweight enough for Search Move Ordering (with caveats).
+pub fn analyze_quiet_move_impact(
+    state: &GameState,
+    mv: Move,
+    current_threat: &ThreatInfo,
+) -> ThreatDeltaScore {
+    let mut delta = ThreatDeltaScore::default();
+
+    // 1. Dominant Square
+    let piece = get_piece_type_safe(state, mv.source);
+    delta.dominance_bonus = is_dominant_square(state, mv.target, piece, state.side_to_move);
+
+    // 2. Defensive Move
+    // If we are currently under threat, does this move help?
+    if current_threat.static_threat_score > 0 || current_threat.king_danger_score[state.side_to_move] > 50 {
+        delta.defensive_bonus = evaluate_defensive_move(state, mv, current_threat);
+    }
+
+    // 3. Threat Creation (The expensive part)
+    // We only estimate direct threat creation here.
+    delta.threat_score = estimate_threat_creation(state, mv);
+
+    // Classification
+    if delta.threat_score > 50 || delta.defensive_bonus > 50 || delta.dominance_bonus > 30 {
+        delta.is_tactical = true;
+    }
+
+    delta
+}
+
+fn evaluate_defensive_move(state: &GameState, mv: Move, threat: &ThreatInfo) -> i32 {
+    let mut score = 0;
+    let us = state.side_to_move;
+    // let them = 1 - us;
+
+    // A. Escaping Hanging Piece
+    // Check if 'from' square was attacked and not sufficiently defended (hanging)
+    // ThreatInfo logic for 'hanging_piece_value' aggregates this, but doesn't store per-square.
+    // We can check if `from` is in `attacks_by_side[them]`.
+    let is_attacked = threat.attacks_by_side[1 - us].get_bit(mv.source);
+    if is_attacked {
+        // Simple check: moving away from attack?
+        // Ideally we check if 'to' is safe, but that requires re-checking attacks.
+        // Assume moving an attacked piece is "defensive".
+        let val = get_piece_value_simple(get_piece_type_safe(state, mv.source));
+        score += val / 4; // Bonus for moving threatened piece
+    }
+
+    // B. King Safety Evasion
+    // If king is in danger, and we move a piece near the king (shielding)
+    if threat.king_danger_score[us] > 0 {
+        let king_sq = state.bitboards[if us == WHITE { K } else { k }].get_lsb_index() as u8;
+        let dist = (king_sq as i32 - mv.target as i32).abs(); // Crude distance
+        if dist < 16 { // Nearby
+             score += 10;
+        }
+    }
+
+    score
+}
+
+fn estimate_threat_creation(state: &GameState, mv: Move) -> i32 {
+    let mut score = 0;
+    let us = state.side_to_move;
+    let them = 1 - us;
+    let piece = get_piece_type_safe(state, mv.source); // This is piece index (0-11)
+    let piece_type = piece % 6; // 0-5
+
+    // Get attacks from new square
+    // We use the 'slow' generators or bitboard helpers for the specific square.
+    // Optimization: Use `bitboard` helpers.
+    let occ = state.occupancies[BOTH]; // Note: This is OLD occupancy. Target is empty (quiet move). Source is occupied.
+    // For slider attacks from 'target', we need to pretend source is empty and target is occupied.
+    // Update occupancy for ray cast
+    let mut new_occ = occ;
+    new_occ.pop_bit(mv.source);
+    new_occ.set_bit(mv.target);
+
+    let attacks = match piece_type {
+        N => movegen::get_knight_attacks(mv.target),
+        B => bitboard::get_bishop_attacks(mv.target, new_occ),
+        R => bitboard::get_rook_attacks(mv.target, new_occ),
+        Q => bitboard::get_queen_attacks(mv.target, new_occ),
+        P => bitboard::pawn_attacks(Bitboard(1 << mv.target), us), // Pawn attacks from new square
+        K => movegen::get_king_attacks(mv.target),
+        _ => Bitboard(0),
+    };
+
+    // 1. Direct Attacks on High Value Targets
+    let enemy_pieces = state.occupancies[them];
+    let targets = attacks & enemy_pieces;
+
+    let mut iter = targets;
+    while iter.0 != 0 {
+        let sq = iter.get_lsb_index() as u8;
+        iter.pop_bit(sq);
+        let victim = get_piece_type_safe(state, sq) % 6;
+
+        // Bonus if we attack something valuable
+        // And we are not easily captured? (That requires SEE).
+        // For "Threat Creation", we just count the threat.
+        if victim > piece_type {
+            score += (get_piece_value_simple(victim) - get_piece_value_simple(piece_type)) / 2;
+        } else if victim == piece_type {
+             score += 20; // Attack equal value
+        }
+    }
+
+    // 2. King Ring Pressure
+    let king_sq = state.bitboards[if them == WHITE { K } else { k }].get_lsb_index() as u8;
+    // We can't access `threat_info` here easily without recomputing.
+    // Use precomputed mask if possible, or just distance.
+    // Let's use `movegen::get_king_attacks` as 3x3 ring.
+    let ring = movegen::get_king_attacks(king_sq);
+    if (attacks & ring).0 != 0 {
+        score += 60; // Direct hit on king ring
+    }
+
+    // 3. Discovered Attacks (Optional/Expensive)
+    // Skipped for speed in this "Lightweight" version.
+
+    score
+}
+
+pub fn is_dominant_square(state: &GameState, sq: u8, piece_idx: usize, side: usize) -> i32 {
+    let mut score = 0;
+    let piece = piece_idx % 6;
+    let rank = sq / 8;
+    let file = sq % 8;
+
+    let relative_rank = if side == WHITE { rank } else { 7 - rank };
+
+    match piece {
+        N => {
+            // Outpost: Rank 4, 5, 6
+            if relative_rank >= 3 && relative_rank <= 5 {
+                // Supported by pawn?
+                let pawn = if side == WHITE { P } else { p };
+                let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << sq), 1 - side); // Attack FROM sq AS opponent = squares that attack sq? No.
+                // We want squares that attack `sq`.
+                // Pawns that attack `sq` are `pawn_attacks(sq, them)` relative to us.
+                // Correct: Pawn attacks from `sq` by US go forward.
+                // We want to know if `sq` is attacked by OUR pawns.
+                // `pawn_attacks(Bitboard(1<<sq), them)` gives squares that `sq` would attack if it was `them`.
+                // Wait. `pawn_attacks(bb, side)` returns squares attacked BY `bb` of `side`.
+                // Squares that attack `sq` with a pawn of `side`:
+                // If white pawn on A2 attacks B3. `pawn_attacks(A2, White)` -> B3.
+                // We want to know if `sq` is in `pawn_attacks(OurPawns, Us)`.
+                let our_pawns = state.bitboards[pawn];
+                let defended_by_pawn = (bitboard::pawn_attacks(our_pawns, side) & Bitboard(1<<sq)).0 != 0;
+
+                if defended_by_pawn {
+                    score += 25; // Supported knight
+                    if relative_rank >= 4 { score += 15; } // Deep outpost
+                }
+
+                // Center Control
+                if (file >= 2 && file <= 5) && (rank >= 2 && rank <= 5) {
+                    score += 10;
+                }
+            }
+        },
+        B => {
+             // Center / Long Diagonals
+             if (file >= 2 && file <= 5) && (rank >= 2 && rank <= 5) {
+                 score += 10;
+             }
+        },
+        R => {
+            // Open File (No pawns of ours)
+            let our_pawns = state.bitboards[if side == WHITE { P } else { p }];
+            let file_bb = bitboard::file_mask(file as usize);
+            if (our_pawns & file_bb).0 == 0 {
+                score += 20;
+                // Semi-open (enemy pawns?)
+                // If 7th rank
+                if relative_rank == 6 {
+                    score += 30;
+                }
+            }
+        },
+        _ => {}
+    }
+
+    score
 }
 
 fn compute_attacks_and_rings(state: &GameState, info: &mut ThreatInfo) {
@@ -143,26 +341,10 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
     let them = 1 - us;
 
     let us_occ = state.occupancies[us];
-    let them_occ = state.occupancies[them];
+    // let them_occ = state.occupancies[them];
 
     // --- Hanging Pieces / En Prise ---
-    // A piece is hanging if:
-    // 1. Attacked by enemy, not defended by us.
-    // 2. Attacked by enemy pawn/knight, and we are > pawn/knight (trade loss).
-    // 3. Attackers > Defenders.
-
     let mut hanging_val = 0;
-
-    // We only care about OUR hanging pieces for defense urgency, or ENEMY hanging pieces for attack urgency.
-    // The "Threat Score" usually represents "How dangerous is the position for the side to move?"
-    // OR "How much threat is the side to move generating?".
-    // Let's define:
-    // threat_score = (Threats against Enemy) - (Threats against Us) ?
-    // No, standard convention: Threat Score = How much danger WE are in, OR how unstable the position is.
-    // User definition: "Threat delta: eval(after opponent best forcing move) – eval(current)"
-    // And "Capture urgency (is something en prise next move?)"
-
-    // Let's track threats AGAINST THE SIDE TO MOVE first (Urgency).
 
     let our_attacked_pieces = us_occ & info.attacks_by_side[them];
     let mut iter = our_attacked_pieces;
@@ -177,10 +359,6 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
             hanging_val += piece_val;
         } else {
             // Defended, but maybe attacked by lower value?
-            // This requires checking WHAT is attacking. Expensive loop?
-            // "Layer 1: Static Threat Delta... Max en-prise piece value"
-            // Approximation: If attacked by Pawn and we are not Pawn -> Hanging.
-
             let pawn_attacks = bitboard::pawn_attacks(Bitboard(1<<sq), us); // Squares that attack 'sq' as pawn
             if (pawn_attacks & state.bitboards[if them == WHITE { P } else { p }]).0 != 0 {
                 if piece_val > 100 { // > Pawn
@@ -200,44 +378,28 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
     for side in [WHITE, BLACK] {
         let enemy = 1 - side;
         let ring_3 = info.king_ring_3x3[side];
-        let ring_5 = info.king_ring_5x5[side];
+        // let ring_5 = info.king_ring_5x5[side];
 
         let mut score = 0;
-
-        // 1. Count Attackers Attacking the Ring (Correctly!)
-        // Iterate enemy pieces and check their specific attacks against ring_3
-
         let occ = state.occupancies[BOTH];
         let enemy_pawns = state.bitboards[if enemy == WHITE { P } else { p }];
         let enemy_knights = state.bitboards[if enemy == WHITE { N } else { n }];
-        let enemy_bishops = state.bitboards[if enemy == WHITE { B } else { b }] | state.bitboards[if enemy == WHITE { Q } else { q }];
-        let enemy_rooks = state.bitboards[if enemy == WHITE { R } else { r }] | state.bitboards[if enemy == WHITE { Q } else { q }];
+        // let enemy_bishops = state.bitboards[if enemy == WHITE { B } else { b }] | state.bitboards[if enemy == WHITE { Q } else { q }];
+        // let enemy_rooks = state.bitboards[if enemy == WHITE { R } else { r }] | state.bitboards[if enemy == WHITE { Q } else { q }];
         let enemy_queens = state.bitboards[if enemy == WHITE { Q } else { q }];
 
         let mut attacker_count = 0;
         let mut attacker_weight = 0;
 
         // Pawns
-        // Optimization: Pawn attacks are static relative to square, can check if ring intersects pawn attacks
-        // OR: just use precomputed attacks from compute_attacks_and_rings?
-        // info.attacks_by_side includes pawns. But we want "count of pieces".
-        // A single pawn attacking 2 ring squares counts as 1 attacker.
-        // It's cheaper to iterate pawns if count is low, or reverse check:
-        // iterate ring squares, see if attacked by pawn? No, that's "Squares Attacked".
-        // Correct: Iterate pieces.
-
         let mut pawns = enemy_pawns;
         if (bitboard::pawn_attacks(pawns, enemy) & ring_3).0 != 0 {
-             // If any pawn attacks the ring, we need to know HOW MANY.
-             // This is slightly tricky with bitboards without iteration.
-             // Approximation: Just use the fact that pawns attack.
-             // Let's iterate pawns that are close (rank distance).
              while pawns.0 != 0 {
                  let sq = pawns.get_lsb_index() as u8;
                  pawns.pop_bit(sq);
                  if (bitboard::pawn_attacks(Bitboard(1<<sq), enemy) & ring_3).0 != 0 {
                      attacker_count += 1;
-                     attacker_weight += 10; // Low weight for pawns usually, but persistent. User said 15 for "Shield hit".
+                     attacker_weight += 10;
                  }
              }
         }
@@ -253,13 +415,7 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
             }
         }
 
-        // Bishops (and Queens diagonal)
-        // Note: Queens are in both 'enemy_bishops' and 'enemy_rooks' variable above for convenience of slider generation?
-        // No, `state.bitboards[B]` contains Bishops. `state.bitboards[Q]` contains Queens.
-        // I combined them above in variables.
-        // BUT: If I count Q as Bishop and Rook, I double count it?
-        // Better: Iterate Bishops, Rooks, Queens separately.
-
+        // Bishops
         let mut bishops = state.bitboards[if enemy == WHITE { B } else { b }];
         while bishops.0 != 0 {
             let sq = bishops.get_lsb_index() as u8;
@@ -316,39 +472,12 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
 }
 
 fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
-    // 1-Ply Forcing Probe (Layer 2)
-    // "What if opponent actually plays the scary move?"
-    // We check opponent's forcing moves (Checks, Captures)
-
-    // We need to generate moves for the ENEMY (who is threatening us)
-    // But GameState doesn't support "generate moves for enemy" easily without flipping side.
-    // So we flip side conceptually.
-
-    // Actually, `ThreatInfo` is calculated for `state.side_to_move`.
-    // We want to know if `state.side_to_move` is in danger from `opponent`.
-    // So we need to generate `opponent` moves.
-    // The engine's move generator generates moves for `state.side_to_move`.
-    // So we must make a null move or just inspect the board?
-    // MoveGenerator generates for `side_to_move`.
-    // We can swap side_to_move in a clone?
-
     let mut enemy_state = state.clone();
     enemy_state.side_to_move = 1 - state.side_to_move;
-    enemy_state.hash = crate::zobrist::side_key() ^ state.hash; // Hacky hash update? Better to ignore hash here.
-    // We don't need hash for move generation.
+    enemy_state.hash = crate::zobrist::side_key() ^ state.hash;
 
     let mut generator = movegen::MoveGenerator::new();
     generator.generate_moves(&enemy_state);
-
-    // We need a baseline eval for US.
-    // Note: evaluate() returns score from side_to_move perspective.
-    // state.side_to_move is US.
-    // evaluate(state) -> Score for US.
-
-    // We can't re-enter full `evaluate` recursively easily without infinite recursion if we are not careful.
-    // But `evaluate` calls `analyze`. `analyze` calls `compute_forcing`.
-    // We MUST use `evaluate_hce` directly or a lighter eval, AND pass a dummy ThreatInfo to avoid recursion.
-    // Or just use static material/pst.
 
     let current_eval = eval::evaluate_hce(state, &ThreatInfo::default());
 
@@ -369,9 +498,6 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
         let next_state = enemy_state.make_move(mv); // Now side to move is US again
 
         // Check if move was legal (king not captured/left in check)
-        // enemy_state is opponent. next_state is US to move.
-        // We need to check if opponent left THEIR king in check.
-        // `make_move` doesn't check legality.
         let enemy_king = if enemy_state.side_to_move == WHITE { K } else { k };
         let k_sq = next_state.bitboards[enemy_king].get_lsb_index() as u8;
         if movegen::is_square_attacked(&next_state, k_sq, next_state.side_to_move) {
@@ -379,8 +505,6 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
         }
 
         // Now evaluate resulting position for US.
-        // next_state.side_to_move is US.
-        // evaluate_hce returns score for US.
         let next_eval = eval::evaluate_hce(&next_state, &ThreatInfo::default());
 
         // Drop = Current - Next
@@ -391,7 +515,6 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
             max_drop = drop;
         }
 
-        // Optimization: If drop is huge (mate/queen loss), stop early?
         if max_drop > 300 {
             break;
         }
@@ -421,4 +544,25 @@ fn get_piece_value(state: &GameState, sq: u8) -> i32 {
         }
     }
     0
+}
+
+fn get_piece_value_simple(piece_type: usize) -> i32 {
+    match piece_type {
+        0 => 100,
+        1 => 320,
+        2 => 330,
+        3 => 500,
+        4 => 900,
+        5 => 20000,
+        _ => 0
+    }
+}
+
+fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
+    for piece in 0..12 {
+        if state.bitboards[piece].get_bit(square) {
+            return piece;
+        }
+    }
+    12
 }

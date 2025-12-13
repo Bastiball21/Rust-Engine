@@ -2,7 +2,7 @@
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
 use crate::pawn::PawnTable;
 use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
-use crate::threat::ThreatInfo;
+use crate::threat::{self, ThreatInfo};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 
@@ -142,27 +142,8 @@ pub fn evaluate_hce(state: &GameState, threat: &ThreatInfo) -> i32 {
     eg += w_safe_eg - b_safe_eg;
 
     // E. Threat Adjustments (Hanging pieces, specific penalties)
-    // "Hanging major piece -> hard penalty"
-    // "King danger above threshold -> safety penalty"
     let us = state.side_to_move;
-    let them = 1 - us;
-
-    // Hanging pieces are bad for the side that has them
-    // evaluate_threats logic:
-    // ThreatInfo stores hanging_piece_value for US (if calculated for US).
-    // Actually, in threat.rs, compute_static_threats calculates threats against the side to move (us).
-    // So threat.hanging_piece_value is material WE are losing.
-    // We should subtract this from OUR score.
-    // Since evaluate returns score relative to White (no, HCE returns absolute, then flips at end),
-    // wait: `if state.side_to_move == WHITE { score } else { -score }`.
-    // So HCE builds white-centric score (mostly).
-
-    // Correct way: Add terms to mg/eg for White, subtract for Black.
-
-    // We need to know who is hanging pieces.
-    // ThreatInfo logic needs to be robust about "us".
-    // Currently `analyze(state)` uses `state.side_to_move` as "us".
-    // So `threat.hanging_piece_value` is penalty for `state.side_to_move`.
+    // let them = 1 - us;
 
     let threat_penalty_mg = threat.hanging_piece_value + threat.king_danger_score[state.side_to_move];
     let threat_penalty_eg = threat.hanging_piece_value / 2; // Less severe in EG? Or more? Hanging is always bad.
@@ -175,7 +156,14 @@ pub fn evaluate_hce(state: &GameState, threat: &ThreatInfo) -> i32 {
         eg += threat_penalty_eg;
     }
 
-    // E. Scaling
+    // F. Dominant Square Bonus
+    let (w_dom_mg, w_dom_eg) = evaluate_dominance(state, WHITE);
+    let (b_dom_mg, b_dom_eg) = evaluate_dominance(state, BLACK);
+    mg += w_dom_mg - b_dom_mg;
+    eg += w_dom_eg - b_dom_eg;
+
+
+    // G. Scaling
     let phase = phase.clamp(0, 24);
     let mut score = (mg * phase + eg * (24 - phase)) / 24;
 
@@ -262,6 +250,30 @@ fn get_pst(piece: usize, sq: usize, side: usize, is_mg: bool) -> i32 {
 }
 
 // --- NEW FEATURES ---
+
+fn evaluate_dominance(state: &GameState, side: usize) -> (i32, i32) {
+    let mut mg = 0;
+    let mut eg = 0;
+
+    // Check Knights, Bishops, Rooks
+    let pieces = [
+        (if side == WHITE { N } else { n }, 0),
+        (if side == WHITE { B } else { b }, 1),
+        (if side == WHITE { R } else { r }, 2),
+    ];
+
+    for &(piece_type, _idx) in &pieces {
+        let mut bb = state.bitboards[piece_type];
+        while bb.0 != 0 {
+            let sq = bb.get_lsb_index() as u8;
+            bb.pop_bit(sq);
+            let score = threat::is_dominant_square(state, sq, piece_type, side);
+            mg += score;
+            eg += score;
+        }
+    }
+    (mg, eg)
+}
 
 fn evaluate_mobility(state: &GameState, side: usize) -> (i32, i32) {
     let mut mg = 0;
