@@ -29,11 +29,13 @@ pub fn init_move_tables() {
 
 #[inline(always)]
 pub fn get_knight_attacks(sq: u8) -> Bitboard {
+    if sq >= 64 { return Bitboard(0); } // Safety check
     KNIGHT_TABLE.get().expect("Move tables not initialized")[sq as usize]
 }
 
 #[inline(always)]
 pub fn get_king_attacks(sq: u8) -> Bitboard {
+    if sq >= 64 { return Bitboard(0); } // Safety check
     KING_TABLE.get().expect("Move tables not initialized")[sq as usize]
 }
 

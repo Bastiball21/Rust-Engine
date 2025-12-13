@@ -135,8 +135,13 @@ pub fn init_magic_tables() {
         r_masks[sq] = mask_rook_attacks(sq as u8);
         b_masks[sq] = mask_bishop_attacks(sq as u8);
     }
-    ROOK_MASKS.set(r_masks).unwrap();
-    BISHOP_MASKS.set(b_masks).unwrap();
+    // Check if set is needed to avoid race condition panic in tests
+    if ROOK_MASKS.get().is_none() {
+        let _ = ROOK_MASKS.set(r_masks);
+    }
+    if BISHOP_MASKS.get().is_none() {
+        let _ = BISHOP_MASKS.set(b_masks);
+    }
 
     // 2. Initialize PEXT Tables
     let mut r_table = Vec::new();
@@ -193,10 +198,18 @@ pub fn init_magic_tables() {
         b_current_offset += b_size;
     }
 
-    ROOK_TABLE.set(r_table).unwrap();
-    BISHOP_TABLE.set(b_table).unwrap();
-    ROOK_OFFSETS.set(r_offsets).unwrap();
-    BISHOP_OFFSETS.set(b_offsets).unwrap();
+    if ROOK_TABLE.get().is_none() {
+        let _ = ROOK_TABLE.set(r_table);
+    }
+    if BISHOP_TABLE.get().is_none() {
+        let _ = BISHOP_TABLE.set(b_table);
+    }
+    if ROOK_OFFSETS.get().is_none() {
+        let _ = ROOK_OFFSETS.set(r_offsets);
+    }
+    if BISHOP_OFFSETS.get().is_none() {
+        let _ = BISHOP_OFFSETS.set(b_offsets);
+    }
 }
 
 fn init_eval_masks() {
@@ -259,18 +272,18 @@ fn init_eval_masks() {
 // --- ATTACK GETTERS ---
 #[inline(always)]
 pub fn get_rook_attacks(square: u8, occupancy: Bitboard) -> Bitboard {
-    let mask = ROOK_MASKS.get().unwrap()[square as usize];
-    let offset = ROOK_OFFSETS.get().unwrap()[square as usize];
+    let mask = ROOK_MASKS.get().expect("Rook masks not init")[square as usize];
+    let offset = ROOK_OFFSETS.get().expect("Rook offsets not init")[square as usize];
     let idx = pext_safe(occupancy.0, mask.0) as usize;
-    ROOK_TABLE.get().unwrap()[offset + idx]
+    ROOK_TABLE.get().expect("Rook table not init")[offset + idx]
 }
 
 #[inline(always)]
 pub fn get_bishop_attacks(square: u8, occupancy: Bitboard) -> Bitboard {
-    let mask = BISHOP_MASKS.get().unwrap()[square as usize];
-    let offset = BISHOP_OFFSETS.get().unwrap()[square as usize];
+    let mask = BISHOP_MASKS.get().expect("Bishop masks not init")[square as usize];
+    let offset = BISHOP_OFFSETS.get().expect("Bishop offsets not init")[square as usize];
     let idx = pext_safe(occupancy.0, mask.0) as usize;
-    BISHOP_TABLE.get().unwrap()[offset + idx]
+    BISHOP_TABLE.get().expect("Bishop table not init")[offset + idx]
 }
 
 #[inline(always)]

@@ -2,6 +2,7 @@
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
 use crate::pawn::PawnTable;
 use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
+use crate::threat::ThreatInfo;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 
@@ -80,16 +81,34 @@ pub fn init_eval() {
 }
 
 // --- MAIN EVAL ---
-pub fn evaluate(state: &GameState) -> i32 {
-    if crate::nnue::NETWORK.get().is_some() {
+pub fn evaluate(state: &GameState, threat: &ThreatInfo) -> i32 {
+    let raw_eval = if crate::nnue::NETWORK.get().is_some() {
         crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move])
     } else {
-        evaluate_hce(state)
+        evaluate_hce(state, threat)
+    };
+
+    // --- BLENDING LOGIC (Threat-Aware) ---
+    // If we have instability (high threat score), we might trust HCE logic (safety) more
+    // or dampen the score if uncertain.
+    // User Spec: "Blend them based on confidence: Eval = NNUE * (1 - uncertainty) + HCE * uncertainty"
+
+    if crate::nnue::NETWORK.get().is_some() {
+        if threat.tactical_instability {
+            // High danger -> NNUE might be blind to tactic -> mix in HCE safety penalties
+            let hce = evaluate_hce(state, threat);
+            // Simple blending: 80% NNUE, 20% HCE when unstable
+            // Note: HCE and NNUE scales must match!
+            // Usually they are roughly compatible (centipawns).
+            return (raw_eval * 4 + hce) / 5;
+        }
     }
+
+    raw_eval
 }
 
 // --- HCE LOGIC ---
-pub fn evaluate_hce(state: &GameState) -> i32 {
+pub fn evaluate_hce(state: &GameState, threat: &ThreatInfo) -> i32 {
     let mut mg = 0;
     let mut eg = 0;
     let mut phase = 0;
@@ -121,6 +140,40 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     let (b_safe_mg, b_safe_eg) = evaluate_king(state, BLACK, &pawn_entry);
     mg += w_safe_mg - b_safe_mg;
     eg += w_safe_eg - b_safe_eg;
+
+    // E. Threat Adjustments (Hanging pieces, specific penalties)
+    // "Hanging major piece -> hard penalty"
+    // "King danger above threshold -> safety penalty"
+    let us = state.side_to_move;
+    let them = 1 - us;
+
+    // Hanging pieces are bad for the side that has them
+    // evaluate_threats logic:
+    // ThreatInfo stores hanging_piece_value for US (if calculated for US).
+    // Actually, in threat.rs, compute_static_threats calculates threats against the side to move (us).
+    // So threat.hanging_piece_value is material WE are losing.
+    // We should subtract this from OUR score.
+    // Since evaluate returns score relative to White (no, HCE returns absolute, then flips at end),
+    // wait: `if state.side_to_move == WHITE { score } else { -score }`.
+    // So HCE builds white-centric score (mostly).
+
+    // Correct way: Add terms to mg/eg for White, subtract for Black.
+
+    // We need to know who is hanging pieces.
+    // ThreatInfo logic needs to be robust about "us".
+    // Currently `analyze(state)` uses `state.side_to_move` as "us".
+    // So `threat.hanging_piece_value` is penalty for `state.side_to_move`.
+
+    let threat_penalty_mg = threat.hanging_piece_value + threat.king_danger_score[state.side_to_move];
+    let threat_penalty_eg = threat.hanging_piece_value / 2; // Less severe in EG? Or more? Hanging is always bad.
+
+    if state.side_to_move == WHITE {
+        mg -= threat_penalty_mg;
+        eg -= threat_penalty_eg;
+    } else {
+        mg += threat_penalty_mg;
+        eg += threat_penalty_eg;
+    }
 
     // E. Scaling
     let phase = phase.clamp(0, 24);
@@ -335,5 +388,8 @@ pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
             trace.add(piece + 6, net);
         }
     }
-    evaluate_hce(state)
+    // Tuning usually ignores transient threats or assumes clean positions
+    // For now, pass a default ThreatInfo (no threats) to match baseline tuning
+    let dummy_threat = ThreatInfo::default();
+    evaluate_hce(state, &dummy_threat)
 }

@@ -12,6 +12,7 @@ mod perft;
 mod search;
 mod state;
 mod tests;
+mod threat;
 mod time;
 mod tt;
 mod tuning;
@@ -27,6 +28,7 @@ fn main() {
     bitboard::init_magic_tables();
     movegen::init_move_tables();
     eval::init_eval();
+     threat::init_threat();
 
     // 2. Load NNUE (Disabled)
     // nnue::init_nnue();
@@ -51,7 +53,8 @@ fn main() {
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
             );
             println!("--- Debugging Eval ---");
-            let score = eval::evaluate(&state);
+            let threat = threat::analyze(&state);
+            let score = eval::evaluate(&state, &threat);
             println!("Final Score (CP): {}", score);
             if score.abs() > 1000 {
                 println!("WARNING: Score is massive! This causes the 'Mate in 1' bug.");

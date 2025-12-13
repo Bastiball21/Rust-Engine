@@ -3,6 +3,7 @@ use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::movegen::{self, MoveGenerator};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
+use crate::threat::{self, ThreatInfo};
 use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -438,8 +439,15 @@ fn quiescence(
     info: &mut SearchInfo,
     ply: usize,
 ) -> i32 {
+    // In Quiescence, we usually don't run full threat analysis for efficiency,
+    // or we run a lightweight version.
+    // For now, let's use a minimal ThreatInfo or derive it if needed.
+    // Given the constraints ("Acceptable NPS drop 0-3%"), full analysis here is risky.
+    // We will use a default ThreatInfo for stand_pat evaluation in QSearch.
+    let threat_info = ThreatInfo::default();
+
     if ply >= MAX_PLY {
-        return eval::evaluate(state);
+        return eval::evaluate(state, &threat_info);
     }
     info.nodes += 1;
     if info.nodes % 2048 == 0 {
@@ -452,7 +460,7 @@ fn quiescence(
     let in_check = is_in_check(state);
 
     if !in_check {
-        let stand_pat = eval::evaluate(state);
+        let stand_pat = eval::evaluate(state, &threat_info);
         if stand_pat >= beta {
             return beta;
         }
@@ -778,7 +786,7 @@ fn negamax(
     }
 
     if ply >= MAX_PLY {
-        return eval::evaluate(state);
+        return eval::evaluate(state, &ThreatInfo::default());
     }
     info.nodes += 1;
     if ply > info.seldepth as usize {
@@ -800,10 +808,45 @@ fn negamax(
         return quiescence(state, alpha, beta, info, ply);
     }
 
+    // --- THREAT ANALYSIS ---
+    // Always computed (except QSearch/Root? No, root needs it too).
+    // This feeds into extensions and pruning.
+    let threat_info = threat::analyze(state);
+
+    // Extensions based on Threat
+    // 1. King Danger Extension: Preventative
+    // 2. High Threat Score Extension: Instability
+    // We modify new_depth directly.
+
+    let mut extensions = 0;
+
+    // Check extension is handled by 'in_check' logic below (new_depth = depth + 1).
+    // Here we handle non-check danger.
+    if !in_check {
+        if threat_info.king_danger_score[state.side_to_move] > threat::THREAT_KING_DANGER_THRESHOLD {
+            extensions += 1;
+        } else if threat_info.static_threat_score > threat::THREAT_EXTENSION_THRESHOLD {
+            // Only extend if not already extended?
+            // Cap total depth extension to avoid explosion.
+            if extensions == 0 {
+                extensions += 1;
+            }
+        }
+    }
+
+    // Cap extensions
+    if extensions > 1 { extensions = 1; }
+
     let mut tt_move = None;
     let mut tt_score = -INFINITY;
     let mut tt_depth = 0;
     let mut tt_flag = FLAG_ALPHA;
+
+    // Use extended depth for TT logic?
+    // Usually TT probe uses current depth. Extensions happen after.
+    // But if we extend, we want a deeper search.
+
+    let depth_with_ext = new_depth.saturating_add(extensions);
 
     if let Some((score, d, flag, mv)) = info.tt.probe_data(state.hash) {
         tt_score = score;
@@ -811,7 +854,7 @@ fn negamax(
         tt_flag = flag;
         tt_move = mv;
 
-        if ply > 0 && excluded_move.is_none() && d >= new_depth {
+        if ply > 0 && excluded_move.is_none() && d >= depth_with_ext {
             if flag == FLAG_EXACT {
                 return score;
             }
@@ -827,7 +870,7 @@ fn negamax(
     let static_eval = if in_check {
         -INFINITY
     } else {
-        let eval = eval::evaluate(state);
+        let eval = eval::evaluate(state, &threat_info);
         info.static_evals[ply] = eval;
         eval
     };
@@ -853,12 +896,15 @@ fn negamax(
         return static_eval;
     }
 
+    // NULL MOVE PRUNING
+    // Condition: !threat.tactical_instability
     if new_depth >= 3
         && ply > 0
         && !in_check
         && !is_pv
         && excluded_move.is_none()
         && static_eval >= beta
+        && !threat_info.tactical_instability // Disable if unstable
     {
         use crate::state::{b, n, q, r, B, N, Q, R};
         let has_pieces = (state.bitboards[N]
@@ -993,10 +1039,20 @@ fn negamax(
 
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 
-        // 1. FUTILITY PRUNING for Quiet Moves (Aggressive "Bad Move" Pruning)
-        // If !is_pv (not a principal variation node), safe to prune more aggressively.
+        // 1. FUTILITY PRUNING for Quiet Moves
+        // Awareness: Relax margin if threats are high (don't prune if we might miss a defensive resource?)
+        // OR: If high threat, maybe we SHOULD prune bad moves faster?
+        // User: "Futility pruning aware of threats"
+        // Usually: If we are under threat, we must be careful not to prune moves that solve the threat.
+        // But Futility Pruning says "Eval + Margin < Alpha", meaning even if this move improves position by Margin, it's still bad.
+        // If threat is high, Static Eval might be erroneously low (pending tactical resolution).
+        // So we should WIDEN the margin (prune less) or DISABLE it if unstable.
+
         if !is_pv && !in_check && is_quiet && new_depth < 7 && excluded_move.is_none() {
-            let futility_margin = 120 * new_depth as i32;
+            let mut futility_margin = 120 * new_depth as i32;
+            if threat_info.tactical_instability {
+                futility_margin += 200; // Give more leeway
+            }
             if static_eval + futility_margin < alpha {
                 quiets_checked += 1;
                 continue;
@@ -1035,7 +1091,8 @@ fn negamax(
 
         let mut score;
         if moves_searched == 1 {
-            let extended_depth = new_depth.saturating_add(extension);
+            // Apply extensions here too
+            let extended_depth = new_depth.saturating_add(extensions);
             score = -negamax(
                 &next_state,
                 extended_depth - 1,
