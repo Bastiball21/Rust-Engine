@@ -52,7 +52,7 @@ mod tactical_tests {
         };
 
         let current_threat = threat::analyze(&state);
-        let impact = threat::analyze_quiet_move_impact(&state, mv, &current_threat);
+        let impact = threat::analyze_move_threat_impact(&state, mv, &current_threat);
 
         println!("Threat Score: {}", impact.threat_score);
         assert!(impact.threat_score > 0, "Quiet move creating mate threat should have positive threat score");

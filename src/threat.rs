@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 pub const THREAT_EXTENSION_THRESHOLD: i32 = 120;
 pub const THREAT_KING_DANGER_THRESHOLD: i32 = 150;
 pub const THREAT_INSTABILITY_THRESHOLD: i32 = 200;
+pub const SACRIFICE_THREAT_THRESHOLD: i32 = 50;
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ThreatInfo {
@@ -88,8 +89,9 @@ pub fn analyze(state: &GameState) -> ThreatInfo {
 // --- LIGHTWEIGHT TACTICAL ANALYSIS ---
 
 /// Checks if a move creates threats, is defensive, or improves dominance.
-/// This is designed to be lightweight enough for Search Move Ordering (with caveats).
-pub fn analyze_quiet_move_impact(
+/// This is designed to be lightweight enough for Search Move Ordering and Sacrifice Logic.
+/// Works for both quiet moves and captures (to estimate post-capture threat).
+pub fn analyze_move_threat_impact(
     state: &GameState,
     mv: Move,
     current_threat: &ThreatInfo,
@@ -111,7 +113,7 @@ pub fn analyze_quiet_move_impact(
     delta.threat_score = estimate_threat_creation(state, mv);
 
     // Classification
-    if delta.threat_score > 50 || delta.defensive_bonus > 50 || delta.dominance_bonus > 30 {
+    if delta.threat_score > SACRIFICE_THREAT_THRESHOLD || delta.defensive_bonus > 50 || delta.dominance_bonus > 30 {
         delta.is_tactical = true;
     }
 
@@ -411,7 +413,7 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
             knights.pop_bit(sq);
             if (movegen::get_knight_attacks(sq) & ring_3).0 != 0 {
                 attacker_count += 1;
-                attacker_weight += 20;
+                attacker_weight += 25;
             }
         }
 
@@ -422,7 +424,7 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
             bishops.pop_bit(sq);
             if (bitboard::get_bishop_attacks(sq, occ) & ring_3).0 != 0 {
                 attacker_count += 1;
-                attacker_weight += 20;
+                attacker_weight += 25;
             }
         }
 
@@ -432,7 +434,7 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
             rooks.pop_bit(sq);
             if (bitboard::get_rook_attacks(sq, occ) & ring_3).0 != 0 {
                 attacker_count += 1;
-                attacker_weight += 40;
+                attacker_weight += 50;
             }
         }
 
@@ -442,7 +444,7 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
             queens.pop_bit(sq);
             if (bitboard::get_queen_attacks(sq, occ) & ring_3).0 != 0 {
                 attacker_count += 1;
-                attacker_weight += 60; // Big threat
+                attacker_weight += 75; // Big threat
             }
         }
 

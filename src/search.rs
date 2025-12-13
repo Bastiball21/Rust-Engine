@@ -541,8 +541,16 @@ fn quiescence(
 
                 // OPTIMIZATION: Prune bad captures in QSearch
                 if see_val < 0 {
-                    // Don't prune if it gives check (tactical)
-                    if !gives_check_fast(state, mv) {
+                    // SACRIFICE LOGIC:
+                    // Don't prune if it creates high threat (Sacrifice Candidate)
+                    let mut is_promising_sacrifice = false;
+                    let impact = threat::analyze_move_threat_impact(state, mv, &threat_info);
+                    if impact.threat_score > threat::SACRIFICE_THREAT_THRESHOLD {
+                        is_promising_sacrifice = true;
+                    }
+
+                    // Don't prune if it gives check (tactical) or is a promising sacrifice
+                    if !gives_check_fast(state, mv) && !is_promising_sacrifice {
                         continue;
                     }
                 }
@@ -627,7 +635,7 @@ pub fn search(
             }
 
             score = negamax(
-                state, depth, alpha, beta, &mut info, 0, true, &mut path, None, None, None,
+                state, depth, alpha, beta, &mut info, 0, true, &mut path, None, None, None, false,
             );
             if info.stopped {
                 break;
@@ -799,6 +807,7 @@ fn negamax(
     prev_move: Option<Move>,
     prev_prev_move: Option<Move>,
     excluded_move: Option<Move>,
+    was_sacrifice: bool,
 ) -> i32 {
     if state.halfmove_clock >= 100 {
         return 0;
@@ -928,7 +937,8 @@ fn negamax(
     }
 
     // NULL MOVE PRUNING
-    // Condition: !threat.tactical_instability
+    // Condition: !threat.tactical_instability AND !was_sacrifice
+    // We disable NMP if the opponent just played a sacrifice, to allow verification of the sacrifice.
     if new_depth >= 3
         && ply > 0
         && !in_check
@@ -936,6 +946,7 @@ fn negamax(
         && excluded_move.is_none()
         && static_eval >= beta
         && !threat_info.tactical_instability // Disable if unstable
+        && !was_sacrifice
     {
         use crate::state::{b, n, q, r, B, N, Q, R};
         let has_pieces = (state.bitboards[N]
@@ -965,6 +976,7 @@ fn negamax(
                 None,
                 None,
                 None,
+                false, // Null move is not a sacrifice
             );
             if info.stopped {
                 return 0;
@@ -989,6 +1001,7 @@ fn negamax(
             prev_move,
             prev_prev_move,
             None,
+            was_sacrifice,
         );
         if let Some(mv) = info.tt.get_move(state.hash) {
             tt_move = Some(mv);
@@ -1019,6 +1032,7 @@ fn negamax(
             prev_move,
             prev_prev_move,
             tt_move,
+            was_sacrifice,
         );
 
         if score < singular_beta {
@@ -1071,17 +1085,25 @@ fn negamax(
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 
         // 1. FUTILITY PRUNING for Quiet Moves
-        // Awareness: Relax margin if threats are high (don't prune if we might miss a defensive resource?)
-        // OR: If high threat, maybe we SHOULD prune bad moves faster?
-        // User: "Futility pruning aware of threats"
-        // Usually: If we are under threat, we must be careful not to prune moves that solve the threat.
-        // But Futility Pruning says "Eval + Margin < Alpha", meaning even if this move improves position by Margin, it's still bad.
-        // If threat is high, Static Eval might be erroneously low (pending tactical resolution).
-        // So we should WIDEN the margin (prune less) or DISABLE it if unstable.
+        // Awareness: Relax margin if threats are high.
+        // Also check if this specific move is a Sacrifice Candidate (High Threat).
+        let is_sacrifice_candidate = if is_quiet {
+            let delta = threat::analyze_move_threat_impact(state, mv, &threat_info);
+            delta.is_tactical
+        } else {
+            // Capture
+            let see_val = see(state, mv);
+            if see_val < 0 {
+                 let delta = threat::analyze_move_threat_impact(state, mv, &threat_info);
+                 delta.threat_score > threat::SACRIFICE_THREAT_THRESHOLD
+            } else {
+                 false
+            }
+        };
 
         if !is_pv && !in_check && is_quiet && new_depth < 7 && excluded_move.is_none() {
             let mut futility_margin = 120 * new_depth as i32;
-            if threat_info.tactical_instability {
+            if threat_info.tactical_instability || is_sacrifice_candidate {
                 futility_margin += 200; // Give more leeway
             }
             if static_eval + futility_margin < alpha {
@@ -1090,12 +1112,11 @@ fn negamax(
             }
         }
 
-        // 2. FUTILITY PRUNING for Captures (Existing logic was slightly buggy/aggressive)
-        // Kept separate for clarity.
+        // 2. FUTILITY PRUNING for Captures
         if !is_pv && !in_check && !is_quiet && new_depth < 5 && excluded_move.is_none() {
             // Captures need a much wider margin
             let futility_margin = 300 * new_depth as i32;
-            if static_eval + futility_margin < alpha {
+            if static_eval + futility_margin < alpha && !is_sacrifice_candidate {
                 continue;
             }
         }
@@ -1120,24 +1141,28 @@ fn negamax(
             quiets_checked += 1;
         }
 
-        // --- QUIET MOVE TACTICAL ANALYSIS ---
-        // Analyze the move to see if it creates significant threats.
-        // We only do this if we are not in check (if in check, all moves are tactical response anyway)
-        let mut is_tactical_quiet = false;
-        if !in_check && is_quiet {
-            let delta = threat::analyze_quiet_move_impact(state, mv, &threat_info);
-            if delta.is_tactical {
-                is_tactical_quiet = true;
-                // Boost search?
-                // Note: We already boosted move ordering via score_move using a lighter check.
-                // Here we verify and adjust LMR.
-            }
+        // --- SACRIFICE & TACTICAL EXTENSION ---
+        // Note: is_sacrifice_candidate was computed above for pruning.
+        // Now use it for extensions.
+
+        let mut move_extension = 0;
+        if is_sacrifice_candidate {
+             move_extension = 1;
         }
+
+        // Also reuse is_sacrifice_candidate for LMR reduction
 
         let mut score;
         if moves_searched == 1 {
             // Apply extensions here too
-            let extended_depth = new_depth.saturating_add(extensions);
+            // First move extensions (root or PV) + Sacrifice extension?
+            // Usually we extend PV moves if they are interesting.
+            // If main threat extensions are 0, we can use move_extension.
+            // total_extension = extensions (static) + move_extension (dynamic) + extension (singular)
+            // Cap at 1 usually, or 2?
+            let total_extension = (extensions + move_extension + extension).min(1);
+
+            let extended_depth = new_depth.saturating_add(total_extension);
             score = -negamax(
                 &next_state,
                 extended_depth - 1,
@@ -1150,6 +1175,7 @@ fn negamax(
                 Some(mv),
                 prev_move,
                 None,
+                is_sacrifice_candidate,
             );
         } else {
             let gives_check = moves_gives_check(state, mv);
@@ -1171,8 +1197,8 @@ fn negamax(
                     reduction = reduction.saturating_sub(1);
                 }
 
-                // REDUCE LMR for Tactical Quiet Moves
-                if is_tactical_quiet {
+                // REDUCE LMR for Tactical/Sacrifice Moves
+                if is_sacrifice_candidate {
                     reduction = reduction.saturating_sub(2);
                 }
             }
@@ -1190,6 +1216,7 @@ fn negamax(
                 Some(mv),
                 prev_move,
                 None,
+                is_sacrifice_candidate,
             );
 
             if score > alpha && reduction > 0 {
@@ -1205,12 +1232,16 @@ fn negamax(
                     Some(mv),
                     prev_move,
                     None,
+                    is_sacrifice_candidate,
                 );
             }
             if score > alpha && score < beta {
+                let total_extension = (extensions + move_extension + extension).min(1);
+                let extended_depth = new_depth.saturating_add(total_extension);
+
                 score = -negamax(
                     &next_state,
-                    new_depth - 1,
+                    extended_depth - 1,
                     -beta,
                     -alpha,
                     info,
@@ -1220,6 +1251,7 @@ fn negamax(
                     Some(mv),
                     prev_move,
                     None,
+                    is_sacrifice_candidate,
                 );
             }
         }
