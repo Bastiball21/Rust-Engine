@@ -27,8 +27,8 @@ fn main() {
     movegen::init_move_tables();
     eval::init_eval();
 
-    // 2. Load NNUE
-    nnue::init_nnue();
+    // 2. Load NNUE (Disabled)
+    // nnue::init_nnue();
 
     // 3. Check for arguments (CLI Mode)
     let args: Vec<String> = env::args().collect();

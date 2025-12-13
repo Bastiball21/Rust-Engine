@@ -1,6 +1,5 @@
 // src/eval.rs
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
-use crate::nnue::{self, NNUE};
 use crate::pawn::PawnTable;
 use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -82,8 +81,7 @@ pub fn init_eval() {
 
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState) -> i32 {
-    // 1. NNUE (Always available now)
-    evaluate_nnue(state)
+    evaluate_hce(state)
 }
 
 // --- HCE LOGIC ---
@@ -305,31 +303,6 @@ fn evaluate_king(
     }
 
     (mg, eg)
-}
-
-// --- NNUE ---
-pub fn evaluate_nnue(state: &GameState) -> i32 {
-    // 1. Get Accumulators (Local Copies)
-    let mut acc_us = state.accumulator[state.side_to_move];
-    let mut acc_them = state.accumulator[1 - state.side_to_move];
-
-    // 2. Refresh if dirty
-    // Since we are inside evaluate (immutable), we can only refresh the local copy.
-    // Efficiency Note: incremental updates in make_move should keep dirty=false mostly.
-    if state.dirty[state.side_to_move] {
-        acc_us.refresh(state, state.side_to_move);
-    }
-    if state.dirty[1 - state.side_to_move] {
-        acc_them.refresh(state, 1 - state.side_to_move);
-    }
-
-    // 3. Evaluate
-    let score = nnue::evaluate_nnue(&acc_us, &acc_them);
-    if state.side_to_move == WHITE {
-        score
-    } else {
-        -score
-    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

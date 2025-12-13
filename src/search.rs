@@ -993,10 +993,22 @@ fn negamax(
 
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 
-        if !is_pv && !in_check && !is_quiet && new_depth < 7 && excluded_move.is_none() {
-            let futility_margin = 150 * new_depth as i32;
+        // 1. FUTILITY PRUNING for Quiet Moves (Aggressive "Bad Move" Pruning)
+        // If !is_pv (not a principal variation node), safe to prune more aggressively.
+        if !is_pv && !in_check && is_quiet && new_depth < 7 && excluded_move.is_none() {
+            let futility_margin = 120 * new_depth as i32;
             if static_eval + futility_margin < alpha {
                 quiets_checked += 1;
+                continue;
+            }
+        }
+
+        // 2. FUTILITY PRUNING for Captures (Existing logic was slightly buggy/aggressive)
+        // Kept separate for clarity.
+        if !is_pv && !in_check && !is_quiet && new_depth < 5 && excluded_move.is_none() {
+            // Captures need a much wider margin
+            let futility_margin = 300 * new_depth as i32;
+            if static_eval + futility_margin < alpha {
                 continue;
             }
         }
