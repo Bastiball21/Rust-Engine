@@ -3,7 +3,7 @@ use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::movegen::{self, MoveGenerator};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
-use crate::threat::{self, ThreatInfo};
+use crate::threat::{self, ThreatInfo, ThreatDeltaScore};
 use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +42,9 @@ pub struct SearchInfo<'a> {
     pub stopped: bool,
     pub tt: &'a TranspositionTable,
     pub main_thread: bool,
+
+    // Added for threading current threat info to scoring
+    pub current_threat: Option<ThreatInfo>,
 }
 
 impl<'a> SearchInfo<'a> {
@@ -80,6 +83,7 @@ impl<'a> SearchInfo<'a> {
             stopped: false,
             tt,
             main_thread: main,
+            current_threat: None,
         }
     }
 
@@ -364,6 +368,29 @@ fn score_move(
         score += info.cont_history[idx][attacker][mv.target as usize];
     }
 
+    // --- TACTICAL QUIET MOVE BOOST ---
+    // If we have threat info (we are in negamax, not root/qsearch? actually passed via info)
+    // We check for tactical bonuses.
+    // Note: score_move is called for ALL moves. Doing full analysis here is too slow.
+    // We use lightweight checks.
+
+    if let Some(threat) = &info.current_threat {
+        // 1. Dominance (Static)
+        let dom = threat::is_dominant_square(state, mv.target, attacker, state.side_to_move);
+        if dom > 0 {
+            score += dom * 50; // Boost order significantly
+        }
+
+        // 2. Defensive (If under threat)
+        if threat.static_threat_score > 50 || threat.king_danger_score[state.side_to_move] > 20 {
+            // Simple defensive check: moving attacked piece?
+            let is_attacked = threat.attacks_by_side[1 - state.side_to_move].get_bit(mv.source);
+            if is_attacked {
+                score += 2000; // Priority!
+            }
+        }
+    }
+
     score.min(70000)
 }
 
@@ -445,6 +472,9 @@ fn quiescence(
     // Given the constraints ("Acceptable NPS drop 0-3%"), full analysis here is risky.
     // We will use a default ThreatInfo for stand_pat evaluation in QSearch.
     let threat_info = ThreatInfo::default();
+
+    // QSearch doesn't need detailed threat info for move ordering usually (captures only).
+    info.current_threat = None;
 
     if ply >= MAX_PLY {
         return eval::evaluate(state, &threat_info);
@@ -812,6 +842,7 @@ fn negamax(
     // Always computed (except QSearch/Root? No, root needs it too).
     // This feeds into extensions and pruning.
     let threat_info = threat::analyze(state);
+    info.current_threat = Some(threat_info); // Pass to score_move
 
     // Extensions based on Threat
     // 1. King Danger Extension: Preventative
@@ -1089,6 +1120,20 @@ fn negamax(
             quiets_checked += 1;
         }
 
+        // --- QUIET MOVE TACTICAL ANALYSIS ---
+        // Analyze the move to see if it creates significant threats.
+        // We only do this if we are not in check (if in check, all moves are tactical response anyway)
+        let mut is_tactical_quiet = false;
+        if !in_check && is_quiet {
+            let delta = threat::analyze_quiet_move_impact(state, mv, &threat_info);
+            if delta.is_tactical {
+                is_tactical_quiet = true;
+                // Boost search?
+                // Note: We already boosted move ordering via score_move using a lighter check.
+                // Here we verify and adjust LMR.
+            }
+        }
+
         let mut score;
         if moves_searched == 1 {
             // Apply extensions here too
@@ -1110,6 +1155,7 @@ fn negamax(
             let gives_check = moves_gives_check(state, mv);
             let mut reduction = 0;
 
+            // Adjusted LMR
             if new_depth >= 3 && moves_searched > 1 && is_quiet && !gives_check && !in_check {
                 let d_idx = new_depth.min(63) as usize;
                 let m_idx = moves_searched.min(63) as usize;
@@ -1123,6 +1169,11 @@ fn negamax(
                     && (info.killers[ply][0] == Some(mv) || info.killers[ply][1] == Some(mv))
                 {
                     reduction = reduction.saturating_sub(1);
+                }
+
+                // REDUCE LMR for Tactical Quiet Moves
+                if is_tactical_quiet {
+                    reduction = reduction.saturating_sub(2);
                 }
             }
 

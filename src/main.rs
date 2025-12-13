@@ -12,6 +12,7 @@ mod perft;
 mod search;
 mod state;
 mod tests;
+mod tactical_test;
 mod threat;
 mod time;
 mod tt;
