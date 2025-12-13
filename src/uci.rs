@@ -28,7 +28,7 @@ pub fn uci_loop() {
     let mut move_overhead = 10;
 
     // Initialize NNUE by default
-    crate::nnue::init_nnue();
+    // crate::nnue::init_nnue();
 
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -101,7 +101,7 @@ pub fn uci_loop() {
                     // CRITICAL: Ensure the root state has a fresh accumulator.
                     // This sets dirty=false and calculates the initial accumulator from scratch.
                     // Subsequent incremental updates will keep it valid.
-                    state_clone.refresh_accumulator();
+                    // state_clone.refresh_accumulator();
 
                     let stop_clone = stop_signal.clone();
                     let tm_clone = tm;

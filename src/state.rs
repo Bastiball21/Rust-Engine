@@ -2,7 +2,7 @@
 #![allow(non_upper_case_globals)]
 
 use crate::bitboard::Bitboard;
-use crate::nnue::{make_index, Accumulator};
+// use crate::nnue::{make_index, Accumulator};
 use crate::zobrist;
 
 pub const P: usize = 0;
@@ -41,8 +41,8 @@ pub struct GameState {
     pub halfmove_clock: u8,
     // CHANGE: Added fullmove_number field
     pub fullmove_number: u16,
-    pub accumulator: [Accumulator; 2],
-    pub dirty: [bool; 2],
+    // pub accumulator: [Accumulator; 2],
+    // pub dirty: [bool; 2],
 }
 
 impl GameState {
@@ -57,8 +57,8 @@ impl GameState {
             halfmove_clock: 0,
             // CHANGE: Initialized to 1
             fullmove_number: 1,
-            accumulator: [Accumulator::default(); 2],
-            dirty: [true, true],
+            // accumulator: [Accumulator::default(); 2],
+            // dirty: [true, true],
         }
     }
 
@@ -84,20 +84,7 @@ impl GameState {
     }
 
     pub fn refresh_accumulator(&mut self) {
-        // Refresh White Accumulator
-        if self.dirty[0] {
-            let mut acc = Accumulator::default();
-            acc.refresh(self, WHITE);
-            self.accumulator[0] = acc;
-            self.dirty[0] = false;
-        }
-        // Refresh Black Accumulator
-        if self.dirty[1] {
-            let mut acc = Accumulator::default();
-            acc.refresh(self, BLACK);
-            self.accumulator[1] = acc;
-            self.dirty[1] = false;
-        }
+        // Disabled for HCE
     }
 
     pub fn parse_fen(fen: &str) -> GameState {
@@ -286,7 +273,7 @@ impl GameState {
             new_state.fullmove_number += 1;
         }
 
-        new_state.dirty = self.dirty;
+        // new_state.dirty = self.dirty;
         new_state
     }
 
@@ -315,103 +302,6 @@ impl GameState {
         if piece_type == P || piece_type == p || mv.is_capture {
             new_state.halfmove_clock = 0;
         }
-
-        // --- INCREMENTAL NNUE UPDATE ---
-        let mut w_added = smallvec::SmallVec::<[usize; 8]>::new();
-        let mut w_removed = smallvec::SmallVec::<[usize; 8]>::new();
-        let mut b_added = smallvec::SmallVec::<[usize; 8]>::new();
-        let mut b_removed = smallvec::SmallVec::<[usize; 8]>::new();
-        let w_dirty = self.dirty[0];
-        let b_dirty = self.dirty[1];
-
-        // Helper to queue updates
-        let mut queue_update = |piece: usize, sq: usize, is_add: bool| {
-            // White Perspective
-            let idx = make_index(WHITE, piece, sq);
-            if is_add {
-                w_added.push(idx);
-            } else {
-                w_removed.push(idx);
-            }
-
-            // Black Perspective
-            let idx = make_index(BLACK, piece, sq);
-            if is_add {
-                b_added.push(idx);
-            } else {
-                b_removed.push(idx);
-            }
-        };
-
-        // 1. Remove Moving Piece from Source
-        queue_update(piece_type, mv.source as usize, false);
-
-        // 2. Remove Captured Piece (if any)
-        if mv.is_capture {
-            let enemy_start = if side == WHITE { p } else { P };
-            let enemy_end = if side == WHITE { k } else { K };
-            let mut captured_piece = 12;
-            let mut capture_sq = mv.target;
-
-            if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
-                capture_sq = if side == WHITE {
-                    mv.target - 8
-                } else {
-                    mv.target + 8
-                };
-                captured_piece = if side == WHITE { p } else { P };
-            } else {
-                for pp in enemy_start..=enemy_end {
-                    if new_state.bitboards[pp].get_bit(mv.target) {
-                        captured_piece = pp;
-                        break;
-                    }
-                }
-            }
-            if captured_piece < 12 {
-                queue_update(captured_piece, capture_sq as usize, false);
-            }
-        }
-
-        // 3. Add Moving Piece to Target (Handle Promotion)
-        let final_piece = if let Some(promo) = mv.promotion {
-            if side == WHITE {
-                promo
-            } else {
-                promo + 6
-            }
-        } else {
-            piece_type
-        };
-        queue_update(final_piece, mv.target as usize, true);
-
-        // 4. Handle Castling (Rook Move)
-        if (piece_type == K || piece_type == k) && (mv.target as i8 - mv.source as i8).abs() == 2 {
-            let (rook_src, rook_dst) = if mv.target == 6 {
-                (7, 5)
-            } else if mv.target == 2 {
-                (0, 3)
-            } else if mv.target == 62 {
-                (63, 61)
-            } else {
-                (56, 59)
-            }; // target == 58
-
-            let rook_piece = if side == WHITE { R } else { r };
-            queue_update(rook_piece, rook_src, false);
-            queue_update(rook_piece, rook_dst, true);
-        }
-
-        // Apply Updates
-        if !w_dirty {
-            new_state.accumulator[WHITE].update(&w_added, &w_removed);
-        }
-        if !b_dirty {
-            new_state.accumulator[BLACK].update(&b_added, &b_removed);
-        }
-        new_state.dirty = [w_dirty, b_dirty];
-
-        // --- END NNUE UPDATE ---
 
         new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
         new_state.bitboards[piece_type].pop_bit(mv.source);
