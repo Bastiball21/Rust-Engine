@@ -2,8 +2,9 @@
 #![allow(non_upper_case_globals)]
 
 use crate::bitboard::Bitboard;
-// use crate::nnue::{make_index, Accumulator};
+use crate::nnue::Accumulator;
 use crate::zobrist;
+use smallvec::SmallVec;
 
 pub const P: usize = 0;
 pub const N: usize = 1;
@@ -39,10 +40,8 @@ pub struct GameState {
     pub en_passant: u8,
     pub hash: u64,
     pub halfmove_clock: u8,
-    // CHANGE: Added fullmove_number field
     pub fullmove_number: u16,
-    // pub accumulator: [Accumulator; 2],
-    // pub dirty: [bool; 2],
+    pub accumulator: [Accumulator; 2],
 }
 
 impl GameState {
@@ -55,10 +54,8 @@ impl GameState {
             en_passant: 64,
             hash: 0,
             halfmove_clock: 0,
-            // CHANGE: Initialized to 1
             fullmove_number: 1,
-            // accumulator: [Accumulator::default(); 2],
-            // dirty: [true, true],
+            accumulator: [Accumulator::default(); 2],
         }
     }
 
@@ -84,7 +81,9 @@ impl GameState {
     }
 
     pub fn refresh_accumulator(&mut self) {
-        // Disabled for HCE
+        let bitboards = &self.bitboards;
+        self.accumulator[0].refresh(bitboards, 0);
+        self.accumulator[1].refresh(bitboards, 1);
     }
 
     pub fn parse_fen(fen: &str) -> GameState {
@@ -148,7 +147,6 @@ impl GameState {
             state.halfmove_clock = parts[4].parse().unwrap_or(0);
         }
 
-        // CHANGE: Parse fullmove number
         if parts.len() > 5 {
             state.fullmove_number = parts[5].parse().unwrap_or(1);
         }
@@ -162,6 +160,7 @@ impl GameState {
         state.occupancies[BOTH] = state.occupancies[WHITE] | state.occupancies[BLACK];
 
         state.compute_hash();
+        state.refresh_accumulator();
         state
     }
 
@@ -249,7 +248,6 @@ impl GameState {
             fen.push('-');
         }
 
-        // CHANGE: Use real fullmove number
         fen.push_str(&format!(
             " {} {}",
             self.halfmove_clock, self.fullmove_number
@@ -268,18 +266,21 @@ impl GameState {
         }
         new_state.halfmove_clock = 0;
 
-        // CHANGE: Increment fullmove after Black moves
         if self.side_to_move == BLACK {
             new_state.fullmove_number += 1;
         }
 
-        // new_state.dirty = self.dirty;
+        // Null move does not update accumulators (no pieces moved)
         new_state
     }
 
     pub fn make_move(&self, mv: Move) -> GameState {
         let mut new_state = *self;
         let side = self.side_to_move;
+
+        // NNUE Incremental Update Tracking
+        let mut added: SmallVec<[(usize, usize); 4]> = SmallVec::new();
+        let mut removed: SmallVec<[(usize, usize); 4]> = SmallVec::new();
 
         if side == BLACK {
             new_state.fullmove_number += 1;
@@ -299,12 +300,31 @@ impl GameState {
             }
         }
 
+        // 1. Remove moving piece from source
+        removed.push((piece_type, mv.source as usize));
+
         if piece_type == P || piece_type == p || mv.is_capture {
             new_state.halfmove_clock = 0;
         }
 
         new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
         new_state.bitboards[piece_type].pop_bit(mv.source);
+
+        // 2. Add moving piece (or promo) to target
+        let actual_piece = if let Some(promo) = mv.promotion {
+            let p_idx = if side == WHITE { promo } else { promo + 6 };
+            new_state.bitboards[piece_type].pop_bit(mv.target); // Should be empty unless capture? No, bitboard logic handles moves.
+            // Wait, standard bitboard move logic:
+            // Remove from source. Add to target.
+            // If promo, remove source (type P), add target (type Promo).
+
+            // Logic below handles target set_bit.
+            p_idx
+        } else {
+            piece_type
+        };
+        added.push((actual_piece, mv.target as usize));
+
 
         new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
         new_state.bitboards[piece_type].set_bit(mv.target);
@@ -314,6 +334,7 @@ impl GameState {
             let enemy_end = if side == WHITE { k } else { K };
 
             if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
+                // En Passant Capture
                 let cap_sq = if side == WHITE {
                     mv.target - 8
                 } else {
@@ -322,11 +343,26 @@ impl GameState {
                 let enemy_pawn = if side == WHITE { p } else { P };
                 new_state.bitboards[enemy_pawn].pop_bit(cap_sq);
                 new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
+
+                // NNUE: Remove captured pawn
+                removed.push((enemy_pawn, cap_sq as usize));
             } else {
+                // Normal Capture
                 for pp in enemy_start..=enemy_end {
                     if new_state.bitboards[pp].get_bit(mv.target) {
+                        // Note: We are checking new_state, but we just set the piece there?
+                        // Actually, the logic in original make_move was:
+                        // 1. pop source
+                        // 2. set target
+                        // 3. if capture, loop over enemies and pop target.
+                        // So at this point, target has BOTH pieces?
+                        // Yes, standard make_move implementation often overlaps bitboards briefly.
+
                         new_state.bitboards[pp].pop_bit(mv.target);
                         new_state.hash ^= zobrist::piece_key(pp, mv.target as usize);
+
+                        // NNUE: Remove captured piece
+                        removed.push((pp, mv.target as usize));
                         break;
                     }
                 }
@@ -334,6 +370,14 @@ impl GameState {
         }
 
         if let Some(promo) = mv.promotion {
+            // Fixup for promotion: we set P at target above (copying logic), now we swap it?
+            // Original code:
+            // new_state.bitboards[piece_type].set_bit(mv.target); (as P)
+            // ...
+            // if let Some(promo) ...
+            //    pop P at target
+            //    set Promo at target
+
             new_state.bitboards[piece_type].pop_bit(mv.target);
             new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
 
@@ -348,21 +392,29 @@ impl GameState {
                 new_state.hash ^= zobrist::piece_key(R, 7);
                 new_state.bitboards[R].set_bit(5);
                 new_state.hash ^= zobrist::piece_key(R, 5);
+
+                removed.push((R, 7)); added.push((R, 5));
             } else if mv.target == 2 {
                 new_state.bitboards[R].pop_bit(0);
                 new_state.hash ^= zobrist::piece_key(R, 0);
                 new_state.bitboards[R].set_bit(3);
                 new_state.hash ^= zobrist::piece_key(R, 3);
+
+                removed.push((R, 0)); added.push((R, 3));
             } else if mv.target == 62 {
                 new_state.bitboards[r].pop_bit(63);
                 new_state.hash ^= zobrist::piece_key(r, 63);
                 new_state.bitboards[r].set_bit(61);
                 new_state.hash ^= zobrist::piece_key(r, 61);
+
+                removed.push((r, 63)); added.push((r, 61));
             } else if mv.target == 58 {
                 new_state.bitboards[r].pop_bit(56);
                 new_state.hash ^= zobrist::piece_key(r, 56);
                 new_state.bitboards[r].set_bit(59);
                 new_state.hash ^= zobrist::piece_key(r, 59);
+
+                removed.push((r, 56)); added.push((r, 59));
             }
         }
 
@@ -421,6 +473,10 @@ impl GameState {
             new_state.occupancies[BLACK] = new_state.occupancies[BLACK] | new_state.bitboards[pp];
         }
         new_state.occupancies[BOTH] = new_state.occupancies[WHITE] | new_state.occupancies[BLACK];
+
+        // Update Accumulators
+        new_state.accumulator[0].update(&added, &removed, 0);
+        new_state.accumulator[1].update(&added, &removed, 1);
 
         new_state
     }

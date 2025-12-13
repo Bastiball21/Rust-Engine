@@ -28,7 +28,11 @@ pub fn uci_loop() {
     let mut move_overhead = 10;
 
     // Initialize NNUE by default
-    // crate::nnue::init_nnue();
+    // We look for "nn-aether.nnue" or "nn.bin" by default, or the user can specify.
+    // Let's try to load "nn-aether.nnue" silently.
+    if std::path::Path::new("nn-aether.nnue").exists() {
+        crate::nnue::init_nnue("nn-aether.nnue");
+    }
 
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -96,7 +100,7 @@ pub fn uci_loop() {
                 let (tm, depth) = parse_go(game_state.side_to_move, &parts, move_overhead);
 
                 for i in 0..num_threads {
-                    let mut state_clone = game_state;
+                    let state_clone = game_state;
 
                     // CRITICAL: Ensure the root state has a fresh accumulator.
                     // This sets dirty=false and calculates the initial accumulator from scratch.
@@ -151,8 +155,14 @@ pub fn uci_loop() {
                             move_overhead = ov;
                         }
                     } else if parts[2] == "EvalFile" && parts[3] == "value" {
-                        // Ignoring EvalFile setoption for embedded
-                        println!("Embedded NNUE. Ignoring EvalFile.");
+                        // Load NNUE
+                        let path = parts[4];
+                        crate::nnue::init_nnue(path);
+                        // We should probably refresh the accumulator of current game state, but we don't have mutable access here easily inside the loop without restructuring.
+                        // However, ucinewgame or position will likely follow.
+                        // Ideally, we refresh accumulators immediately if possible.
+                        // But game_state is local variable. We can do it.
+                        game_state.refresh_accumulator();
                     }
                 }
             }

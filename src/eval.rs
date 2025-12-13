@@ -81,7 +81,11 @@ pub fn init_eval() {
 
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState) -> i32 {
-    evaluate_hce(state)
+    if crate::nnue::NETWORK.get().is_some() {
+        crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move])
+    } else {
+        evaluate_hce(state)
+    }
 }
 
 // --- HCE LOGIC ---
