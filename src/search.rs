@@ -389,6 +389,31 @@ fn score_move(
                 score += 2000; // Priority!
             }
         }
+
+        // 3. New Features: Coordination & Levers (Lightweight Checks)
+        // Only for Quiet Moves
+        if !mv.is_capture && mv.promotion.is_none() {
+            let impact = threat::analyze_move_threat_impact(state, mv, threat);
+
+            if impact.pawn_lever_score > 0 {
+                score += impact.pawn_lever_score * 10;
+            }
+            if impact.coordination_bonus > 0 {
+                score += impact.coordination_bonus * 5;
+            }
+
+            // 4. Prophylaxis (Feature #1)
+            // Heavy logic, only for Killers or History moves to save NPS
+            let is_promising = score > 1000 ||
+                (ply < MAX_PLY && (info.killers[ply][0] == Some(mv) || info.killers[ply][1] == Some(mv)));
+
+            if is_promising {
+                let prophylaxis = threat::get_prophylaxis_score(state, mv, threat);
+                if prophylaxis > 0 {
+                    score += prophylaxis * 2; // High weight for prevention
+                }
+            }
+        }
     }
 
     score.min(70000)

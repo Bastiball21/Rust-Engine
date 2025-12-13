@@ -162,8 +162,19 @@ pub fn evaluate_hce(state: &GameState, threat: &ThreatInfo) -> i32 {
     mg += w_dom_mg - b_dom_mg;
     eg += w_dom_eg - b_dom_eg;
 
+    // G. Coordination & Clustering (Features #2 & #5)
+    // Coordination: Bonus for batteries/connected pieces
+    mg += threat.coordination_score[WHITE] - threat.coordination_score[BLACK];
+    eg += (threat.coordination_score[WHITE] - threat.coordination_score[BLACK]) / 2;
 
-    // G. Scaling
+    // Clustering: Penalty for being swarmed by multiple attackers
+    mg -= threat.clustering_score[WHITE];
+    mg += threat.clustering_score[BLACK];
+
+    eg -= threat.clustering_score[WHITE] / 2;
+    eg += threat.clustering_score[BLACK] / 2;
+
+    // H. Scaling
     let phase = phase.clamp(0, 24);
     let mut score = (mg * phase + eg * (24 - phase)) / 24;
 
