@@ -60,15 +60,41 @@ fn main() {
             }
             return;
         }
-        // --- FIX: Moved inside the main function logic ---
+
         if args[1] == "datagen" {
-            // Usage: "Aether datagen 1000"
-            let count = if args.len() > 2 {
+            // Usage: "Aether datagen <games> <threads> <depth> <filename>"
+            let games = if args.len() > 2 {
                 args[2].parse().unwrap_or(100)
             } else {
                 100
             };
-            datagen::run_datagen(count);
+
+            let threads = if args.len() > 3 {
+                args[3].parse().unwrap_or(1)
+            } else {
+                1
+            };
+
+            let depth = if args.len() > 4 {
+                args[4].parse().unwrap_or(6)
+            } else {
+                6
+            };
+
+            let filename = if args.len() > 5 {
+                args[5].clone()
+            } else {
+                "aether_data.bin".to_string()
+            };
+
+            let config = datagen::DatagenConfig {
+                num_games: games,
+                num_threads: threads,
+                depth,
+                filename,
+            };
+
+            datagen::run_datagen(config);
             return;
         }
     }
