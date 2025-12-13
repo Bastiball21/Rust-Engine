@@ -1,6 +1,7 @@
 // src/main.rs
 #![allow(unused_imports, unused_variables, dead_code)]
 mod bitboard;
+mod bullet_helper;
 mod datagen;
 mod endgame;
 mod eval;

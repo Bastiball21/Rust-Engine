@@ -4,16 +4,20 @@ use crate::state::{GameState, WHITE};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::TranspositionTable;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::BufWriter;
 use std::sync::{atomic::AtomicBool, Arc};
+use crate::bullet_helper::convert_to_bullet;
+use bulletformat::BulletFormat;
 
 pub fn run_datagen(games: usize) {
     println!("Starting Datagen for {} games at Depth 6...", games);
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("aether_data.txt")
+        .open("aether_data.bin")
         .unwrap();
+
+    let mut writer = BufWriter::new(file);
 
     // 64MB TT is good for Depth 6
     let mut tt = TranspositionTable::new(64);
@@ -22,7 +26,8 @@ pub fn run_datagen(games: usize) {
     for i in 0..games {
         let mut state =
             GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        let mut fens = Vec::new();
+
+        let mut positions: Vec<(GameState, i16)> = Vec::new();
         let result_val;
 
         loop {
@@ -48,7 +53,6 @@ pub fn run_datagen(games: usize) {
             }
 
             // 2. Set Depth (Random opening vs Real search)
-            // FIX: Changed from 4 to 6 for better quality
             let depth = if state.fullmove_number < 8 { 1 } else { 6 };
 
             let tm = TimeManager::new(TimeControl::MoveTime(50), state.side_to_move, 0);
@@ -59,27 +63,15 @@ pub fn run_datagen(games: usize) {
                 tt.probe_data(state.hash).unwrap_or((0, 0, 0, None));
             let best_move = best_move_opt.unwrap_or(moves.list.moves[0]);
 
-            // --- CRITICAL FIX: ADJUDICATION ---
-            // If we see a mate score (>20000), claim the win NOW. Do not play it out.
+            // --- ADJUDICATION ---
             if tt_score.abs() > 20000 {
                 if tt_score > 0 {
-                    // Positive score = Current side is winning
-                    result_val = if state.side_to_move == WHITE {
-                        1.0
-                    } else {
-                        0.0
-                    };
+                    result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
                 } else {
-                    // Negative score = Current side is losing
-                    result_val = if state.side_to_move == WHITE {
-                        0.0
-                    } else {
-                        1.0
-                    };
+                    result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
                 }
                 break;
             }
-            // ----------------------------------
 
             // Save Data: FEN | SCORE | RESULT
             let white_relative_score = if state.side_to_move == WHITE {
@@ -89,16 +81,21 @@ pub fn run_datagen(games: usize) {
             };
 
             if state.fullmove_number > 8 {
-                fens.push(format!("{} | {} | ", state.to_fen(), white_relative_score));
+                positions.push((state.clone(), white_relative_score as i16));
             }
 
             state = state.make_move(best_move);
         }
 
-        // Write to file
-        for line in fens {
-            writeln!(file, "{}{}", line, result_val).unwrap();
+        // Buffer for this game
+        let mut game_data = Vec::with_capacity(positions.len());
+        for (pos_state, score) in positions {
+            let board = convert_to_bullet(&pos_state, score, result_val);
+            game_data.push(board);
         }
+
+        // Write batch
+        bulletformat::ChessBoard::write_to_bin(&mut writer, &game_data).unwrap();
 
         // Print progress
         println!(
