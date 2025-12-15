@@ -8,6 +8,7 @@ use std::io::BufWriter;
 use std::sync::{atomic::AtomicBool, Arc};
 use std::thread;
 use std::sync::mpsc;
+use std::time::Instant;
 use crate::bullet_helper::convert_to_bullet;
 use bulletformat::BulletFormat;
 
@@ -55,6 +56,7 @@ pub fn run_datagen(config: DatagenConfig) {
 
     // Writer Thread
     let filename = config.filename.clone();
+    let total_games = config.num_games;
     let writer_handle = thread::spawn(move || {
         let file = OpenOptions::new()
             .create(true)
@@ -65,13 +67,37 @@ pub fn run_datagen(config: DatagenConfig) {
         let mut writer = BufWriter::new(file);
         let mut games_written = 0;
         let mut positions_written = 0;
+        let start_time = Instant::now();
 
         for game_data in rx {
             bulletformat::ChessBoard::write_to_bin(&mut writer, &game_data).unwrap();
             games_written += 1;
             positions_written += game_data.len();
-            if games_written % 100 == 0 {
-                println!("Written {} games ({} pos)...", games_written, positions_written);
+
+            if games_written % 10 == 0 {
+                let elapsed = start_time.elapsed();
+                let elapsed_secs = elapsed.as_secs_f64();
+                let games_per_sec = games_written as f64 / elapsed_secs;
+                let pos_per_sec = positions_written as f64 / elapsed_secs;
+
+                let remaining_games = total_games.saturating_sub(games_written);
+                let eta_secs = if games_per_sec > 0.0 {
+                    remaining_games as f64 / games_per_sec
+                } else {
+                    0.0
+                };
+                let eta = std::time::Duration::from_secs_f64(eta_secs);
+
+                println!(
+                    "Written {} games ({:.2}%) ({} pos)... {:.2} games/s, {:.2} pos/s, Elapsed: {:.0}s, ETA: {:.0}s",
+                    games_written,
+                    (games_written as f64 / total_games as f64) * 100.0,
+                    positions_written,
+                    games_per_sec,
+                    pos_per_sec,
+                    elapsed_secs,
+                    eta.as_secs()
+                );
             }
         }
         println!("Writer thread finished. Total games: {}, Total pos: {}", games_written, positions_written);
