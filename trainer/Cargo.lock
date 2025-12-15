@@ -37,22 +37,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 
 [[package]]
-name = "bullet_cuda_backend"
-version = "0.1.0"
-source = "git+https://github.com/jw1912/bullet#e5f65c43050f3c864d7f1e8af944bc5fbdebcbb6"
-dependencies = [
- "acyclib",
- "cudarc",
- "parking_lot",
-]
-
-[[package]]
 name = "bullet_lib"
 version = "1.0.0"
 source = "git+https://github.com/jw1912/bullet#e5f65c43050f3c864d7f1e8af944bc5fbdebcbb6"
 dependencies = [
  "acyclib",
- "bullet_cuda_backend",
  "bulletformat",
  "montyformat",
  "sfbinpack",
@@ -70,15 +59,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "cudarc"
-version = "0.17.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72ba848ae5c6f3cb36e71eab5f268763e3fabcabe3f7bc683e16f7fa3d46281e"
-dependencies = [
- "libloading",
-]
 
 [[package]]
 name = "equivalent"
@@ -119,16 +99,6 @@ name = "libc"
 version = "0.2.178"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
-
-[[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
 
 [[package]]
 name = "libm"
