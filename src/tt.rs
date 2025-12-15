@@ -179,10 +179,13 @@ impl TranspositionTable {
                 let data = entry.data.load(Ordering::Relaxed);
                 let (_, d, _, age, _) = Self::unpack(data);
 
-                // Calculate "Value": Deep entries are valuable, Old entries lose value.
-                // Age diff is wrapped u8, handled by masking.
+            // "Depth-Preferred" Replacement Strategy
+            // 1. If we are deeper than the existing entry, we almost always want to replace it.
+            // 2. If the existing entry is old (age_diff > 0), its value drops significantly.
+            // 3. Score = Depth - (Age * Boost)
+
                 let age_diff = current_gen.wrapping_sub(age);
-                let replace_score = (d as i32) - (age_diff as i32 * 2);
+            let replace_score = (d as i32) - (age_diff as i32 * 4); // Boost age penalty
 
                 if replace_score < min_score {
                     min_score = replace_score;
@@ -190,11 +193,28 @@ impl TranspositionTable {
                 }
             }
 
-            // 4. Replace the worst entry if our new entry is better (or if we just force it)
-            // Here we use a strategy: Always replace the worst candidate in the bucket.
+        // 4. Replace strategy
+        // We replace if:
+        // A. The victim is empty (key == 0) - handled above
+        // B. The new entry is deeper than the victim's score (conceptually)
+        // C. The victim is the "worst" in the cluster
+        // To avoid thrashing deep PV nodes with shallow searches, we check:
+        // New Depth > Min Score? Or just always replace the worst?
+        // Let's replace the worst, but ONLY if the new entry is "better" or the victim is old.
+
             let entry = &cluster.entries[best_victim_idx];
-            entry.key.store(hash, Ordering::Relaxed);
-            entry.data.store(new_data, Ordering::Relaxed);
+        let old_data = entry.data.load(Ordering::Relaxed);
+        let (_, old_d, _, old_age, _) = Self::unpack(old_data);
+        let old_age_diff = current_gen.wrapping_sub(old_age);
+
+        // Allow replacement if:
+        // 1. New depth >= Old depth
+        // 2. Old entry is old (age_diff > 0)
+        // 3. New depth is reasonably close to old depth (e.g. old_d - new_d < 5)
+        if depth >= old_d || old_age_diff > 0 || (old_d < depth + 5) {
+             entry.key.store(hash, Ordering::Relaxed);
+             entry.data.store(new_data, Ordering::Relaxed);
+        }
         }
     }
 

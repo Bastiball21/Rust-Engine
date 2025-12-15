@@ -5,6 +5,7 @@ mod bullet_helper;
 mod datagen;
 mod endgame;
 mod eval;
+mod logging;
 mod movegen;
 mod nnue;
 mod pawn;
@@ -24,6 +25,8 @@ use std::env;
 use std::thread;
 
 fn main() {
+    logging::init_logging();
+
     // 1. Initialize Global Tables
     zobrist::init_zobrist();
     bitboard::init_magic_tables();

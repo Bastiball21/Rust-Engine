@@ -108,7 +108,7 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
     let enemy = 1 - side;
     let enemy_king_sq = state.bitboards[if enemy == WHITE { K } else { k }].get_lsb_index() as u8;
 
-    let mut piece = get_piece_type_safe(state, mv.source);
+    let mut piece = get_piece_type_safe_optimized(state, mv.source, side);
     if let Some(p_promo) = mv.promotion {
         piece = if side == WHITE { p_promo } else { p_promo + 6 };
     }
@@ -421,6 +421,17 @@ fn score_move(
 
 fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
     for piece in 0..12 {
+        if state.bitboards[piece].get_bit(square) {
+            return piece;
+        }
+    }
+    12
+}
+
+fn get_piece_type_safe_optimized(state: &GameState, square: u8, side: usize) -> usize {
+    let start = if side == WHITE { 0 } else { 6 };
+    let end = if side == WHITE { 5 } else { 11 };
+    for piece in start..=end {
         if state.bitboards[piece].get_bit(square) {
             return piece;
         }
