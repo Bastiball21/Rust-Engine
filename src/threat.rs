@@ -92,9 +92,10 @@ pub fn analyze(state: &GameState) -> ThreatInfo {
 
     // 4. Conditional Expensive Checks (1-ply Probe)
     // Only run if static threat indicates danger or instability
-    if info.static_threat_score > 50 || info.king_danger_score[state.side_to_move] > 30 {
-        compute_forcing_threats(state, &mut info);
-    }
+    // DISABLED: Too expensive for per-node analysis (causes massive slowdown/hang).
+    // if info.static_threat_score > 50 || info.king_danger_score[state.side_to_move] > 30 {
+    //    compute_forcing_threats(state, &mut info);
+    // }
 
     info
 }
