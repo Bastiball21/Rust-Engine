@@ -411,6 +411,13 @@ impl GameState {
             }
         }
 
+        // Update En Passant: Reset it for next move
+        if self.en_passant != 64 {
+            let file = (self.en_passant % 8) as u8;
+            new_state.hash ^= zobrist::en_passant_key(file);
+        }
+        new_state.en_passant = 64;
+
         if is_castling {
             // CASTLING LOGIC (Unified)
             // 1. Remove King from Source
@@ -530,12 +537,6 @@ impl GameState {
                 }
             }
 
-            // Update En Passant
-            if self.en_passant != 64 {
-                let file = (self.en_passant % 8) as u8;
-                new_state.hash ^= zobrist::en_passant_key(file);
-            }
-            new_state.en_passant = 64;
             if piece_type == P || piece_type == p {
                 let diff = (mv.target as i8 - mv.source as i8).abs();
                 if diff == 16 {
