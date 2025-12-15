@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn test_accumulator_logic() {
         // Mock Accumulator
-        let mut acc = Accumulator { v: [0; LAYER1_SIZE] };
+        let acc = Accumulator { v: [0; LAYER1_SIZE] };
         for x in acc.v { assert_eq!(x, 0); }
 
         // We can't easily test with weights without a file or mocking the Network global,

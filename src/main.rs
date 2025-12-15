@@ -20,6 +20,9 @@ mod tt;
 mod tuning;
 mod uci;
 mod zobrist;
+mod chess960; // Helper
+#[cfg(test)]
+mod tests_chess960; // Tests
 
 use std::env;
 use std::thread;

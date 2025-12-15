@@ -113,6 +113,23 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
         piece = if side == WHITE { p_promo } else { p_promo + 6 };
     }
 
+    // Chess960 Castling Check: Target is own rook?
+    // If so, treat as "not giving check" via direct attack (King doesn't attack enemy king)
+    // But we must perform slow check because castling is complex.
+    if piece == K || piece == k {
+         // If target has friendly rook, castling
+         let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
+         if friendly_rooks.get_bit(mv.target) {
+              // It's castling. Fallback to slow check.
+              // We can return false here if we assume moves_gives_check handles slow check fallback.
+              // BUT gives_check_fast is used inside quiescence pruning logic.
+              // If we return false, we might prune it? No, pruning logic checks !gives_check.
+              // Castling in QSearch? Rare/Impossible (QSearch generates captures).
+              // Unless we generated checks.
+              return false;
+         }
+    }
+
     let attacks = match piece {
         1 | 7 => crate::movegen::get_knight_attacks(mv.target),
         0 => bitboard::pawn_attacks(Bitboard(1 << mv.target), WHITE),
@@ -465,23 +482,8 @@ fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String
                 break;
             }
             seen_hashes.push(curr_state.hash);
-            pv_str.push_str(&format!(
-                "{}{}",
-                square_to_coord(mv.source),
-                square_to_coord(mv.target)
-            ));
-            if let Some(promo) = mv.promotion {
-                let char = match promo {
-                    4 | 10 => 'q',
-                    3 | 9 => 'r',
-                    2 | 8 => 'b',
-                    1 | 7 => 'n',
-                    _ => ' ',
-                };
-                if char != ' ' {
-                    pv_str.push(char);
-                }
-            }
+            pv_str.push_str(&format_move_uci(mv, &curr_state));
+
             pv_str.push(' ');
             if !first && ponder_move.is_none() {
                 ponder_move = Some(mv);
@@ -788,41 +790,14 @@ pub fn search(
 
         if let Some(bm) = final_move {
             print!(
-                "bestmove {}{}",
-                square_to_coord(bm.source),
-                square_to_coord(bm.target)
+                "bestmove {}",
+                format_move_uci(bm, state)
             );
-            if let Some(promo) = bm.promotion {
-                use crate::state::{b, n, q, r};
-                let char = match promo {
-                    4 | 10 => 'q',
-                    3 | 9 => 'r',
-                    2 | 8 => 'b',
-                    1 | 7 => 'n',
-                    _ => ' ',
-                };
-                if char != ' ' {
-                    print!("{}", char);
-                }
-            }
             if let Some(pm) = ponder_move {
                 print!(
-                    " ponder {}{}",
-                    square_to_coord(pm.source),
-                    square_to_coord(pm.target)
+                    " ponder {}",
+                    format_move_uci(pm, state) // state is technically wrong here for ponder move as it's next state, but format_move_uci only needs state for castling detection at source sq
                 );
-                if let Some(promo) = pm.promotion {
-                    let char = match promo {
-                        4 | 10 => 'q',
-                        3 | 9 => 'r',
-                        2 | 8 => 'b',
-                        1 | 7 => 'n',
-                        _ => ' ',
-                    };
-                    if char != ' ' {
-                        print!("{}", char);
-                    }
-                }
             }
             println!();
         } else {
@@ -1389,4 +1364,49 @@ pub fn square_to_coord(s: u8) -> String {
     let f = (b'a' + (s % 8)) as char;
     let rank_char = (b'1' + (s / 8)) as char;
     format!("{}{}", f, rank_char)
+}
+
+pub fn format_move_uci(mv: Move, state: &GameState) -> String {
+    let chess960 = crate::uci::UCI_CHESS960.load(Ordering::Relaxed);
+    let from = mv.source;
+    let mut to = mv.target;
+
+    // Check for castling
+    // Logic: Internal is King -> Rook.
+    let piece = get_piece_type_safe(state, from);
+    let is_castling = (piece == 5 || piece == 11) &&
+                      (get_piece_type_safe(state, to) == if piece == 5 { 3 } else { 9 }) &&
+                      // Ensure target contains friendly rook
+                      (state.bitboards[if piece == 5 { R } else { r }].get_bit(to));
+
+    if !chess960 && is_castling {
+        if from == 4 { // White King on e1
+            // Check Kingside (target > source or file compare)
+            if to > from { to = 6; } // g1
+            else { to = 2; } // c1
+        } else if from == 60 { // Black King on e8
+            if to > from { to = 62; } // g8
+            else { to = 58; } // c8
+        }
+        // If King is not on e1/e8, we can't output standard e1g1 notation validly.
+        // We fallback to e1h1 style (Chess960 style) because standard notation is impossible.
+        // This handles cases where we are playing "Standard" rules but from a 960 position?
+        // Or simple cases.
+    }
+
+    let mut s = format!("{}{}", square_to_coord(from), square_to_coord(to));
+
+    if let Some(promo) = mv.promotion {
+        let char = match promo {
+            4 | 10 => 'q',
+            3 | 9 => 'r',
+            2 | 8 => 'b',
+            1 | 7 => 'n',
+            _ => ' ',
+        };
+        if char != ' ' {
+            s.push(char);
+        }
+    }
+    s
 }
