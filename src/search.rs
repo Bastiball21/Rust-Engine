@@ -861,7 +861,7 @@ fn negamax(
         return 0;
     }
 
-    let in_check = is_in_check(state);
+    let in_check = is_check(state, state.side_to_move);
     let new_depth = if in_check {
         depth.saturating_add(1)
     } else {
@@ -1355,11 +1355,15 @@ fn negamax(
     max_score
 }
 
-// CHANGE: pub fn is_in_check
-pub fn is_in_check(state: &GameState) -> bool {
-    let king_type = if state.side_to_move == WHITE { K } else { k };
+// CHANGE: pub fn is_check (renamed/exposed)
+pub fn is_check(state: &GameState, side: usize) -> bool {
+    let king_type = if side == WHITE { K } else { k };
     let king_sq = state.bitboards[king_type].get_lsb_index() as u8;
-    movegen::is_square_attacked(state, king_sq, 1 - state.side_to_move)
+    movegen::is_square_attacked(state, king_sq, 1 - side)
+}
+
+pub fn is_in_check(state: &GameState) -> bool {
+    is_check(state, state.side_to_move)
 }
 
 fn moves_gives_check(state: &GameState, mv: Move) -> bool {

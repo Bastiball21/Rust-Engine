@@ -82,8 +82,11 @@ impl GameState {
 
     pub fn refresh_accumulator(&mut self) {
         let bitboards = &self.bitboards;
-        self.accumulator[0].refresh(bitboards, 0);
-        self.accumulator[1].refresh(bitboards, 1);
+        let white_king_sq = self.bitboards[K].get_lsb_index() as usize;
+        let black_king_sq = self.bitboards[k].get_lsb_index() as usize;
+
+        self.accumulator[WHITE].refresh(bitboards, WHITE, white_king_sq);
+        self.accumulator[BLACK].refresh(bitboards, BLACK, black_king_sq);
     }
 
     pub fn parse_fen(fen: &str) -> GameState {
@@ -269,8 +272,7 @@ impl GameState {
         if self.side_to_move == BLACK {
             new_state.fullmove_number += 1;
         }
-
-        // Null move does not update accumulators (no pieces moved)
+        // Clone copies accumulators. No update/refresh needed because no pieces moved.
         new_state
     }
 
@@ -312,22 +314,27 @@ impl GameState {
 
         // 2. Add moving piece (or promo) to target
         let actual_piece = if let Some(promo) = mv.promotion {
+            // Logic for promotion: piece_type is P/p, but we add Promo type
             let p_idx = if side == WHITE { promo } else { promo + 6 };
-            new_state.bitboards[piece_type].pop_bit(mv.target); // Should be empty unless capture? No, bitboard logic handles moves.
-            // Wait, standard bitboard move logic:
-            // Remove from source. Add to target.
-            // If promo, remove source (type P), add target (type Promo).
-
-            // Logic below handles target set_bit.
             p_idx
         } else {
             piece_type
         };
+
+        // Note: For capture, we will remove the captured piece below.
+        // For now, update moving piece bitboard.
+        // Wait, if it's a promotion, we must update the PROMOTION piece bitboard, not the PAWN bitboard.
+        if mv.promotion.is_some() {
+             // Pawn removed from source (handled above by pop_bit on piece_type=P)
+             // Promo piece added to target
+             new_state.bitboards[actual_piece].set_bit(mv.target);
+             new_state.hash ^= zobrist::piece_key(actual_piece, mv.target as usize);
+        } else {
+             new_state.bitboards[piece_type].set_bit(mv.target);
+             new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
+        }
+
         added.push((actual_piece, mv.target as usize));
-
-
-        new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
-        new_state.bitboards[piece_type].set_bit(mv.target);
 
         if mv.is_capture {
             let enemy_start = if side == WHITE { p } else { P };
@@ -344,24 +351,13 @@ impl GameState {
                 new_state.bitboards[enemy_pawn].pop_bit(cap_sq);
                 new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
 
-                // NNUE: Remove captured pawn
                 removed.push((enemy_pawn, cap_sq as usize));
             } else {
                 // Normal Capture
                 for pp in enemy_start..=enemy_end {
                     if new_state.bitboards[pp].get_bit(mv.target) {
-                        // Note: We are checking new_state, but we just set the piece there?
-                        // Actually, the logic in original make_move was:
-                        // 1. pop source
-                        // 2. set target
-                        // 3. if capture, loop over enemies and pop target.
-                        // So at this point, target has BOTH pieces?
-                        // Yes, standard make_move implementation often overlaps bitboards briefly.
-
                         new_state.bitboards[pp].pop_bit(mv.target);
                         new_state.hash ^= zobrist::piece_key(pp, mv.target as usize);
-
-                        // NNUE: Remove captured piece
                         removed.push((pp, mv.target as usize));
                         break;
                     }
@@ -369,60 +365,40 @@ impl GameState {
             }
         }
 
-        if let Some(promo) = mv.promotion {
-            // Fixup for promotion: we set P at target above (copying logic), now we swap it?
-            // Original code:
-            // new_state.bitboards[piece_type].set_bit(mv.target); (as P)
-            // ...
-            // if let Some(promo) ...
-            //    pop P at target
-            //    set Promo at target
-
-            new_state.bitboards[piece_type].pop_bit(mv.target);
-            new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
-
-            let actual_promo = if side == WHITE { promo } else { promo + 6 };
-            new_state.bitboards[actual_promo].set_bit(mv.target);
-            new_state.hash ^= zobrist::piece_key(actual_promo, mv.target as usize);
-        }
-
+        // Castling
         if (piece_type == K || piece_type == k) && (mv.target as i8 - mv.source as i8).abs() == 2 {
-            if mv.target == 6 {
+            if mv.target == 6 { // White King side
                 new_state.bitboards[R].pop_bit(7);
                 new_state.hash ^= zobrist::piece_key(R, 7);
                 new_state.bitboards[R].set_bit(5);
                 new_state.hash ^= zobrist::piece_key(R, 5);
-
                 removed.push((R, 7)); added.push((R, 5));
-            } else if mv.target == 2 {
+            } else if mv.target == 2 { // White Queen side
                 new_state.bitboards[R].pop_bit(0);
                 new_state.hash ^= zobrist::piece_key(R, 0);
                 new_state.bitboards[R].set_bit(3);
                 new_state.hash ^= zobrist::piece_key(R, 3);
-
                 removed.push((R, 0)); added.push((R, 3));
-            } else if mv.target == 62 {
+            } else if mv.target == 62 { // Black King side
                 new_state.bitboards[r].pop_bit(63);
                 new_state.hash ^= zobrist::piece_key(r, 63);
                 new_state.bitboards[r].set_bit(61);
                 new_state.hash ^= zobrist::piece_key(r, 61);
-
                 removed.push((r, 63)); added.push((r, 61));
-            } else if mv.target == 58 {
+            } else if mv.target == 58 { // Black Queen side
                 new_state.bitboards[r].pop_bit(56);
                 new_state.hash ^= zobrist::piece_key(r, 56);
                 new_state.bitboards[r].set_bit(59);
                 new_state.hash ^= zobrist::piece_key(r, 59);
-
                 removed.push((r, 56)); added.push((r, 59));
             }
         }
 
+        // Update En Passant
         if self.en_passant != 64 {
             let file = (self.en_passant % 8) as u8;
             new_state.hash ^= zobrist::en_passant_key(file);
         }
-
         new_state.en_passant = 64;
         if piece_type == P || piece_type == p {
             let diff = (mv.target as i8 - mv.source as i8).abs();
@@ -437,34 +413,22 @@ impl GameState {
             }
         }
 
+        // Update Castling Rights
         new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
 
-        if piece_type == K {
-            new_state.castling_rights &= !3;
-        }
-        if piece_type == k {
-            new_state.castling_rights &= !12;
-        }
+        if piece_type == K { new_state.castling_rights &= !3; }
+        if piece_type == k { new_state.castling_rights &= !12; }
 
-        if mv.source == 7 || mv.target == 7 {
-            new_state.castling_rights &= !1;
-        }
-        if mv.source == 0 || mv.target == 0 {
-            new_state.castling_rights &= !2;
-        }
-
-        if mv.source == 63 || mv.target == 63 {
-            new_state.castling_rights &= !4;
-        }
-        if mv.source == 56 || mv.target == 56 {
-            new_state.castling_rights &= !8;
-        }
+        if mv.source == 7 || mv.target == 7 { new_state.castling_rights &= !1; }
+        if mv.source == 0 || mv.target == 0 { new_state.castling_rights &= !2; }
+        if mv.source == 63 || mv.target == 63 { new_state.castling_rights &= !4; }
+        if mv.source == 56 || mv.target == 56 { new_state.castling_rights &= !8; }
 
         new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
-
         new_state.side_to_move = 1 - side;
         new_state.hash ^= zobrist::side_key();
 
+        // Update Occupancies
         new_state.occupancies = [Bitboard(0); 3];
         for pp in P..=K {
             new_state.occupancies[WHITE] = new_state.occupancies[WHITE] | new_state.bitboards[pp];
@@ -474,9 +438,35 @@ impl GameState {
         }
         new_state.occupancies[BOTH] = new_state.occupancies[WHITE] | new_state.occupancies[BLACK];
 
-        // Update Accumulators
-        new_state.accumulator[0].update(&added, &removed, 0);
-        new_state.accumulator[1].update(&added, &removed, 1);
+        // --------------------------------------------------------------------
+        // Update Accumulators (Logic for King Buckets)
+        // --------------------------------------------------------------------
+
+        let old_k_sq_white = self.bitboards[K].get_lsb_index() as usize;
+        let old_k_sq_black = self.bitboards[k].get_lsb_index() as usize;
+
+        let new_k_sq_white = new_state.bitboards[K].get_lsb_index() as usize;
+        let new_k_sq_black = new_state.bitboards[k].get_lsb_index() as usize;
+
+        // Check White Accumulator
+        let old_bucket_w = crate::nnue::get_king_bucket(WHITE, old_k_sq_white);
+        let new_bucket_w = crate::nnue::get_king_bucket(WHITE, new_k_sq_white);
+
+        if old_bucket_w != new_bucket_w {
+            new_state.accumulator[WHITE].refresh(&new_state.bitboards, WHITE, new_k_sq_white);
+        } else {
+            new_state.accumulator[WHITE].update(&added, &removed, WHITE, new_k_sq_white);
+        }
+
+        // Check Black Accumulator
+        let old_bucket_b = crate::nnue::get_king_bucket(BLACK, old_k_sq_black);
+        let new_bucket_b = crate::nnue::get_king_bucket(BLACK, new_k_sq_black);
+
+        if old_bucket_b != new_bucket_b {
+            new_state.accumulator[BLACK].refresh(&new_state.bitboards, BLACK, new_k_sq_black);
+        } else {
+            new_state.accumulator[BLACK].update(&added, &removed, BLACK, new_k_sq_black);
+        }
 
         new_state
     }
