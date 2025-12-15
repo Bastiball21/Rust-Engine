@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 // Safe globals
 pub static PIECE_KEYS: OnceLock<[[u64; 64]; 12]> = OnceLock::new();
 pub static CASTLING_KEYS: OnceLock<[u64; 16]> = OnceLock::new();
+// Keys for castling files: [Color 0-1][Side 0-1 (K/Q)][File 0-7]
+pub static CASTLING_FILE_KEYS: OnceLock<[[[u64; 8]; 2]; 2]> = OnceLock::new();
 pub static EN_PASSANT_KEYS: OnceLock<[u64; 8]> = OnceLock::new();
 pub static SIDE_KEY: OnceLock<u64> = OnceLock::new();
 
@@ -50,6 +52,16 @@ pub fn init_zobrist() {
     }
     let _ = CASTLING_KEYS.set(c_keys);
 
+    let mut cf_keys = [[[0; 8]; 2]; 2];
+    for c in 0..2 {
+        for s in 0..2 {
+            for f in 0..8 {
+                cf_keys[c][s][f] = rng.get_u64();
+            }
+        }
+    }
+    let _ = CASTLING_FILE_KEYS.set(cf_keys);
+
     let mut ep_keys = [0; 8];
     for i in 0..8 {
         ep_keys[i] = rng.get_u64();
@@ -69,6 +81,10 @@ pub fn piece_key(piece: usize, sq: usize) -> u64 {
 #[inline(always)]
 pub fn castling_key(rights: u8) -> u64 {
     CASTLING_KEYS.get().unwrap()[rights as usize]
+}
+#[inline(always)]
+pub fn castling_file_key(color: usize, side: usize, file: u8) -> u64 {
+    CASTLING_FILE_KEYS.get().unwrap()[color][side][file as usize]
 }
 #[inline(always)]
 pub fn en_passant_key(file: u8) -> u64 {

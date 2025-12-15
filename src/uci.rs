@@ -1,6 +1,6 @@
 use crate::movegen::{self, MoveGenerator};
 use crate::search;
-use crate::state::{GameState, Move};
+use crate::state::{GameState, Move, K, k};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::TranspositionTable;
 use std::io::{self, BufRead};
@@ -9,6 +9,9 @@ use std::sync::{
     Arc,
 };
 use std::thread;
+
+// Global UCI Option
+pub static UCI_CHESS960: AtomicBool = AtomicBool::new(false);
 
 pub fn uci_loop() {
     let stdin = io::stdin();
@@ -62,6 +65,7 @@ pub fn uci_loop() {
                 println!("option name SyzygyPath type string default <empty>");
                 println!("option name Move Overhead type spin default 10 min 0 max 5000");
                 println!("option name EvalFile type string default <empty>");
+                println!("option name UCI_Chess960 type check default false");
                 println!("uciok");
             }
             "isready" => println!("readyok"),
@@ -158,11 +162,10 @@ pub fn uci_loop() {
                         // Load NNUE
                         let path = parts[4];
                         crate::nnue::init_nnue(path);
-                        // We should probably refresh the accumulator of current game state, but we don't have mutable access here easily inside the loop without restructuring.
-                        // However, ucinewgame or position will likely follow.
-                        // Ideally, we refresh accumulators immediately if possible.
-                        // But game_state is local variable. We can do it.
                         game_state.refresh_accumulator();
+                    } else if parts[2] == "UCI_Chess960" && parts[3] == "value" {
+                        let val = parts[4] == "true";
+                        UCI_CHESS960.store(val, Ordering::Relaxed);
                     }
                 }
             }
@@ -232,6 +235,20 @@ fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
     let tgt_str = &move_str[2..4];
     let src = square_from_str(src_str);
     let tgt = square_from_str(tgt_str);
+
+    // COMPATIBILITY: Handle e1g1 as e1h1 if UCI_Chess960 is false (Standard Chess)
+    // AND checks for castling validity.
+    // Actually, simply: If input is e1g1 and we find e1h1 in legal moves, match it?
+    // Be careful not to match e1g1 if e1g1 is actually valid (e.g. empty square move).
+    // In standard chess, e1g1 is EITHER castling OR normal king move to g1.
+    // If it's castling, the generator produces e1h1 (King takes Rook).
+    // So if user sends e1g1, and generator has e1h1, and e1g1 is NOT in generator (because g1 empty/attacked/whatever), then we might map.
+    // BUT safest way:
+    // If standard chess (UCI_Chess960 == false), and we see e1g1:
+    // 1. Check if e1g1 is in generated moves.
+    // 2. Check if e1h1 (Kingside Castle) is in generated moves.
+    // If e1h1 is there, and e1g1 matches the "Concept" of castling, map it.
+
     let promo = if move_str.len() > 4 {
         match move_str.chars().nth(4).unwrap() {
             'q' => Some(4),
@@ -244,6 +261,7 @@ fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
         None
     };
 
+    // First pass: Try exact match
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
         if mv.source == src && mv.target == tgt {
@@ -258,6 +276,38 @@ fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
             }
         }
     }
+
+    // Second pass: Standard Chess Castling Compatibility
+    // Map e1g1 -> e1h1, e1c1 -> e1a1, e8g8 -> e8h8, e8c8 -> e8a8
+    // ONLY if UCI_Chess960 is FALSE.
+    if !UCI_CHESS960.load(Ordering::Relaxed) {
+        let is_white = state.side_to_move == crate::state::WHITE;
+        let king_sq = if is_white { 4 } else { 60 }; // e1 / e8
+
+        if src == king_sq {
+            let kingside_tgt = if is_white { 6 } else { 62 }; // g1 / g8
+            let queenside_tgt = if is_white { 2 } else { 58 }; // c1 / c8
+
+            let mut expected_rook_sq = 64;
+
+            if tgt == kingside_tgt {
+                expected_rook_sq = if is_white { 7 } else { 63 }; // h1 / h8
+            } else if tgt == queenside_tgt {
+                expected_rook_sq = if is_white { 0 } else { 56 }; // a1 / a8
+            }
+
+            if expected_rook_sq != 64 {
+                // Check if King->Rook move exists in generator
+                 for i in 0..generator.list.count {
+                    let mv = generator.list.moves[i];
+                    if mv.source == src && mv.target == expected_rook_sq {
+                         return Some(mv);
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 

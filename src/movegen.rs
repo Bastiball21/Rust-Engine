@@ -2,6 +2,7 @@
 use crate::bitboard::{self, Bitboard};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use std::sync::OnceLock;
+use std::cmp::{min, max};
 
 // --- SAFE GLOBAL TABLES ---
 static KNIGHT_TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
@@ -245,57 +246,112 @@ impl MoveGenerator {
                 self.add_move(src, t, None, occupancy_enemy.get_bit(t));
             }
 
-            // CASTLING
-            if side == WHITE {
-                if (state.castling_rights & 1) != 0 {
-                    if !occupancy_all.get_bit(5) && !occupancy_all.get_bit(6) {
-                        if !is_square_attacked(state, 4, BLACK)
-                            && !is_square_attacked(state, 5, BLACK)
-                            && !is_square_attacked(state, 6, BLACK)
-                        {
-                            self.add_move(4, 6, None, false);
-                        }
-                    }
-                }
-                if (state.castling_rights & 2) != 0 {
-                    if !occupancy_all.get_bit(1)
-                        && !occupancy_all.get_bit(2)
-                        && !occupancy_all.get_bit(3)
-                    {
-                        if !is_square_attacked(state, 4, BLACK)
-                            && !is_square_attacked(state, 3, BLACK)
-                            && !is_square_attacked(state, 2, BLACK)
-                        {
-                            self.add_move(4, 2, None, false);
-                        }
-                    }
-                }
+            // CASTLING (Chess960 Unified)
+            self.generate_castling_moves(state, src, side);
+        }
+    }
+
+    // New helper method for castling
+    #[inline(always)]
+    fn generate_castling_moves(&mut self, state: &GameState, king_sq: u8, side: usize) {
+        let enemy = 1 - side;
+        let rank_base = if side == WHITE { 0 } else { 56 };
+
+        // Check both sides: 0 = Kingside, 1 = Queenside
+        for side_idx in 0..2 {
+            // Check rights mask
+            let mask = if side == WHITE {
+                if side_idx == 0 { 1 } else { 2 }
             } else {
-                if (state.castling_rights & 4) != 0 {
-                    if !occupancy_all.get_bit(61) && !occupancy_all.get_bit(62) {
-                        if !is_square_attacked(state, 60, WHITE)
-                            && !is_square_attacked(state, 61, WHITE)
-                            && !is_square_attacked(state, 62, WHITE)
-                        {
-                            self.add_move(60, 62, None, false);
-                        }
+                if side_idx == 0 { 4 } else { 8 }
+            };
+
+            if (state.castling_rights & mask) != 0 {
+                let file = state.castling_rook_files[side][side_idx];
+                let rook_sq = rank_base + file;
+
+                // Verify rook is actually there (it should be if rights are set, but let's be safe)
+                // Note: bitboards[R/r] check
+                let rook_type = if side == WHITE { R } else { r };
+                if !state.bitboards[rook_type].get_bit(rook_sq) {
+                    continue;
+                }
+
+                // Determine destinations
+                // Standard convention:
+                // Kingside (side 0): King -> g-file (6/62), Rook -> f-file (5/61)
+                // Queenside (side 1): King -> c-file (2/58), Rook -> d-file (3/59)
+
+                let (k_dst_file, r_dst_file) = if side_idx == 0 {
+                    (6, 5) // g, f
+                } else {
+                    (2, 3) // c, d
+                };
+
+                let k_dst = rank_base + k_dst_file;
+                let r_dst = rank_base + r_dst_file;
+
+                // 1. Path Obstruction Check
+                // "All squares between the king's initial and final squares (including the final square),
+                // and all squares between the rook's initial and final squares (including the final square),
+                // must be vacant except for the king and rook."
+
+                if !self.is_path_clear(state, king_sq, k_dst, king_sq, rook_sq) {
+                    continue;
+                }
+                if !self.is_path_clear(state, rook_sq, r_dst, king_sq, rook_sq) {
+                    continue;
+                }
+
+                // 2. King Safety Check
+                // King must not be in check at start.
+                // King must not pass through check.
+                // King must not end in check.
+
+                if is_square_attacked(state, king_sq, enemy) {
+                    continue;
+                }
+
+                // Check path for King
+                // Logic: Iterate from adjacent square to dest.
+                // However, King moves one by one. In 960, the "leap" is conceptual.
+                // But safety rules apply to the squares the king crosses *if it were moving normally*.
+                // Standard Chess: King moves e1-f1-g1. Checks e1, f1, g1.
+                // 960: King path from Start to End. All squares on interval must be safe.
+                // Note: If start == end, no squares to check besides start (already checked).
+
+                let mut safe = true;
+                let start = min(king_sq, k_dst);
+                let end = max(king_sq, k_dst);
+
+                for sq in start..=end {
+                    if sq == king_sq { continue; } // Already checked
+                    if is_square_attacked(state, sq, enemy) {
+                        safe = false;
+                        break;
                     }
                 }
-                if (state.castling_rights & 8) != 0 {
-                    if !occupancy_all.get_bit(57)
-                        && !occupancy_all.get_bit(58)
-                        && !occupancy_all.get_bit(59)
-                    {
-                        if !is_square_attacked(state, 60, WHITE)
-                            && !is_square_attacked(state, 59, WHITE)
-                            && !is_square_attacked(state, 58, WHITE)
-                        {
-                            self.add_move(60, 58, None, false);
-                        }
-                    }
+
+                if safe {
+                    // Valid Castling Move
+                    // Target is the Rook's square.
+                    self.add_move(king_sq, rook_sq, None, false);
                 }
             }
         }
+    }
+
+    fn is_path_clear(&self, state: &GameState, from: u8, to: u8, ignore_k: u8, ignore_r: u8) -> bool {
+        let start = min(from, to);
+        let end = max(from, to);
+
+        for sq in start..=end {
+            if sq == ignore_k || sq == ignore_r { continue; }
+            if state.occupancies[BOTH].get_bit(sq) {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -387,9 +443,19 @@ pub fn gives_check(state: &GameState, mv: Move) -> bool {
     }
 
     // Castling and promotions are rare; fallback to safe slow check to prevent bugs
-    if (piece == K || piece == k) && (from as i8 - to as i8).abs() == 2 {
-        return slow_gives_check(state, mv);
+    // Chess960 Castling: Check if target is own rook
+    if piece == K || piece == k {
+        // If target contains friendly rook, it's castling
+        let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
+        if friendly_rooks.get_bit(to) {
+             return slow_gives_check(state, mv);
+        }
+        // Legacy distance check for safety
+        if (from as i8 - to as i8).abs() == 2 {
+            return slow_gives_check(state, mv);
+        }
     }
+
     if mv.promotion.is_some() {
         return slow_gives_check(state, mv);
     }

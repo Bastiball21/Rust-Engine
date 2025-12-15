@@ -42,6 +42,9 @@ pub struct GameState {
     pub halfmove_clock: u8,
     pub fullmove_number: u16,
     pub accumulator: [Accumulator; 2],
+    // Chess960: Store the FILE (0-7) of the initial rook positions for castling.
+    // Index: [Color][Side] where Side 0=KingSide, 1=QueenSide
+    pub castling_rook_files: [[u8; 2]; 2],
 }
 
 impl GameState {
@@ -56,6 +59,7 @@ impl GameState {
             halfmove_clock: 0,
             fullmove_number: 1,
             accumulator: [Accumulator::default(); 2],
+            castling_rook_files: [[7, 0], [7, 0]],
         }
     }
 
@@ -70,6 +74,20 @@ impl GameState {
             }
         }
         h ^= zobrist::castling_key(self.castling_rights);
+
+        if (self.castling_rights & 1) != 0 { // White King-Side
+            h ^= zobrist::castling_file_key(WHITE, 0, self.castling_rook_files[WHITE][0]);
+        }
+        if (self.castling_rights & 2) != 0 { // White Queen-Side
+            h ^= zobrist::castling_file_key(WHITE, 1, self.castling_rook_files[WHITE][1]);
+        }
+        if (self.castling_rights & 4) != 0 { // Black King-Side
+            h ^= zobrist::castling_file_key(BLACK, 0, self.castling_rook_files[BLACK][0]);
+        }
+        if (self.castling_rights & 8) != 0 { // Black Queen-Side
+            h ^= zobrist::castling_file_key(BLACK, 1, self.castling_rook_files[BLACK][1]);
+        }
+
         if self.side_to_move == BLACK {
             h ^= zobrist::side_key();
         }
@@ -127,14 +145,85 @@ impl GameState {
             state.side_to_move = BLACK;
         }
 
+        state.castling_rook_files = [[7, 0], [7, 0]];
+        let wk_sq = state.bitboards[K].get_lsb_index() as u8;
+        let bk_sq = state.bitboards[k].get_lsb_index() as u8;
+        let wk_file = wk_sq % 8;
+        let bk_file = bk_sq % 8;
+
         if parts[2] != "-" {
             for c in parts[2].chars() {
                 match c {
-                    'K' => state.castling_rights |= 1,
-                    'Q' => state.castling_rights |= 2,
-                    'k' => state.castling_rights |= 4,
-                    'q' => state.castling_rights |= 8,
+                    'K' => { state.castling_rights |= 1; },
+                    'Q' => { state.castling_rights |= 2; },
+                    'k' => { state.castling_rights |= 4; },
+                    'q' => { state.castling_rights |= 8; },
+                    'A'..='H' => {
+                        let file = c as u8 - b'A';
+                        if file > wk_file {
+                            state.castling_rights |= 1;
+                            state.castling_rook_files[WHITE][0] = file;
+                        } else {
+                            state.castling_rights |= 2;
+                            state.castling_rook_files[WHITE][1] = file;
+                        }
+                    },
+                    'a'..='h' => {
+                        let file = c as u8 - b'a';
+                        if file > bk_file {
+                            state.castling_rights |= 4;
+                            state.castling_rook_files[BLACK][0] = file;
+                        } else {
+                            state.castling_rights |= 8;
+                            state.castling_rook_files[BLACK][1] = file;
+                        }
+                    },
                     _ => {}
+                }
+            }
+        }
+
+        if (state.castling_rights & 1) != 0 {
+            let default_f = state.castling_rook_files[WHITE][0];
+            let r_sq = (rank_of(wk_sq) * 8) + default_f;
+            if !state.bitboards[R].get_bit(r_sq) {
+                if let Some(f) = find_outermost_rook(&state, WHITE, true, wk_file) {
+                    state.castling_rook_files[WHITE][0] = f;
+                } else {
+                    state.castling_rights &= !1;
+                }
+            }
+        }
+        if (state.castling_rights & 2) != 0 {
+            let default_f = state.castling_rook_files[WHITE][1];
+            let r_sq = (rank_of(wk_sq) * 8) + default_f;
+            if !state.bitboards[R].get_bit(r_sq) {
+                if let Some(f) = find_outermost_rook(&state, WHITE, false, wk_file) {
+                    state.castling_rook_files[WHITE][1] = f;
+                } else {
+                    state.castling_rights &= !2;
+                }
+            }
+        }
+        if (state.castling_rights & 4) != 0 {
+            let default_f = state.castling_rook_files[BLACK][0];
+            let r_sq = (rank_of(bk_sq) * 8) + default_f;
+            if !state.bitboards[r].get_bit(r_sq) {
+                if let Some(f) = find_outermost_rook(&state, BLACK, true, bk_file) {
+                    state.castling_rook_files[BLACK][0] = f;
+                } else {
+                    state.castling_rights &= !4;
+                }
+            }
+        }
+        if (state.castling_rights & 8) != 0 {
+            let default_f = state.castling_rook_files[BLACK][1];
+            let r_sq = (rank_of(bk_sq) * 8) + default_f;
+            if !state.bitboards[r].get_bit(r_sq) {
+                if let Some(f) = find_outermost_rook(&state, BLACK, false, bk_file) {
+                    state.castling_rook_files[BLACK][1] = f;
+                } else {
+                    state.castling_rights &= !8;
                 }
             }
         }
@@ -224,19 +313,30 @@ impl GameState {
         fen.push(' ');
 
         let mut rights = String::new();
+        let mut any_rights = false;
+
         if (self.castling_rights & 1) != 0 {
-            rights.push('K');
+            any_rights = true;
+            let file = self.castling_rook_files[WHITE][0];
+            if file == 7 { rights.push('K'); } else { rights.push((b'A' + file) as char); }
         }
         if (self.castling_rights & 2) != 0 {
-            rights.push('Q');
+            any_rights = true;
+            let file = self.castling_rook_files[WHITE][1];
+            if file == 0 { rights.push('Q'); } else { rights.push((b'A' + file) as char); }
         }
         if (self.castling_rights & 4) != 0 {
-            rights.push('k');
+            any_rights = true;
+            let file = self.castling_rook_files[BLACK][0];
+            if file == 7 { rights.push('k'); } else { rights.push((b'a' + file) as char); }
         }
         if (self.castling_rights & 8) != 0 {
-            rights.push('q');
+            any_rights = true;
+            let file = self.castling_rook_files[BLACK][1];
+            if file == 0 { rights.push('q'); } else { rights.push((b'a' + file) as char); }
         }
-        if rights.is_empty() {
+
+        if !any_rights {
             rights.push('-');
         }
         fen.push_str(&rights);
@@ -272,7 +372,6 @@ impl GameState {
         if self.side_to_move == BLACK {
             new_state.fullmove_number += 1;
         }
-        // Clone copies accumulators. No update/refresh needed because no pieces moved.
         new_state
     }
 
@@ -302,129 +401,205 @@ impl GameState {
             }
         }
 
-        // 1. Remove moving piece from source
-        removed.push((piece_type, mv.source as usize));
+        let mut is_castling = false;
 
-        if piece_type == P || piece_type == p || mv.is_capture {
-            new_state.halfmove_clock = 0;
+        // Detect Castling: King capturing friendly rook
+        if piece_type == K || piece_type == k {
+            let friendly_rooks = self.bitboards[if side == WHITE { R } else { r }];
+            if friendly_rooks.get_bit(mv.target) {
+                is_castling = true;
+            }
         }
 
-        new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
-        new_state.bitboards[piece_type].pop_bit(mv.source);
+        if is_castling {
+            // CASTLING LOGIC (Unified)
+            // 1. Remove King from Source
+            new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
+            new_state.bitboards[piece_type].pop_bit(mv.source);
+            removed.push((piece_type, mv.source as usize));
 
-        // 2. Add moving piece (or promo) to target
-        let actual_piece = if let Some(promo) = mv.promotion {
-            // Logic for promotion: piece_type is P/p, but we add Promo type
-            let p_idx = if side == WHITE { promo } else { promo + 6 };
-            p_idx
-        } else {
-            piece_type
-        };
+            // 2. Remove Rook from Target (Rook's source)
+            let rook_type = if side == WHITE { R } else { r };
+            new_state.hash ^= zobrist::piece_key(rook_type, mv.target as usize);
+            new_state.bitboards[rook_type].pop_bit(mv.target);
+            removed.push((rook_type, mv.target as usize));
 
-        // Note: For capture, we will remove the captured piece below.
-        // For now, update moving piece bitboard.
-        // Wait, if it's a promotion, we must update the PROMOTION piece bitboard, not the PAWN bitboard.
-        if mv.promotion.is_some() {
-             // Pawn removed from source (handled above by pop_bit on piece_type=P)
-             // Promo piece added to target
-             new_state.bitboards[actual_piece].set_bit(mv.target);
-             new_state.hash ^= zobrist::piece_key(actual_piece, mv.target as usize);
-        } else {
-             new_state.bitboards[piece_type].set_bit(mv.target);
-             new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
-        }
+            // 3. Determine Destinations
+            let rank_base = if side == WHITE { 0 } else { 56 };
+            let king_file_dst;
+            let rook_file_dst;
 
-        added.push((actual_piece, mv.target as usize));
-
-        if mv.is_capture {
-            let enemy_start = if side == WHITE { p } else { P };
-            let enemy_end = if side == WHITE { k } else { K };
-
-            if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
-                // En Passant Capture
-                let cap_sq = if side == WHITE {
-                    mv.target - 8
-                } else {
-                    mv.target + 8
-                };
-                let enemy_pawn = if side == WHITE { p } else { P };
-                new_state.bitboards[enemy_pawn].pop_bit(cap_sq);
-                new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
-
-                removed.push((enemy_pawn, cap_sq as usize));
+            // Which side?
+            // We can check if Rook file > King file (Kingside) or < (Queenside)
+            // Or compare mv.target vs mv.source
+            if mv.target > mv.source { // Kingside (usually, but be careful with indices 0-63 vs file)
+                 // Careful: if King on B1, Rook on A1. Target < Source.
+                 // Rook on H1, King on B1. Target > Source.
+                 // Correct logic: Compare files.
+                 if (mv.target % 8) > (mv.source % 8) {
+                     // Kingside
+                     king_file_dst = 6; // g-file
+                     rook_file_dst = 5; // f-file
+                 } else {
+                     // Queenside
+                     king_file_dst = 2; // c-file
+                     rook_file_dst = 3; // d-file
+                 }
             } else {
-                // Normal Capture
-                for pp in enemy_start..=enemy_end {
-                    if new_state.bitboards[pp].get_bit(mv.target) {
-                        new_state.bitboards[pp].pop_bit(mv.target);
-                        new_state.hash ^= zobrist::piece_key(pp, mv.target as usize);
-                        removed.push((pp, mv.target as usize));
-                        break;
+                 if (mv.target % 8) > (mv.source % 8) {
+                     king_file_dst = 6;
+                     rook_file_dst = 5;
+                 } else {
+                     king_file_dst = 2;
+                     rook_file_dst = 3;
+                 }
+            }
+
+            let k_dst = rank_base + king_file_dst;
+            let r_dst = rank_base + rook_file_dst;
+
+            // 4. Place King and Rook at Destinations
+            new_state.bitboards[piece_type].set_bit(k_dst);
+            new_state.hash ^= zobrist::piece_key(piece_type, k_dst as usize);
+            added.push((piece_type, k_dst as usize));
+
+            new_state.bitboards[rook_type].set_bit(r_dst);
+            new_state.hash ^= zobrist::piece_key(rook_type, r_dst as usize);
+            added.push((rook_type, r_dst as usize));
+
+            // Castling resets halfmove clock
+            new_state.halfmove_clock = 0;
+
+        } else {
+            // NORMAL MOVE LOGIC
+
+            // 1. Remove moving piece from source
+            removed.push((piece_type, mv.source as usize));
+
+            if piece_type == P || piece_type == p || mv.is_capture {
+                new_state.halfmove_clock = 0;
+            }
+
+            new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
+            new_state.bitboards[piece_type].pop_bit(mv.source);
+
+            // 2. Add moving piece (or promo) to target
+            let actual_piece = if let Some(promo) = mv.promotion {
+                let p_idx = if side == WHITE { promo } else { promo + 6 };
+                p_idx
+            } else {
+                piece_type
+            };
+
+            if mv.promotion.is_some() {
+                 new_state.bitboards[actual_piece].set_bit(mv.target);
+                 new_state.hash ^= zobrist::piece_key(actual_piece, mv.target as usize);
+            } else {
+                 new_state.bitboards[piece_type].set_bit(mv.target);
+                 new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
+            }
+
+            added.push((actual_piece, mv.target as usize));
+
+            if mv.is_capture {
+                let enemy_start = if side == WHITE { p } else { P };
+                let enemy_end = if side == WHITE { k } else { K };
+
+                if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
+                    // En Passant Capture
+                    let cap_sq = if side == WHITE {
+                        mv.target - 8
+                    } else {
+                        mv.target + 8
+                    };
+                    let enemy_pawn = if side == WHITE { p } else { P };
+                    new_state.bitboards[enemy_pawn].pop_bit(cap_sq);
+                    new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
+
+                    removed.push((enemy_pawn, cap_sq as usize));
+                } else {
+                    // Normal Capture
+                    for pp in enemy_start..=enemy_end {
+                        if new_state.bitboards[pp].get_bit(mv.target) {
+                            new_state.bitboards[pp].pop_bit(mv.target);
+                            new_state.hash ^= zobrist::piece_key(pp, mv.target as usize);
+                            removed.push((pp, mv.target as usize));
+                            break;
+                        }
                     }
+                }
+            }
+
+            // Update En Passant
+            if self.en_passant != 64 {
+                let file = (self.en_passant % 8) as u8;
+                new_state.hash ^= zobrist::en_passant_key(file);
+            }
+            new_state.en_passant = 64;
+            if piece_type == P || piece_type == p {
+                let diff = (mv.target as i8 - mv.source as i8).abs();
+                if diff == 16 {
+                    let ep_sq = if side == WHITE {
+                        mv.target - 8
+                    } else {
+                        mv.target + 8
+                    };
+                    new_state.en_passant = ep_sq;
+                    new_state.hash ^= zobrist::en_passant_key((ep_sq % 8) as u8);
                 }
             }
         }
 
-        // Castling
-        if (piece_type == K || piece_type == k) && (mv.target as i8 - mv.source as i8).abs() == 2 {
-            if mv.target == 6 { // White King side
-                new_state.bitboards[R].pop_bit(7);
-                new_state.hash ^= zobrist::piece_key(R, 7);
-                new_state.bitboards[R].set_bit(5);
-                new_state.hash ^= zobrist::piece_key(R, 5);
-                removed.push((R, 7)); added.push((R, 5));
-            } else if mv.target == 2 { // White Queen side
-                new_state.bitboards[R].pop_bit(0);
-                new_state.hash ^= zobrist::piece_key(R, 0);
-                new_state.bitboards[R].set_bit(3);
-                new_state.hash ^= zobrist::piece_key(R, 3);
-                removed.push((R, 0)); added.push((R, 3));
-            } else if mv.target == 62 { // Black King side
-                new_state.bitboards[r].pop_bit(63);
-                new_state.hash ^= zobrist::piece_key(r, 63);
-                new_state.bitboards[r].set_bit(61);
-                new_state.hash ^= zobrist::piece_key(r, 61);
-                removed.push((r, 63)); added.push((r, 61));
-            } else if mv.target == 58 { // Black Queen side
-                new_state.bitboards[r].pop_bit(56);
-                new_state.hash ^= zobrist::piece_key(r, 56);
-                new_state.bitboards[r].set_bit(59);
-                new_state.hash ^= zobrist::piece_key(r, 59);
-                removed.push((r, 56)); added.push((r, 59));
-            }
-        }
-
-        // Update En Passant
-        if self.en_passant != 64 {
-            let file = (self.en_passant % 8) as u8;
-            new_state.hash ^= zobrist::en_passant_key(file);
-        }
-        new_state.en_passant = 64;
-        if piece_type == P || piece_type == p {
-            let diff = (mv.target as i8 - mv.source as i8).abs();
-            if diff == 16 {
-                let ep_sq = if side == WHITE {
-                    mv.target - 8
-                } else {
-                    mv.target + 8
-                };
-                new_state.en_passant = ep_sq;
-                new_state.hash ^= zobrist::en_passant_key((ep_sq % 8) as u8);
-            }
-        }
+        // COMMON UPDATES (Castling Rights, Occupancies, Hash, Accumulator)
 
         // Update Castling Rights
+        // Remove rights if they were present
+        if (new_state.castling_rights & 1) != 0 { new_state.hash ^= zobrist::castling_file_key(WHITE, 0, new_state.castling_rook_files[WHITE][0]); }
+        if (new_state.castling_rights & 2) != 0 { new_state.hash ^= zobrist::castling_file_key(WHITE, 1, new_state.castling_rook_files[WHITE][1]); }
+        if (new_state.castling_rights & 4) != 0 { new_state.hash ^= zobrist::castling_file_key(BLACK, 0, new_state.castling_rook_files[BLACK][0]); }
+        if (new_state.castling_rights & 8) != 0 { new_state.hash ^= zobrist::castling_file_key(BLACK, 1, new_state.castling_rook_files[BLACK][1]); }
         new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
 
+        // Update rights logic
+        // 1. King moves/captured? (Captured handled by source check if we want, but King never captured)
+        // 2. Rook moves/captured?
+
+        // If King moves, lose both rights
         if piece_type == K { new_state.castling_rights &= !3; }
         if piece_type == k { new_state.castling_rights &= !12; }
 
-        if mv.source == 7 || mv.target == 7 { new_state.castling_rights &= !1; }
-        if mv.source == 0 || mv.target == 0 { new_state.castling_rights &= !2; }
-        if mv.source == 63 || mv.target == 63 { new_state.castling_rights &= !4; }
-        if mv.source == 56 || mv.target == 56 { new_state.castling_rights &= !8; }
+        // If Rook moves or is captured, lose specific right
+        // Check Source (Piece moved) and Target (Piece captured) against Rook Files
+        // Careful: We need to check against SPECIFIC rook files now, not just 0/7/56/63.
 
+        // Helper to check against file
+        let check_rook_rights = |sq: u8, rights: &mut u8, files: [[u8; 2]; 2]| {
+             let f = sq % 8;
+             let rank_val = sq / 8;
+
+             // White Rooks (Rank 0)
+             if rank_val == 0 {
+                 if f == files[WHITE][0] { *rights &= !1; } // Kingside
+                 if f == files[WHITE][1] { *rights &= !2; } // Queenside
+             }
+             // Black Rooks (Rank 7)
+             if rank_val == 7 {
+                 if f == files[BLACK][0] { *rights &= !4; }
+                 if f == files[BLACK][1] { *rights &= !8; }
+             }
+        };
+
+        check_rook_rights(mv.source, &mut new_state.castling_rights, new_state.castling_rook_files);
+        check_rook_rights(mv.target, &mut new_state.castling_rights, new_state.castling_rook_files);
+
+        // Re-add rights keys for remaining rights
         new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
+        if (new_state.castling_rights & 1) != 0 { new_state.hash ^= zobrist::castling_file_key(WHITE, 0, new_state.castling_rook_files[WHITE][0]); }
+        if (new_state.castling_rights & 2) != 0 { new_state.hash ^= zobrist::castling_file_key(WHITE, 1, new_state.castling_rook_files[WHITE][1]); }
+        if (new_state.castling_rights & 4) != 0 { new_state.hash ^= zobrist::castling_file_key(BLACK, 0, new_state.castling_rook_files[BLACK][0]); }
+        if (new_state.castling_rights & 8) != 0 { new_state.hash ^= zobrist::castling_file_key(BLACK, 1, new_state.castling_rook_files[BLACK][1]); }
+
+
         new_state.side_to_move = 1 - side;
         new_state.hash ^= zobrist::side_key();
 
@@ -470,4 +645,36 @@ impl GameState {
 
         new_state
     }
+}
+
+// Helpers
+fn rank_of(sq: u8) -> u8 {
+    sq / 8
+}
+
+fn find_outermost_rook(state: &GameState, side: usize, is_kingside: bool, k_file: u8) -> Option<u8> {
+    let rook_type = if side == WHITE { R } else { r };
+    let rank = if side == WHITE { 0 } else { 7 };
+    let rooks = state.bitboards[rook_type];
+
+    if is_kingside {
+        // Look for rook to the right of King (file > k_file)
+        // We want the *outermost* one, so iterate 7 down to k_file + 1
+        for f in (k_file + 1..8).rev() {
+            let sq = rank * 8 + f;
+            if rooks.get_bit(sq) {
+                return Some(f);
+            }
+        }
+    } else {
+        // Look for rook to the left of King (file < k_file)
+        // We want the *outermost* one, so iterate 0 up to k_file - 1
+        for f in 0..k_file {
+            let sq = rank * 8 + f;
+            if rooks.get_bit(sq) {
+                return Some(f);
+            }
+        }
+    }
+    None
 }
