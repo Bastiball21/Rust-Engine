@@ -3,6 +3,9 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::sync::OnceLock;
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 // Architecture Constants
 pub const LAYER1_SIZE: usize = 256;
 pub const INPUT_SIZE: usize = 768;
@@ -80,7 +83,25 @@ impl Accumulator {
         let offset = feature_idx * LAYER1_SIZE;
         let weights = &net.feature_weights[offset..offset + LAYER1_SIZE];
 
-        // Auto-vectorization should handle this loop
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let mut i = 0;
+            while i < LAYER1_SIZE {
+                let v_ptr = self.v.as_mut_ptr().add(i);
+                let w_ptr = weights.as_ptr().add(i);
+
+                let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
+                let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
+
+                let res = _mm256_add_epi16(v_vec, w_vec);
+                _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
+
+                i += 16;
+            }
+            // LAYER1_SIZE is 256, divisible by 16. No remainder handling needed.
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
         for i in 0..LAYER1_SIZE {
             self.v[i] = self.v[i].wrapping_add(weights[i]);
         }
@@ -91,6 +112,24 @@ impl Accumulator {
         let offset = feature_idx * LAYER1_SIZE;
         let weights = &net.feature_weights[offset..offset + LAYER1_SIZE];
 
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let mut i = 0;
+            while i < LAYER1_SIZE {
+                let v_ptr = self.v.as_mut_ptr().add(i);
+                let w_ptr = weights.as_ptr().add(i);
+
+                let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
+                let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
+
+                let res = _mm256_sub_epi16(v_vec, w_vec);
+                _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
+
+                i += 16;
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
         for i in 0..LAYER1_SIZE {
             self.v[i] = self.v[i].wrapping_sub(weights[i]);
         }
@@ -158,26 +197,108 @@ pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
     if let Some(net) = NETWORK.get() {
         let mut sum = net.output_bias as i32;
 
-        // Perspective 1 (STM)
-        for i in 0..LAYER1_SIZE {
-            let val = stm_acc.v[i];
-            let clamped = val.clamp(0, QA as i16) as i32;
-            let activation = (clamped * clamped) / QA; // SCReLU / QA
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let mut sum_vec = _mm256_setzero_si256();
+            let zero = _mm256_setzero_si256();
+            let qa = _mm256_set1_epi16(QA as i16);
 
-            // Output weight index for STM: 0..LAYER1_SIZE-1
-            let weight = net.output_weights[i] as i32;
-            sum += activation * weight;
+            // Process STM (Friendly)
+            // Output weights 0..256
+            for i in (0..LAYER1_SIZE).step_by(16) {
+                let v_ptr = stm_acc.v.as_ptr().add(i);
+                let w_ptr = net.output_weights.as_ptr().add(i);
+
+                let val = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
+                let w = _mm256_loadu_si256(w_ptr as *const __m256i);
+
+                // Clamp 0..QA
+                let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+                // Square
+                let sq = _mm256_mullo_epi16(clamped, clamped);
+                // Divide by QA: (x*x)/QA.
+                // Note: _mm256_mulhi_epu16 might be better if we precompute reciprocal,
+                // but integer division is slow. Here QA=255.
+                // Fast approximation: (x*x) * (65536/255) >> 16 ?
+                // 65536/255 = 257. So (x*x * 257) >> 16.
+                // This is essentially (x*x)/255.
+                // Let's check max val: QA*QA = 65025. Fits in u16.
+                // So mullo is fine.
+                // Wait, SCReLU is (clamped * clamped) / QA.
+                // 255 * 255 = 65025.
+                // If we do direct integer division, it's slow.
+                // Since QA=255, we can use fast division or just accept the latency if it's not critical inside vector loop (it is).
+                // Actually, existing code uses integer division: `(clamped * clamped) / QA`.
+                // In SIMD, we don't have _mm256_div_epi16.
+                // We must use multiply-high or similar.
+                // But let's stick to a simpler approach first: unpack to i32, then divide?
+                // Or just use the scalar loop if SCReLU division is annoying to implement efficiently without lookups.
+                //
+                // Optimization: QA=255.
+                // x/255 ~= (x * 257 + 257) >> 16 for x in [0, 65535].
+                // Let's implement that.
+                let mul = _mm256_mullo_epi16(clamped, clamped); // x^2
+                let magic = _mm256_set1_epi16(257); // 65536/255 rounded up
+                let prod_hi = _mm256_mulhi_epu16(mul, magic); // (x^2 * 257) >> 16
+                let activation = prod_hi; // This is floor(x^2/255) effectively
+
+                // Sum += activation * weight
+                // activation is i16 (0..255). weight is i16.
+                // madd_epi16 does (a*b + c*d) and extends to i32. Perfect.
+                let prod = _mm256_madd_epi16(activation, w);
+                sum_vec = _mm256_add_epi32(sum_vec, prod);
+            }
+
+            // Process NTM (Enemy)
+            // Output weights 256..512
+            for i in (0..LAYER1_SIZE).step_by(16) {
+                let v_ptr = ntm_acc.v.as_ptr().add(i);
+                let w_ptr = net.output_weights.as_ptr().add(LAYER1_SIZE + i);
+
+                let val = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
+                let w = _mm256_loadu_si256(w_ptr as *const __m256i);
+
+                let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+                let mul = _mm256_mullo_epi16(clamped, clamped);
+                let magic = _mm256_set1_epi16(257);
+                let activation = _mm256_mulhi_epu16(mul, magic);
+
+                let prod = _mm256_madd_epi16(activation, w);
+                sum_vec = _mm256_add_epi32(sum_vec, prod);
+            }
+
+            // Horizontal Sum of sum_vec (8 x i32)
+            // Can be done with a few shuffles or cast to slice.
+            let mut arr = [0i32; 8];
+            _mm256_storeu_si256(arr.as_mut_ptr() as *mut __m256i, sum_vec);
+            for x in arr {
+                sum += x;
+            }
         }
 
-        // Perspective 2 (NTM)
-        for i in 0..LAYER1_SIZE {
-            let val = ntm_acc.v[i];
-            let clamped = val.clamp(0, QA as i16) as i32;
-            let activation = (clamped * clamped) / QA; // SCReLU / QA
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Perspective 1 (STM)
+            for i in 0..LAYER1_SIZE {
+                let val = stm_acc.v[i];
+                let clamped = val.clamp(0, QA as i16) as i32;
+                let activation = (clamped * clamped) / QA; // SCReLU / QA
 
-            // Output weight index for NTM: LAYER1_SIZE..2*LAYER1_SIZE-1
-            let weight = net.output_weights[LAYER1_SIZE + i] as i32;
-            sum += activation * weight;
+                // Output weight index for STM: 0..LAYER1_SIZE-1
+                let weight = net.output_weights[i] as i32;
+                sum += activation * weight;
+            }
+
+            // Perspective 2 (NTM)
+            for i in 0..LAYER1_SIZE {
+                let val = ntm_acc.v[i];
+                let clamped = val.clamp(0, QA as i16) as i32;
+                let activation = (clamped * clamped) / QA; // SCReLU / QA
+
+                // Output weight index for NTM: LAYER1_SIZE..2*LAYER1_SIZE-1
+                let weight = net.output_weights[LAYER1_SIZE + i] as i32;
+                sum += activation * weight;
+            }
         }
 
         // Scale to centipawns

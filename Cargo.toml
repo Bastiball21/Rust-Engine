@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 smallvec = "1.15.1"
 bulletformat = { git = "https://github.com/jw1912/bulletformat" }
+log = "0.4.29"
+simplelog = "0.12.2"
 
 [profile.release]
 opt-level = 3
