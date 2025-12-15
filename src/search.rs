@@ -9,7 +9,7 @@ use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-const MAX_PLY: usize = 64;
+const MAX_PLY: usize = 128;
 const INFINITY: i32 = 32000;
 const MATE_VALUE: i32 = 31000;
 const MATE_SCORE: i32 = 30000;
@@ -573,7 +573,7 @@ pub fn search(
     main_thread: bool,
     history: Vec<u64>,
 ) {
-    let mut best_move = None;
+    let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
     let mut info = Box::new(SearchInfo::new(tm, stop_signal, tt, main_thread));
     let mut path = history;
@@ -631,9 +631,25 @@ pub fn search(
             break;
         }
 
-        // OPTIMIZATION: Dynamic Time Management
+        // OPTIMIZATION: Dynamic Time Management & Verification
         if main_thread && depth > 5 {
-             // Placeholder for soft limit adjustments
+             // Verification Logic:
+             // If we are in the "verification range" (depth 15-32) and the best move is tactical,
+             // or the search is unstable, we extend the soft time limit.
+             if depth >= 15 && depth <= 32 {
+                 if let Some(bm) = best_move {
+                     let is_tactical = bm.is_capture || bm.promotion.is_some() || is_check(state, state.side_to_move); // Note: state side is us, checks are checks we Give? No.
+                     // `best_move` is a move FROM `state`.
+                     // `is_capture` and `promotion` are flags in `Move`.
+                     // To check if it gives check, we need `moves_gives_check`.
+                     let gives_check = moves_gives_check(state, bm);
+
+                     if is_tactical || gives_check {
+                         // Extend soft limit by 20%
+                         info.time_manager.soft_limit += info.time_manager.soft_limit / 5;
+                     }
+                 }
+             }
         }
 
         if main_thread && info.time_manager.check_soft_limit() {
@@ -790,7 +806,18 @@ fn negamax(
     // info.current_threat = Some(threat_info);
 
     // Extensions
-    let extensions = 0;
+    let mut extensions = 0;
+
+    // Tactical Extensions: Pawn to 7th
+    // If the previous move put a pawn on the 7th rank (for White) or 2nd rank (for Black), extend.
+    if let Some(pm) = prev_move {
+         let p_piece = get_piece_type_safe(state, pm.target);
+         let rank = pm.target / 8;
+         // P=0, p=6. Rank 6 is 7th, Rank 1 is 2nd.
+         if (p_piece == P && rank == 6) || (p_piece == p && rank == 1) {
+             extensions += 1;
+         }
+    }
 
     let mut tt_move = None;
     let mut tt_score = -INFINITY;
