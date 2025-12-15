@@ -9,6 +9,10 @@ bulletformat = { git = "https://github.com/jw1912/bulletformat" }
 log = "0.4.29"
 simplelog = "0.12.2"
 
+[features]
+default = ["bmi2"]
+bmi2 = []
+
 [profile.release]
 opt-level = 3
 lto = "fat"

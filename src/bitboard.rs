@@ -294,30 +294,42 @@ pub fn get_queen_attacks(square: u8, occupancy: Bitboard) -> Bitboard {
 // --- PEXT HELPER ---
 #[inline(always)]
 fn pext_safe(val: u64, mask: u64) -> u64 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "bmi2")]
     unsafe {
-        _pext_u64(val, mask)
+        #[cfg(target_arch = "x86_64")]
+        {
+            _pext_u64(val, mask)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Fallback if bmi2 feature is on but not on x86_64 (should strictly not happen if correctly configured)
+            // But we provide fallback to be safe for cross-compilation quirks
+            software_pext(val, mask)
+        }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(feature = "bmi2"))]
     {
-        // Software Fallback (Slow but correct) - should not happen if environment is checked
-        let mut res = 0;
-        let mut bb = val;
-        let mut m = mask;
-        let mut bit = 1;
-        while m != 0 {
-            if (m & 1) != 0 {
-                if (bb & 1) != 0 {
-                    res |= bit;
-                }
-                bit <<= 1;
-            }
-            bb >>= 1;
-            m >>= 1;
-        }
-        res
+        software_pext(val, mask)
     }
+}
+
+fn software_pext(val: u64, mask: u64) -> u64 {
+    let mut res = 0;
+    let mut bb = val;
+    let mut m = mask;
+    let mut bit = 1;
+    while m != 0 {
+        if (m & 1) != 0 {
+            if (bb & 1) != 0 {
+                res |= bit;
+            }
+            bit <<= 1;
+        }
+        bb >>= 1;
+        m >>= 1;
+    }
+    res
 }
 
 // --- GENERATORS (SLOW) ---
