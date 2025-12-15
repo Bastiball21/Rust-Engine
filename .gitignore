@@ -2,3 +2,4 @@
 nn-aether.nnue
 trainer/target/
 aether_data.bin
+aether.log

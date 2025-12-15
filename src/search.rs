@@ -453,6 +453,10 @@ fn quiescence(
     // REMOVED: Heavy Threat Analysis
     // We strictly use `eval::evaluate` which now handles fallback internally if needed.
 
+    if ply > info.seldepth as usize {
+        info.seldepth = ply as u8;
+    }
+
     if ply >= MAX_PLY {
         return eval::evaluate(state);
     }
@@ -1029,7 +1033,7 @@ fn negamax(
             quiets_checked += 1;
         }
 
-        let mut move_extension = 0;
+        let move_extension = 0;
         // Removed sacrifice candidate extension
 
         let mut score;
