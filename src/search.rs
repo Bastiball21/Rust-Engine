@@ -771,8 +771,12 @@ fn negamax(
 
     let in_check = is_check(state, state.side_to_move);
 
-    // STOCKFISH ADAPTATION: Removed generic Check Extension to prevent explosion.
-    let new_depth = depth;
+    // IMPROVEMENT: Re-enable Check Extension
+    // Extend the search depth by 1 when in check to find mates and tactical defenses.
+    let mut new_depth = depth;
+    if in_check {
+        new_depth = new_depth.saturating_add(1);
+    }
 
     if new_depth == 0 {
         return quiescence(state, alpha, beta, info, ply);
