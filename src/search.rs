@@ -581,14 +581,17 @@ fn quiescence(
                 if see_val < 0 {
                     // SACRIFICE LOGIC:
                     // Don't prune if it creates high threat (Sacrifice Candidate)
+                    // DISABLED: Too expensive for QSearch.
+                    /*
                     let mut is_promising_sacrifice = false;
                     let impact = threat::analyze_move_threat_impact(state, mv, &threat_info);
                     if impact.threat_score > threat::SACRIFICE_THREAT_THRESHOLD {
                         is_promising_sacrifice = true;
                     }
+                    */
 
-                    // Don't prune if it gives check (tactical) or is a promising sacrifice
-                    if !gives_check_fast(state, mv) && !is_promising_sacrifice {
+                    // Don't prune if it gives check (tactical)
+                    if !gives_check_fast(state, mv) {
                         continue;
                     }
                 }
@@ -848,45 +851,22 @@ fn negamax(
     }
 
     let in_check = is_check(state, state.side_to_move);
-    let new_depth = if in_check {
-        depth.saturating_add(1)
-    } else {
-        depth
-    };
+
+    // STOCKFISH ADAPTATION: Removed generic Check Extension to prevent explosion.
+    // Was: let new_depth = if in_check { depth.saturating_add(1) } else { depth };
+    let new_depth = depth;
 
     if new_depth == 0 {
         return quiescence(state, alpha, beta, info, ply);
     }
 
     // --- THREAT ANALYSIS ---
-    // Always computed (except QSearch/Root? No, root needs it too).
-    // This feeds into extensions and pruning.
     let threat_info = threat::analyze(state);
-    info.current_threat = Some(threat_info); // Pass to score_move
+    info.current_threat = Some(threat_info);
 
-    // Extensions based on Threat
-    // 1. King Danger Extension: Preventative
-    // 2. High Threat Score Extension: Instability
-    // We modify new_depth directly.
-
-    let mut extensions = 0;
-
-    // Check extension is handled by 'in_check' logic below (new_depth = depth + 1).
-    // Here we handle non-check danger.
-    if !in_check {
-        if threat_info.king_danger_score[state.side_to_move] > threat::THREAT_KING_DANGER_THRESHOLD {
-            extensions += 1;
-        } else if threat_info.static_threat_score > threat::THREAT_EXTENSION_THRESHOLD {
-            // Only extend if not already extended?
-            // Cap total depth extension to avoid explosion.
-            if extensions == 0 {
-                extensions += 1;
-            }
-        }
-    }
-
-    // Cap extensions
-    if extensions > 1 { extensions = 1; }
+    // STOCKFISH ADAPTATION: Removed Static Threat/King Danger Extensions.
+    // We rely on Singular Extensions (Step 15 in Stockfish) and proper handling of checks in LMR/Pruning.
+    let extensions = 0;
 
     let mut tt_move = None;
     let mut tt_score = -INFINITY;
