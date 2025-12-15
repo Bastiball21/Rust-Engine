@@ -42,9 +42,6 @@ pub struct SearchInfo<'a> {
     pub stopped: bool,
     pub tt: &'a TranspositionTable,
     pub main_thread: bool,
-
-    // Added for threading current threat info to scoring
-    pub current_threat: Option<ThreatInfo>,
 }
 
 impl<'a> SearchInfo<'a> {
@@ -83,7 +80,6 @@ impl<'a> SearchInfo<'a> {
             stopped: false,
             tt,
             main_thread: main,
-            current_threat: None,
         }
     }
 
@@ -121,11 +117,6 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
          let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
          if friendly_rooks.get_bit(mv.target) {
               // It's castling. Fallback to slow check.
-              // We can return false here if we assume moves_gives_check handles slow check fallback.
-              // BUT gives_check_fast is used inside quiescence pruning logic.
-              // If we return false, we might prune it? No, pruning logic checks !gives_check.
-              // Castling in QSearch? Rare/Impossible (QSearch generates captures).
-              // Unless we generated checks.
               return false;
          }
     }
@@ -385,53 +376,8 @@ fn score_move(
         score += info.cont_history[idx][attacker][mv.target as usize];
     }
 
-    // --- TACTICAL QUIET MOVE BOOST ---
-    // If we have threat info (we are in negamax, not root/qsearch? actually passed via info)
-    // We check for tactical bonuses.
-    // Note: score_move is called for ALL moves. Doing full analysis here is too slow.
-    // We use lightweight checks.
-
-    if let Some(threat) = &info.current_threat {
-        // 1. Dominance (Static)
-        let dom = threat::is_dominant_square(state, mv.target, attacker, state.side_to_move);
-        if dom > 0 {
-            score += dom * 50; // Boost order significantly
-        }
-
-        // 2. Defensive (If under threat)
-        if threat.static_threat_score > 50 || threat.king_danger_score[state.side_to_move] > 20 {
-            // Simple defensive check: moving attacked piece?
-            let is_attacked = threat.attacks_by_side[1 - state.side_to_move].get_bit(mv.source);
-            if is_attacked {
-                score += 2000; // Priority!
-            }
-        }
-
-        // 3. New Features: Coordination & Levers (Lightweight Checks)
-        // Only for Quiet Moves
-        if !mv.is_capture && mv.promotion.is_none() {
-            let impact = threat::analyze_move_threat_impact(state, mv, threat);
-
-            if impact.pawn_lever_score > 0 {
-                score += impact.pawn_lever_score * 10;
-            }
-            if impact.coordination_bonus > 0 {
-                score += impact.coordination_bonus * 5;
-            }
-
-            // 4. Prophylaxis (Feature #1)
-            // Heavy logic, only for Killers or History moves to save NPS
-            let is_promising = score > 1000 ||
-                (ply < MAX_PLY && (info.killers[ply][0] == Some(mv) || info.killers[ply][1] == Some(mv)));
-
-            if is_promising {
-                let prophylaxis = threat::get_prophylaxis_score(state, mv, threat);
-                if prophylaxis > 0 {
-                    score += prophylaxis * 2; // High weight for prevention
-                }
-            }
-        }
-    }
+    // REMOVED: Tactical Quiet Move Boosts (Heavy Logic)
+    // We now rely on pure history and killers.
 
     score.min(70000)
 }
@@ -504,18 +450,11 @@ fn quiescence(
     info: &mut SearchInfo,
     ply: usize,
 ) -> i32 {
-    // In Quiescence, we usually don't run full threat analysis for efficiency,
-    // or we run a lightweight version.
-    // For now, let's use a minimal ThreatInfo or derive it if needed.
-    // Given the constraints ("Acceptable NPS drop 0-3%"), full analysis here is risky.
-    // We will use a default ThreatInfo for stand_pat evaluation in QSearch.
-    let threat_info = ThreatInfo::default();
-
-    // QSearch doesn't need detailed threat info for move ordering usually (captures only).
-    info.current_threat = None;
+    // REMOVED: Heavy Threat Analysis
+    // We strictly use `eval::evaluate` which now handles fallback internally if needed.
 
     if ply >= MAX_PLY {
-        return eval::evaluate(state, &threat_info);
+        return eval::evaluate(state);
     }
     info.nodes += 1;
     if info.nodes % 2048 == 0 {
@@ -528,7 +467,7 @@ fn quiescence(
     let in_check = is_in_check(state);
 
     if !in_check {
-        let stand_pat = eval::evaluate(state, &threat_info);
+        let stand_pat = eval::evaluate(state);
         if stand_pat >= beta {
             return beta;
         }
@@ -571,6 +510,7 @@ fn quiescence(
         generator.list.moves.swap(i, best_idx);
 
         if !in_check {
+            // STRICT Q-Search: Only Captures and Promotions
             if !mv.is_capture && mv.promotion.is_none() {
                 continue;
             }
@@ -579,21 +519,7 @@ fn quiescence(
 
                 // OPTIMIZATION: Prune bad captures in QSearch
                 if see_val < 0 {
-                    // SACRIFICE LOGIC:
-                    // Don't prune if it creates high threat (Sacrifice Candidate)
-                    // DISABLED: Too expensive for QSearch.
-                    /*
-                    let mut is_promising_sacrifice = false;
-                    let impact = threat::analyze_move_threat_impact(state, mv, &threat_info);
-                    if impact.threat_score > threat::SACRIFICE_THREAT_THRESHOLD {
-                        is_promising_sacrifice = true;
-                    }
-                    */
-
-                    // Don't prune if it gives check (tactical)
-                    if !gives_check_fast(state, mv) {
-                        continue;
-                    }
+                    continue; // Aggressively prune bad captures
                 }
             }
         }
@@ -702,18 +628,11 @@ pub fn search(
         }
 
         // OPTIMIZATION: Dynamic Time Management
-        // If best move is unstable or score drops, use more time (soft limit extension)
         if main_thread && depth > 5 {
-            // Example logic: if score dropped by > 50cp, extend time by 20%
-            // Note: info.time_manager is immutable in search loop unless we update it.
-            // But TimeManager fields are just checked.
-            // We can update the soft_limit in place if we make it mutable in SearchInfo (it is)
-            // or pass a mutable reference.
+             // Placeholder for soft limit adjustments
         }
 
         if main_thread && info.time_manager.check_soft_limit() {
-            // Check if we have a single legal move (root node) or other termination criteria?
-            // For now, strict soft limit adherence.
             info.stopped = true;
             info.stop_signal.store(true, Ordering::Relaxed);
         }
@@ -839,7 +758,7 @@ fn negamax(
     }
 
     if ply >= MAX_PLY {
-        return eval::evaluate(state, &ThreatInfo::default());
+        return eval::evaluate(state);
     }
     info.nodes += 1;
     if ply > info.seldepth as usize {
@@ -853,29 +772,22 @@ fn negamax(
     let in_check = is_check(state, state.side_to_move);
 
     // STOCKFISH ADAPTATION: Removed generic Check Extension to prevent explosion.
-    // Was: let new_depth = if in_check { depth.saturating_add(1) } else { depth };
     let new_depth = depth;
 
     if new_depth == 0 {
         return quiescence(state, alpha, beta, info, ply);
     }
 
-    // --- THREAT ANALYSIS ---
-    let threat_info = threat::analyze(state);
-    info.current_threat = Some(threat_info);
+    // REMOVED: Expensive Threat Analysis
+    // info.current_threat = Some(threat_info);
 
-    // STOCKFISH ADAPTATION: Removed Static Threat/King Danger Extensions.
-    // We rely on Singular Extensions (Step 15 in Stockfish) and proper handling of checks in LMR/Pruning.
+    // Extensions
     let extensions = 0;
 
     let mut tt_move = None;
     let mut tt_score = -INFINITY;
     let mut tt_depth = 0;
     let mut tt_flag = FLAG_ALPHA;
-
-    // Use extended depth for TT logic?
-    // Usually TT probe uses current depth. Extensions happen after.
-    // But if we extend, we want a deeper search.
 
     let depth_with_ext = new_depth.saturating_add(extensions);
 
@@ -901,7 +813,7 @@ fn negamax(
     let static_eval = if in_check {
         -INFINITY
     } else {
-        let eval = eval::evaluate(state, &threat_info);
+        let eval = eval::evaluate(state);
         info.static_evals[ply] = eval;
         eval
     };
@@ -918,25 +830,24 @@ fn negamax(
         }
     }
 
+    // RFP (Reverse Futility Pruning) - TUNED: margin = 60 * depth
     if !is_pv
         && !in_check
         && excluded_move.is_none()
         && new_depth < 7
-        && static_eval - (80 * new_depth as i32) >= beta
+        && static_eval - (60 * new_depth as i32) >= beta
     {
         return static_eval;
     }
 
     // NULL MOVE PRUNING
-    // Condition: !threat.tactical_instability AND !was_sacrifice
-    // We disable NMP if the opponent just played a sacrifice, to allow verification of the sacrifice.
+    // Removed dependency on tactical_instability
     if new_depth >= 3
         && ply > 0
         && !in_check
         && !is_pv
         && excluded_move.is_none()
         && static_eval >= beta
-        && !threat_info.tactical_instability // Disable if unstable
         && !was_sacrifice
     {
         use crate::state::{b, n, q, r, B, N, Q, R};
@@ -1076,27 +987,8 @@ fn negamax(
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 
         // 1. FUTILITY PRUNING for Quiet Moves
-        // Awareness: Relax margin if threats are high.
-        // Also check if this specific move is a Sacrifice Candidate (High Threat).
-        let is_sacrifice_candidate = if is_quiet {
-            let delta = threat::analyze_move_threat_impact(state, mv, &threat_info);
-            delta.is_tactical
-        } else {
-            // Capture
-            let see_val = see(state, mv);
-            if see_val < 0 {
-                 let delta = threat::analyze_move_threat_impact(state, mv, &threat_info);
-                 delta.threat_score > threat::SACRIFICE_THREAT_THRESHOLD
-            } else {
-                 false
-            }
-        };
-
         if !is_pv && !in_check && is_quiet && new_depth < 7 && excluded_move.is_none() {
-            let mut futility_margin = 120 * new_depth as i32;
-            if threat_info.tactical_instability || is_sacrifice_candidate {
-                futility_margin += 200; // Give more leeway
-            }
+            let futility_margin = 120 * new_depth as i32;
             if static_eval + futility_margin < alpha {
                 quiets_checked += 1;
                 continue;
@@ -1107,7 +999,8 @@ fn negamax(
         if !is_pv && !in_check && !is_quiet && new_depth < 5 && excluded_move.is_none() {
             // Captures need a much wider margin
             let futility_margin = 300 * new_depth as i32;
-            if static_eval + futility_margin < alpha && !is_sacrifice_candidate {
+            if static_eval + futility_margin < alpha {
+                // Remove logic that checked for sacrifice candidates
                 continue;
             }
         }
@@ -1132,27 +1025,12 @@ fn negamax(
             quiets_checked += 1;
         }
 
-        // --- SACRIFICE & TACTICAL EXTENSION ---
-        // Note: is_sacrifice_candidate was computed above for pruning.
-        // Now use it for extensions.
-
         let mut move_extension = 0;
-        if is_sacrifice_candidate {
-             move_extension = 1;
-        }
-
-        // Also reuse is_sacrifice_candidate for LMR reduction
+        // Removed sacrifice candidate extension
 
         let mut score;
         if moves_searched == 1 {
-            // Apply extensions here too
-            // First move extensions (root or PV) + Sacrifice extension?
-            // Usually we extend PV moves if they are interesting.
-            // If main threat extensions are 0, we can use move_extension.
-            // total_extension = extensions (static) + move_extension (dynamic) + extension (singular)
-            // Cap at 1 usually, or 2?
             let total_extension = (extensions + move_extension + extension).min(1);
-
             let extended_depth = new_depth.saturating_add(total_extension);
             score = -negamax(
                 &next_state,
@@ -1166,7 +1044,7 @@ fn negamax(
                 Some(mv),
                 prev_move,
                 None,
-                is_sacrifice_candidate,
+                false, // Removed sacrifice prediction
             );
         } else {
             let gives_check = moves_gives_check(state, mv);
@@ -1174,6 +1052,10 @@ fn negamax(
 
             // Adjusted LMR
             if new_depth >= 3 && moves_searched > 1 && is_quiet && !gives_check && !in_check {
+                // SEE Pruning check for LMR: Don't reduce good captures (N/A here, is_quiet)
+                // For quiet moves, SEE is usually 0. If negative, it's bad.
+                // If it's a "winning capture", it's not quiet.
+
                 let d_idx = new_depth.min(63) as usize;
                 let m_idx = moves_searched.min(63) as usize;
                 reduction = LMR_TABLE.get().unwrap()[d_idx][m_idx];
@@ -1188,10 +1070,7 @@ fn negamax(
                     reduction = reduction.saturating_sub(1);
                 }
 
-                // REDUCE LMR for Tactical/Sacrifice Moves
-                if is_sacrifice_candidate {
-                    reduction = reduction.saturating_sub(2);
-                }
+                // Removed reduction boost for tactical moves
             }
 
             let d = new_depth.saturating_sub(1 + reduction);
@@ -1207,7 +1086,7 @@ fn negamax(
                 Some(mv),
                 prev_move,
                 None,
-                is_sacrifice_candidate,
+                false,
             );
 
             if score > alpha && reduction > 0 {
@@ -1223,7 +1102,7 @@ fn negamax(
                     Some(mv),
                     prev_move,
                     None,
-                    is_sacrifice_candidate,
+                    false,
                 );
             }
             if score > alpha && score < beta {
@@ -1242,7 +1121,7 @@ fn negamax(
                     Some(mv),
                     prev_move,
                     None,
-                    is_sacrifice_candidate,
+                    false,
                 );
             }
         }
@@ -1283,7 +1162,26 @@ fn negamax(
                     );
                 }
             }
+        } else {
+            // HISTORY PENALTY
+            if is_quiet {
+                 let from = mv.source as usize;
+                 let to = mv.target as usize;
+                 let bonus = (new_depth as i32) * (new_depth as i32);
+                 // Penalize logic: -bonus
+                 update_history(&mut info.history[from][to], -bonus);
+
+                 if let Some(pm) = prev_move {
+                        let p_piece = get_piece_type_safe(state, pm.target);
+                        let p_to = pm.target as usize;
+                        let idx = p_piece * 64 + p_to;
+                        let c_piece = get_piece_type_safe(state, mv.source);
+                        let c_to = mv.target as usize;
+                        update_history(&mut info.cont_history[idx][c_piece][c_to], -bonus);
+                 }
+            }
         }
+
         if alpha >= beta {
             if is_quiet {
                 if ply < MAX_PLY {
@@ -1368,10 +1266,6 @@ pub fn format_move_uci(mv: Move, state: &GameState) -> String {
             if to > from { to = 62; } // g8
             else { to = 58; } // c8
         }
-        // If King is not on e1/e8, we can't output standard e1g1 notation validly.
-        // We fallback to e1h1 style (Chess960 style) because standard notation is impossible.
-        // This handles cases where we are playing "Standard" rules but from a 960 position?
-        // Or simple cases.
     }
 
     let mut s = format!("{}{}", square_to_coord(from), square_to_coord(to));

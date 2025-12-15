@@ -81,30 +81,17 @@ pub fn init_eval() {
 }
 
 // --- MAIN EVAL ---
-pub fn evaluate(state: &GameState, threat: &ThreatInfo) -> i32 {
-    let raw_eval = if crate::nnue::NETWORK.get().is_some() {
-        crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move])
-    } else {
-        evaluate_hce(state, threat)
-    };
-
-    // --- BLENDING LOGIC (Threat-Aware) ---
-    // If we have instability (high threat score), we might trust HCE logic (safety) more
-    // or dampen the score if uncertain.
-    // User Spec: "Blend them based on confidence: Eval = NNUE * (1 - uncertainty) + HCE * uncertainty"
-
+pub fn evaluate(state: &GameState) -> i32 {
     if crate::nnue::NETWORK.get().is_some() {
-        if threat.tactical_instability {
-            // High danger -> NNUE might be blind to tactic -> mix in HCE safety penalties
-            let hce = evaluate_hce(state, threat);
-            // Simple blending: 80% NNUE, 20% HCE when unstable
-            // Note: HCE and NNUE scales must match!
-            // Usually they are roughly compatible (centipawns).
-            return (raw_eval * 4 + hce) / 5;
-        }
+        // If NNUE is loaded, we trust it completely. No HCE blending.
+        // This avoids expensive threat analysis and scalar logic.
+        return crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move]);
+    } else {
+        // Fallback to HCE if NNUE is not available.
+        // We perform threat analysis here, as it was removed from search.
+        let threat = threat::analyze(state);
+        evaluate_hce(state, &threat)
     }
-
-    raw_eval
 }
 
 // --- HCE LOGIC ---
