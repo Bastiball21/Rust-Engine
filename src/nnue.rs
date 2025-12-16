@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::arch::x86_64::*;
 
 // Architecture Constants
-pub const LAYER1_SIZE: usize = 128;
+pub const LAYER1_SIZE: usize = 256;
 pub const INPUT_SIZE: usize = 768;
 pub const NUM_BUCKETS: usize = 32; // Matches bullet_lib ChessBuckets (Standard Mirrored)
 const QA: i32 = 255;
