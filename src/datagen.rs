@@ -118,8 +118,7 @@ pub fn run_datagen(config: DatagenConfig) {
             .stack_size(8 * 1024 * 1024);
 
         let handle = builder.spawn(move || {
-            let mut tt = TranspositionTable::new(16);
-            let stop = Arc::new(AtomicBool::new(false));
+            let mut tt = TranspositionTable::new(32);
             let mut rng = Rng::new(123456789 + t_id as u64);
             let mut search_data = search::SearchData::new();
 
@@ -172,11 +171,11 @@ pub fn run_datagen(config: DatagenConfig) {
                         // `next_state` is after move.
                         // Check if King of (next_state.side_to_move ^ 1) is attacked.
 
-                        let us = state.side_to_move;
+                        let mover = state.side_to_move;
                         // In `next_state`, `side_to_move` is `them`.
                         // We check if `us` King is attacked.
-                        if !crate::search::is_check(&next_state, us) {
-                             valid_moves.push(m);
+                        if !crate::search::is_check(&next_state, mover) {
+                            valid_moves.push(m);
                         }
                     }
 
@@ -199,21 +198,19 @@ pub fn run_datagen(config: DatagenConfig) {
                 }
 
                 // --- 2. Real Search Loop ---
-                let mut prev_score: i32 = 0; // Relative to side to move
-                let mut first_move = true;
 
                 loop {
                     // Check draw by repetition
-                    // Check if hash appears twice in history (excluding current)
-                    let mut rep_count = 0;
-                    for &h in &history {
-                        if h == state.hash { rep_count += 1; }
-                    }
-                    if rep_count >= 3 {
-                         result_val = 0.5; finished = true; break;
+                    let rep_count = history.iter().filter(|&&h| h == state.hash).count() - 1;
+                    if rep_count >= 2 {
+                        result_val = 0.5;
+                        finished = true;
+                        break;
                     }
                     if state.halfmove_clock >= 100 {
-                         result_val = 0.5; finished = true; break;
+                        result_val = 0.5;
+                        finished = true;
+                        break;
                     }
 
                     let mut moves = crate::movegen::MoveGenerator::new();
@@ -231,19 +228,38 @@ pub fn run_datagen(config: DatagenConfig) {
                     }
 
                     // SEARCH
-                    // Hard depth limit.
                     let tm = TimeManager::new(TimeControl::MoveTime(1000), state.side_to_move, 0);
-                    // MoveTime is high to ensure depth is reached, but we rely on depth limit.
 
-                    search::search(&state, tm, &tt, stop.clone(), depth, false, vec![], &mut search_data);
+                    // Call search and capture result
+                    let (search_score, search_best_move) = search::search(
+                        &state,
+                        tm,
+                        &tt,
+                        Arc::new(AtomicBool::new(false)),
+                        depth,
+                        false,
+                        vec![],
+                        &mut search_data,
+                    );
 
-                    let (tt_score, _, _, best_move_opt) =
-                        tt.probe_data(state.hash).unwrap_or((0, 0, 0, None));
+                    // TT Validation Logic
+                    let (final_score, final_move_opt) =
+                        if let Some((tt_score, tt_depth, tt_flag, tt_move)) =
+                            tt.probe_data(state.hash)
+                        {
+                            if tt_depth >= depth && tt_flag == crate::tt::FLAG_EXACT {
+                                (tt_score, tt_move)
+                            } else {
+                                (search_score, search_best_move)
+                            }
+                        } else {
+                            (search_score, search_best_move)
+                        };
 
                     // Adjudication
-                    if tt_score.abs() > 20000 {
+                    if final_score.abs() > 20000 {
                         // Mate score
-                        if tt_score > 0 {
+                        if final_score > 0 {
                             result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
                         } else {
                             result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
@@ -252,43 +268,16 @@ pub fn run_datagen(config: DatagenConfig) {
                         break;
                     }
 
-                    // Blunder Check (Stability)
-                    // `tt_score` is relative to side to move.
-                    // `prev_score` was relative to previous side to move.
-                    // If we made a move, `tt_score` (for us now) should be roughly `-prev_score`.
-                    // Wait, `tt_score` is from the perspective of `state.side_to_move`.
-                    // After we made a move, it's the opponent's turn.
-                    // So `tt_score` is opponent's advantage.
-                    // If we played well, `tt_score` should be `-prev_score`.
-                    // If `tt_score` is much HIGHER than `-prev_score` (opponent is winning more), we blundered.
-                    // Example: Prev (Us) = +100. Best move -> Opponent sees -100.
-                    // If Opponent sees +200, we blundered (swing of 300).
-
-                    // Scores are stored relative.
-                    // Check: `tt_score` vs `-prev_score`.
-                    // Diff = `tt_score - (-prev_score)` = `tt_score + prev_score`.
-                    // If Diff > 300, it means Opponent is doing 300cp better than expected.
-
-                    // if !first_move {
-                    //     let diff = tt_score + prev_score; // e.g. -100 + 100 = 0 (Good). +200 + 100 = 300 (Bad).
-                    //     if diff > 1000 {
-                    //         // Blunder detected or unstable.
-                    //         // Discard game.
-                    //         abort_game = true;
-                    //         break;
-                    //     }
-                    // }
-
-                    let best_move = if let Some(m) = best_move_opt {
+                    let best_move = if let Some(m) = final_move_opt {
                         m
                     } else {
-                        // Search failed to return move? Should not happen if legal moves exist.
                         // Fallback to first legal move
                         let mut valid = moves.list.moves[0];
-                         for i in 0..moves.list.count {
+                        for i in 0..moves.list.count {
                             let m = moves.list.moves[i];
                             let next_state = state.make_move(m);
-                            if !crate::search::is_check(&next_state, state.side_to_move) {
+                            let mover = state.side_to_move;
+                            if !crate::search::is_check(&next_state, mover) {
                                 valid = m;
                                 break;
                             }
@@ -296,37 +285,33 @@ pub fn run_datagen(config: DatagenConfig) {
                         valid
                     };
 
-                    // Save Data (only if quiet? or all?)
-                    // "No illegal, duplicated, or trivially drawn"
-                    // We handle duplication via hash check above (roughly).
-                    // We handle illegal via movegen.
-                    // We will save valid positions.
-
                     // White Relative Score for file
-                    let white_score = if state.side_to_move == WHITE { tt_score } else { -tt_score };
+                    let white_score = if state.side_to_move == WHITE {
+                        final_score
+                    } else {
+                        -final_score
+                    };
 
-                    // Don't save if in check? (Noise) - User didn't specify, but often good to skip checks.
-                    // We'll save everything for now to maximize data.
                     positions.push((state.clone(), white_score as i16));
 
                     // Make Move
-                    // We need to verify legality of best_move (search usually returns legal, but...)
                     let next_state = state.make_move(best_move);
-                    if crate::search::is_check(&next_state, state.side_to_move) {
-                         // Search returned illegal move? Bug or TTHit bad?
-                         // Abort game.
-                         abort_game = true;
-                         break;
+                    let mover = state.side_to_move;
+                    if crate::search::is_check(&next_state, mover) {
+                        // Search returned illegal move? Bug or TTHit bad?
+                        // Abort game.
+                        abort_game = true;
+                        break;
                     }
 
                     state = next_state;
                     history.push(state.hash);
-                    prev_score = tt_score;
-                    first_move = false;
 
-                    if history.len() > 400 {
-                         // Too long
-                         result_val = 0.5; finished = true; break;
+                    if history.len() > 600 {
+                        // Too long
+                        result_val = 0.5;
+                        finished = true;
+                        break;
                     }
                 }
 
