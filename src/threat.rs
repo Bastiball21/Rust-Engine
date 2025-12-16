@@ -768,7 +768,7 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
     let mut generator = movegen::MoveGenerator::new();
     generator.generate_moves(&enemy_state);
 
-    let current_eval = eval::evaluate_hce(state, &ThreatInfo::default());
+    let current_eval = eval::evaluate_hce(state);
 
     let mut max_drop = 0;
 
@@ -822,7 +822,7 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
         // Only do response check if the drop seems high?
         // Or if the opponent move was a sacrifice?
         // Let's do a quick check.
-        let temp_eval = eval::evaluate_hce(&next_state, &ThreatInfo::default());
+        let temp_eval = eval::evaluate_hce(&next_state);
 
         // If temp_eval is bad for US (low), we check if we can save it.
         if current_eval - temp_eval > 100 {
@@ -848,7 +848,7 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
                      let my_k = if next_state.side_to_move == WHITE { K } else { k };
                      let mk_sq = recovery_state.bitboards[my_k].get_lsb_index() as u8;
                      if !movegen::is_square_attacked(&recovery_state, mk_sq, recovery_state.side_to_move) {
-                          let rec_eval = eval::evaluate_hce(&recovery_state, &ThreatInfo::default());
+                          let rec_eval = eval::evaluate_hce(&recovery_state);
                           if rec_eval > best_response_eval {
                               best_response_eval = rec_eval;
                           }
