@@ -592,7 +592,7 @@ pub fn search(
     main_thread: bool,
     history: Vec<u64>,
     search_data: &mut SearchData,
-) {
+) -> (i32, Option<Move>) {
     let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
     let mut info = Box::new(SearchInfo::new(search_data, tm, stop_signal, tt, main_thread));
@@ -716,45 +716,41 @@ pub fn search(
         }
     }
 
+    let mut final_move = best_move;
+    let mut generator = Box::new(movegen::MoveGenerator::new());
+    generator.generate_moves(state);
+    let mut legal_moves = Vec::new();
+    for i in 0..generator.list.count {
+        let mv = generator.list.moves[i];
+        let next_state = state.make_move(mv);
+        let our_king = if state.side_to_move == WHITE { K } else { k };
+        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
+        if !movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
+            legal_moves.push(mv);
+        }
+    }
+
+    if let Some(bm) = final_move {
+        let mut found = false;
+        for &lm in &legal_moves {
+            if bm.source == lm.source && bm.target == lm.target && bm.promotion == lm.promotion {
+                found = true;
+                final_move = Some(lm);
+                break;
+            }
+        }
+        if !found {
+            final_move = None;
+        }
+    }
+
+    if final_move.is_none() && !legal_moves.is_empty() {
+        final_move = Some(legal_moves[0]);
+    }
+
     if main_thread {
-        let mut final_move = best_move;
-        let mut generator = Box::new(movegen::MoveGenerator::new());
-        generator.generate_moves(state);
-        let mut legal_moves = Vec::new();
-        for i in 0..generator.list.count {
-            let mv = generator.list.moves[i];
-            let next_state = state.make_move(mv);
-            let our_king = if state.side_to_move == WHITE { K } else { k };
-            let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
-            if !movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
-                legal_moves.push(mv);
-            }
-        }
-
         if let Some(bm) = final_move {
-            let mut found = false;
-            for &lm in &legal_moves {
-                if bm.source == lm.source && bm.target == lm.target && bm.promotion == lm.promotion
-                {
-                    found = true;
-                    final_move = Some(lm);
-                    break;
-                }
-            }
-            if !found {
-                final_move = None;
-            }
-        }
-
-        if final_move.is_none() && !legal_moves.is_empty() {
-            final_move = Some(legal_moves[0]);
-        }
-
-        if let Some(bm) = final_move {
-            print!(
-                "bestmove {}",
-                format_move_uci(bm, state)
-            );
+            print!("bestmove {}", format_move_uci(bm, state));
             if let Some(pm) = ponder_move {
                 print!(
                     " ponder {}",
@@ -766,6 +762,8 @@ pub fn search(
             println!("bestmove (none)");
         }
     }
+
+    (last_score, final_move)
 }
 
 fn negamax(
