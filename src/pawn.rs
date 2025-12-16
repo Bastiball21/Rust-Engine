@@ -1,9 +1,6 @@
 // src/pawn.rs
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
 use crate::state::{p, GameState, BLACK, P, WHITE};
-use std::sync::RwLock;
-
-const PAWN_HASH_SIZE: usize = 16384;
 
 #[derive(Clone, Copy, Default)]
 pub struct PawnEntry {
@@ -15,128 +12,90 @@ pub struct PawnEntry {
     pub king_safety_scores: [i32; 2], // Cached shelter/storm scores
 }
 
-pub struct PawnTable {
-    // Wrap entries in RwLock for thread-safe interior mutability
-    pub entries: Vec<RwLock<PawnEntry>>,
-}
+pub fn evaluate_pawns(state: &GameState) -> PawnEntry {
+    let mut entry = PawnEntry {
+        key: state.hash,
+        ..Default::default()
+    };
+    let w_pawns = state.bitboards[P];
+    let b_pawns = state.bitboards[p];
 
-impl PawnTable {
-    pub fn new() -> Self {
-        let mut v = Vec::with_capacity(PAWN_HASH_SIZE);
-        for _ in 0..PAWN_HASH_SIZE {
-            v.push(RwLock::new(PawnEntry::default()));
+    entry.pawn_attacks[WHITE] = bitboard::pawn_attacks(w_pawns, WHITE);
+    entry.pawn_attacks[BLACK] = bitboard::pawn_attacks(b_pawns, BLACK);
+
+    // --- WHITE PAWNS ---
+    let mut bb = w_pawns;
+    while bb.0 != 0 {
+        let sq = bb.get_lsb_index() as usize;
+        bb.pop_bit(sq as u8);
+        let rank = sq / 8;
+
+        // Connected
+        if entry.pawn_attacks[WHITE].get_bit(sq as u8) {
+            entry.score_mg += 10;
+            entry.score_eg += 15;
         }
-        Self { entries: v }
+
+        // Isolated
+        let file_mask = bitboard::file_mask(sq);
+        let adj_mask = ((file_mask.0 << 1) & !FILE_A) | ((file_mask.0 >> 1) & !FILE_H);
+        if (w_pawns.0 & adj_mask) == 0 {
+            entry.score_mg -= 15;
+            entry.score_eg -= 20;
+        }
+
+        // Doubled
+        if (w_pawns.0 & file_mask.0).count_ones() > 1 {
+            entry.score_mg -= 10;
+            entry.score_eg -= 15;
+        }
+
+        // Passed
+        let passed_mask = bitboard::passed_pawn_mask(WHITE, sq);
+        if (passed_mask.0 & b_pawns.0) == 0 {
+            entry.passed_pawns[WHITE].set_bit(sq as u8);
+            let bonus = [0, 10, 20, 40, 70, 120, 200, 0];
+            entry.score_mg += bonus[rank] / 2;
+            entry.score_eg += bonus[rank];
+        }
     }
 
-    pub fn probe(&self, state: &GameState) -> PawnEntry {
-        let index = (state.hash as usize) & (PAWN_HASH_SIZE - 1);
+    // --- BLACK PAWNS ---
+    let mut bb = b_pawns;
+    while bb.0 != 0 {
+        let sq = bb.get_lsb_index() as usize;
+        bb.pop_bit(sq as u8);
+        let rank = sq / 8;
+        let rel_rank = 7 - rank;
 
-        // 1. Try Read
-        {
-            let entry = self.entries[index].read().unwrap();
-            if entry.key == state.hash {
-                return *entry;
-            }
+        if entry.pawn_attacks[BLACK].get_bit(sq as u8) {
+            entry.score_mg -= 10;
+            entry.score_eg -= 15;
         }
 
-        // 2. Compute (if miss)
-        let computed = self.evaluate_structure(state);
-
-        // 3. Write
-        {
-            let mut entry = self.entries[index].write().unwrap();
-            *entry = computed;
+        let file_mask = bitboard::file_mask(sq);
+        let adj_mask = ((file_mask.0 << 1) & !FILE_A) | ((file_mask.0 >> 1) & !FILE_H);
+        if (b_pawns.0 & adj_mask) == 0 {
+            entry.score_mg += 15;
+            entry.score_eg += 20;
         }
 
-        computed
+        if (b_pawns.0 & file_mask.0).count_ones() > 1 {
+            entry.score_mg += 10;
+            entry.score_eg += 15;
+        }
+
+        let passed_mask = bitboard::passed_pawn_mask(BLACK, sq);
+        if (passed_mask.0 & w_pawns.0) == 0 {
+            entry.passed_pawns[BLACK].set_bit(sq as u8);
+            let bonus = [0, 10, 20, 40, 70, 120, 200, 0];
+            entry.score_mg -= bonus[rel_rank] / 2;
+            entry.score_eg -= bonus[rel_rank];
+        }
     }
 
-    fn evaluate_structure(&self, state: &GameState) -> PawnEntry {
-        let mut entry = PawnEntry {
-            key: state.hash,
-            ..Default::default()
-        };
-        let w_pawns = state.bitboards[P];
-        let b_pawns = state.bitboards[p];
+    // Compute King Safety / Shelter data here if desired,
+    // or just leave it for the main eval to use the pawn bitboards.
 
-        entry.pawn_attacks[WHITE] = bitboard::pawn_attacks(w_pawns, WHITE);
-        entry.pawn_attacks[BLACK] = bitboard::pawn_attacks(b_pawns, BLACK);
-
-        // --- WHITE PAWNS ---
-        let mut bb = w_pawns;
-        while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize;
-            bb.pop_bit(sq as u8);
-            let rank = sq / 8;
-
-            // Connected
-            if entry.pawn_attacks[WHITE].get_bit(sq as u8) {
-                entry.score_mg += 10;
-                entry.score_eg += 15;
-            }
-
-            // Isolated
-            let file_mask = bitboard::file_mask(sq);
-            let adj_mask = ((file_mask.0 << 1) & !FILE_A) | ((file_mask.0 >> 1) & !FILE_H);
-            if (w_pawns.0 & adj_mask) == 0 {
-                entry.score_mg -= 15;
-                entry.score_eg -= 20;
-            }
-
-            // Doubled
-            if (w_pawns.0 & file_mask.0).count_ones() > 1 {
-                entry.score_mg -= 10;
-                entry.score_eg -= 15;
-            }
-
-            // Passed
-            let passed_mask = bitboard::passed_pawn_mask(WHITE, sq);
-            if (passed_mask.0 & b_pawns.0) == 0 {
-                entry.passed_pawns[WHITE].set_bit(sq as u8);
-                let bonus = [0, 10, 20, 40, 70, 120, 200, 0];
-                entry.score_mg += bonus[rank] / 2;
-                entry.score_eg += bonus[rank];
-            }
-        }
-
-        // --- BLACK PAWNS ---
-        let mut bb = b_pawns;
-        while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize;
-            bb.pop_bit(sq as u8);
-            let rank = sq / 8;
-            let rel_rank = 7 - rank;
-
-            if entry.pawn_attacks[BLACK].get_bit(sq as u8) {
-                entry.score_mg -= 10;
-                entry.score_eg -= 15;
-            }
-
-            let file_mask = bitboard::file_mask(sq);
-            let adj_mask = ((file_mask.0 << 1) & !FILE_A) | ((file_mask.0 >> 1) & !FILE_H);
-            if (b_pawns.0 & adj_mask) == 0 {
-                entry.score_mg += 15;
-                entry.score_eg += 20;
-            }
-
-            if (b_pawns.0 & file_mask.0).count_ones() > 1 {
-                entry.score_mg += 10;
-                entry.score_eg += 15;
-            }
-
-            let passed_mask = bitboard::passed_pawn_mask(BLACK, sq);
-            if (passed_mask.0 & w_pawns.0) == 0 {
-                entry.passed_pawns[BLACK].set_bit(sq as u8);
-                let bonus = [0, 10, 20, 40, 70, 120, 200, 0];
-                entry.score_mg -= bonus[rel_rank] / 2;
-                entry.score_eg -= bonus[rel_rank];
-            }
-        }
-
-        // Compute King Safety / Shelter data here if desired,
-        // or just leave it for the main eval to use the pawn bitboards.
-
-        entry
-    }
+    entry
 }

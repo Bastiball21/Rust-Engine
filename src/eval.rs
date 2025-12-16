@@ -1,10 +1,8 @@
 // src/eval.rs
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
-use crate::pawn::PawnTable;
 use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use crate::threat::{self, ThreatInfo};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::OnceLock;
 
 // --- MACRO FOR ATOMIC ARRAYS ---
 macro_rules! a { ($($x:expr),*) => { [ $(AtomicI32::new($x)),* ] } }
@@ -74,10 +72,8 @@ impl Trace {
 }
 
 // --- INIT ---
-static PAWN_TABLE: OnceLock<PawnTable> = OnceLock::new();
 
 pub fn init_eval() {
-    PAWN_TABLE.get_or_init(|| PawnTable::new());
 }
 
 // --- MAIN EVAL ---
@@ -93,8 +89,8 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     let mut eg = 0;
     let mut phase = 0;
 
-    // Pawn Hash Integration
-    let pawn_entry = PAWN_TABLE.get().unwrap().probe(state);
+    // Pawn Structure (No Hash)
+    let pawn_entry = crate::pawn::evaluate_pawns(state);
     mg += pawn_entry.score_mg;
     eg += pawn_entry.score_eg;
 

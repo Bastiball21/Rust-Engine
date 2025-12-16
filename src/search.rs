@@ -25,7 +25,7 @@ type ContHistTable = [[[i32; 64]; 12]; 768];
 // LMR Table wrapped in OnceLock for safe runtime initialization
 static LMR_TABLE: OnceLock<[[u8; 64]; 64]> = OnceLock::new();
 
-pub struct SearchInfo<'a> {
+pub struct SearchData {
     pub killers: [[Option<Move>; 2]; MAX_PLY + 1],
     pub history: [[i32; 64]; 64],
     pub capture_history: Box<[[[i32; 6]; 64]; 12]>,
@@ -34,6 +34,30 @@ pub struct SearchInfo<'a> {
     pub counter_moves: [[Option<Move>; 64]; 12],
 
     pub cont_history: Box<ContHistTable>,
+}
+
+impl SearchData {
+    pub fn new() -> Self {
+        Self {
+            killers: [[None; 2]; MAX_PLY + 1],
+            history: [[0; 64]; 64],
+            capture_history: Box::new([[[0; 6]; 64]; 12]),
+            counter_moves: [[None; 64]; 12],
+            cont_history: Box::new([[[0; 64]; 12]; 768]),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.killers = [[None; 2]; MAX_PLY + 1];
+        self.history = [[0; 64]; 64];
+        self.capture_history.fill_with(|| [[0; 6]; 64]);
+        self.counter_moves = [[None; 64]; 12];
+        self.cont_history.fill_with(|| [[0; 64]; 12]);
+    }
+}
+
+pub struct SearchInfo<'a> {
+    pub data: &'a mut SearchData,
     pub static_evals: [i32; MAX_PLY + 1],
     pub nodes: u64,
     pub seldepth: u8,
@@ -46,6 +70,7 @@ pub struct SearchInfo<'a> {
 
 impl<'a> SearchInfo<'a> {
     pub fn new(
+        data: &'a mut SearchData,
         tm: TimeManager,
         stop: Arc<AtomicBool>,
         tt: &'a TranspositionTable,
@@ -64,14 +89,8 @@ impl<'a> SearchInfo<'a> {
             table
         });
 
-        let cont_history = Box::new([[[0; 64]; 12]; 768]);
-
         Self {
-            killers: [[None; 2]; MAX_PLY + 1],
-            history: [[0; 64]; 64],
-            capture_history: Box::new([[[0; 6]; 64]; 12]),
-            counter_moves: [[None; 64]; 12],
-            cont_history,
+            data,
             static_evals: [0; MAX_PLY + 1],
             nodes: 0,
             seldepth: 0,
@@ -280,7 +299,7 @@ fn update_capture_history(info: &mut SearchInfo, mv: Move, state: &GameState, bo
     let victim = get_victim_type(state, mv.target);
 
     if victim < 12 {
-        let entry = &mut info.capture_history[attacker][mv.target as usize][victim % 6];
+        let entry = &mut info.data.capture_history[attacker][mv.target as usize][victim % 6];
         *entry += bonus - (*entry * bonus.abs()) / 1024;
     }
 }
@@ -300,7 +319,7 @@ fn update_continuation_history(
         let c_piece = get_piece_type_safe(state, mv.source);
         let c_to = mv.target as usize;
 
-        update_history(&mut info.cont_history[idx][c_piece][c_to], bonus);
+        update_history(&mut info.data.cont_history[idx][c_piece][c_to], bonus);
     }
 }
 
@@ -335,7 +354,7 @@ fn score_move(
         let mut score = 100000 + mvv_lva[victim % 6][attacker % 6];
 
         if victim < 12 {
-            score += info.capture_history[attacker][mv.target as usize][victim % 6] / 16;
+            score += info.data.capture_history[attacker][mv.target as usize][victim % 6] / 16;
         }
 
         return if see_val >= 0 { score } else { score - 50000 };
@@ -347,12 +366,12 @@ fn score_move(
 
     let mut score = 0;
     if ply < MAX_PLY {
-        if let Some(k1) = info.killers[ply][0] {
+        if let Some(k1) = info.data.killers[ply][0] {
             if mv == k1 {
                 return 80000;
             }
         }
-        if let Some(k2) = info.killers[ply][1] {
+        if let Some(k2) = info.data.killers[ply][1] {
             if mv == k2 {
                 return 79000;
             }
@@ -361,19 +380,19 @@ fn score_move(
 
     if let Some(pm) = prev_move {
         let p_piece = get_piece_type_safe(state, pm.target);
-        if let Some(cm) = info.counter_moves[p_piece][pm.target as usize] {
+        if let Some(cm) = info.data.counter_moves[p_piece][pm.target as usize] {
             if mv == cm {
                 return 78000;
             }
         }
     }
 
-    score += info.history[mv.source as usize][mv.target as usize];
+    score += info.data.history[mv.source as usize][mv.target as usize];
 
     if let Some(pm) = prev_move {
         let p_piece = get_piece_type_safe(state, pm.target);
         let idx = p_piece * 64 + pm.target as usize;
-        score += info.cont_history[idx][attacker][mv.target as usize];
+        score += info.data.cont_history[idx][attacker][mv.target as usize];
     }
 
     // REMOVED: Tactical Quiet Move Boosts (Heavy Logic)
@@ -572,10 +591,11 @@ pub fn search(
     max_depth: u8,
     main_thread: bool,
     history: Vec<u64>,
+    search_data: &mut SearchData,
 ) {
     let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
-    let mut info = Box::new(SearchInfo::new(tm, stop_signal, tt, main_thread));
+    let mut info = Box::new(SearchInfo::new(search_data, tm, stop_signal, tt, main_thread));
     let mut path = history;
     let mut last_score = 0;
 
@@ -1100,7 +1120,7 @@ fn negamax(
                 }
 
                 if ply < MAX_PLY
-                    && (info.killers[ply][0] == Some(mv) || info.killers[ply][1] == Some(mv))
+                    && (info.data.killers[ply][0] == Some(mv) || info.data.killers[ply][1] == Some(mv))
                 {
                     reduction = reduction.saturating_sub(1);
                 }
@@ -1176,7 +1196,7 @@ fn negamax(
                     let to = mv.target as usize;
                     let bonus = (new_depth as i32) * (new_depth as i32);
 
-                    update_history(&mut info.history[from][to], bonus);
+                    update_history(&mut info.data.history[from][to], bonus);
 
                     if let Some(pm) = prev_move {
                         let p_piece = get_piece_type_safe(state, pm.target);
@@ -1184,9 +1204,9 @@ fn negamax(
                         let idx = p_piece * 64 + p_to;
                         let c_piece = get_piece_type_safe(state, mv.source);
                         let c_to = mv.target as usize;
-                        update_history(&mut info.cont_history[idx][c_piece][c_to], bonus);
+                        update_history(&mut info.data.cont_history[idx][c_piece][c_to], bonus);
 
-                        info.counter_moves[p_piece][pm.target as usize] = Some(mv);
+                        info.data.counter_moves[p_piece][pm.target as usize] = Some(mv);
                     }
                 } else {
                     update_capture_history(
@@ -1204,7 +1224,7 @@ fn negamax(
                  let to = mv.target as usize;
                  let bonus = (new_depth as i32) * (new_depth as i32);
                  // Penalize logic: -bonus
-                 update_history(&mut info.history[from][to], -bonus);
+                 update_history(&mut info.data.history[from][to], -bonus);
 
                  if let Some(pm) = prev_move {
                         let p_piece = get_piece_type_safe(state, pm.target);
@@ -1212,7 +1232,7 @@ fn negamax(
                         let idx = p_piece * 64 + p_to;
                         let c_piece = get_piece_type_safe(state, mv.source);
                         let c_to = mv.target as usize;
-                        update_history(&mut info.cont_history[idx][c_piece][c_to], -bonus);
+                        update_history(&mut info.data.cont_history[idx][c_piece][c_to], -bonus);
                  }
             }
         }
@@ -1220,8 +1240,8 @@ fn negamax(
         if alpha >= beta {
             if is_quiet {
                 if ply < MAX_PLY {
-                    info.killers[ply][1] = info.killers[ply][0];
-                    info.killers[ply][0] = Some(mv);
+                    info.data.killers[ply][1] = info.data.killers[ply][0];
+                    info.data.killers[ply][0] = Some(mv);
                 }
             } else {
                 update_capture_history(info, mv, state, (new_depth as i32) * (new_depth as i32));

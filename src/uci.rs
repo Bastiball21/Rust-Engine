@@ -117,7 +117,12 @@ pub fn uci_loop() {
                     let is_main = i == 0;
                     let tt_clone = tt.clone(); // Arc clone
 
-                    search_threads.push(thread::spawn(move || {
+                    let builder = thread::Builder::new()
+                        .name(format!("search_worker_{}", i))
+                        .stack_size(8 * 1024 * 1024);
+
+                    search_threads.push(builder.spawn(move || {
+                        let mut search_data = search::SearchData::new();
                         // Pass reference to the TT inside the Arc
                         search::search(
                             &state_clone,
@@ -127,8 +132,9 @@ pub fn uci_loop() {
                             depth,
                             is_main,
                             history_clone,
+                            &mut search_data,
                         );
-                    }));
+                    }).unwrap());
                 }
             }
             "stop" => {

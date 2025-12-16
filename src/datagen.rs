@@ -113,12 +113,18 @@ pub fn run_datagen(config: DatagenConfig) {
         let my_games = games_per_thread + if t_id < remainder { 1 } else { 0 };
         let depth = config.depth;
 
-        let handle = thread::spawn(move || {
+        let builder = thread::Builder::new()
+            .name(format!("datagen_worker_{}", t_id))
+            .stack_size(8 * 1024 * 1024);
+
+        let handle = builder.spawn(move || {
             let mut tt = TranspositionTable::new(16);
             let stop = Arc::new(AtomicBool::new(false));
             let mut rng = Rng::new(123456789 + t_id as u64);
+            let mut search_data = search::SearchData::new();
 
             for _ in 0..my_games {
+                search_data.clear();
                 let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
                 let mut positions: Vec<(GameState, i16)> = Vec::new();
                 let mut result_val = 0.5;
@@ -229,7 +235,7 @@ pub fn run_datagen(config: DatagenConfig) {
                     let tm = TimeManager::new(TimeControl::MoveTime(1000), state.side_to_move, 0);
                     // MoveTime is high to ensure depth is reached, but we rely on depth limit.
 
-                    search::search(&state, tm, &tt, stop.clone(), depth, false, vec![]);
+                    search::search(&state, tm, &tt, stop.clone(), depth, false, vec![], &mut search_data);
 
                     let (tt_score, _, _, best_move_opt) =
                         tt.probe_data(state.hash).unwrap_or((0, 0, 0, None));
@@ -343,7 +349,7 @@ pub fn run_datagen(config: DatagenConfig) {
 
                 tt.clear();
             }
-        });
+        }).unwrap();
         handles.push(handle);
     }
     drop(tx);
