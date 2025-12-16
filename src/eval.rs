@@ -83,96 +83,252 @@ pub fn init_eval() {
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState) -> i32 {
     if crate::nnue::NETWORK.get().is_some() {
-        // If NNUE is loaded, we trust it completely. No HCE blending.
-        // This avoids expensive threat analysis and scalar logic.
         return crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move]);
-    } else {
-        // Fallback to HCE if NNUE is not available.
-        // We perform threat analysis here, as it was removed from search.
-        let threat = threat::analyze(state);
-        evaluate_hce(state, &threat)
     }
+    evaluate_hce(state)
 }
 
-// --- HCE LOGIC ---
-pub fn evaluate_hce(state: &GameState, threat: &ThreatInfo) -> i32 {
+pub fn evaluate_hce(state: &GameState) -> i32 {
     let mut mg = 0;
     let mut eg = 0;
     let mut phase = 0;
 
-    // A. Fixed Material + PST
-    let (fix_mg, fix_eg) = evaluate_fixed(state);
-    mg += fix_mg;
-    eg += fix_eg;
-
-    // B. Phase Calculation
-    for i in 0..6 {
-        let w_cnt = state.bitboards[i].count_bits() as i32;
-        let b_cnt = state.bitboards[i + 6].count_bits() as i32;
-        phase += (w_cnt + b_cnt) * PHASE_WEIGHTS[i];
-    }
-
-    // C. Pawn Hash Integration
+    // Pawn Hash Integration
     let pawn_entry = PAWN_TABLE.get().unwrap().probe(state);
     mg += pawn_entry.score_mg;
     eg += pawn_entry.score_eg;
 
-    // D. Mobility & King Safety
-    let (w_mob_mg, w_mob_eg) = evaluate_mobility(state, WHITE);
-    let (b_mob_mg, b_mob_eg) = evaluate_mobility(state, BLACK);
-    mg += w_mob_mg - b_mob_mg;
-    eg += w_mob_eg - b_mob_eg;
-
-    let (w_safe_mg, w_safe_eg) = evaluate_king(state, WHITE, &pawn_entry);
-    let (b_safe_mg, b_safe_eg) = evaluate_king(state, BLACK, &pawn_entry);
-    mg += w_safe_mg - b_safe_mg;
-    eg += w_safe_eg - b_safe_eg;
-
-    // E. Threat Adjustments (Hanging pieces, specific penalties)
-    let us = state.side_to_move;
-    // let them = 1 - us;
-
-    let threat_penalty_mg = threat.hanging_piece_value + threat.king_danger_score[state.side_to_move];
-    let threat_penalty_eg = threat.hanging_piece_value / 2; // Less severe in EG? Or more? Hanging is always bad.
-
-    if state.side_to_move == WHITE {
-        mg -= threat_penalty_mg;
-        eg -= threat_penalty_eg;
-    } else {
-        mg += threat_penalty_mg;
-        eg += threat_penalty_eg;
+    // Precompute King Info
+    let mut king_rings = [Bitboard(0); 2];
+    let mut king_sqs = [0usize; 2];
+    for side in [WHITE, BLACK] {
+         let k_bb = state.bitboards[if side == WHITE { K } else { k }];
+         let k_sq = if k_bb.0 != 0 { k_bb.get_lsb_index() as usize } else { 0 };
+         king_sqs[side] = k_sq;
+         king_rings[side] = crate::movegen::get_king_attacks(k_sq as u8);
     }
 
-    // F. Dominant Square Bonus
-    let (w_dom_mg, w_dom_eg) = evaluate_dominance(state, WHITE);
-    let (b_dom_mg, b_dom_eg) = evaluate_dominance(state, BLACK);
-    mg += w_dom_mg - b_dom_mg;
-    eg += w_dom_eg - b_dom_eg;
+    let mut attacks_by_side = [Bitboard(0); 2];
+    let mut king_attack_weight = [0; 2]; // Accumulated danger score
+    let mut king_attack_count = [0; 2];  // Count of attackers on ring
+    let mut ring_attack_counts = [[0u8; 64]; 2]; // [Side][Square]
 
-    // G. Coordination & Clustering (Features #2 & #5)
-    // Coordination: Bonus for batteries/connected pieces
-    mg += threat.coordination_score[WHITE] - threat.coordination_score[BLACK];
-    eg += (threat.coordination_score[WHITE] - threat.coordination_score[BLACK]) / 2;
+    let mut coordination_score = [0; 2];
+    let occ = state.occupancies[BOTH];
 
-    // Clustering: Penalty for being swarmed by multiple attackers
-    mg -= threat.clustering_score[WHITE];
-    mg += threat.clustering_score[BLACK];
+    // Main Loop over both sides
+    for side in [WHITE, BLACK] {
+        let us = side;
+        let them = 1 - side;
+        let us_sign = if us == WHITE { 1 } else { -1 };
 
-    eg -= threat.clustering_score[WHITE] / 2;
-    eg += threat.clustering_score[BLACK] / 2;
+        let king_ring_them = king_rings[them];
 
-    // H. Scaling
+        // Iterate Piece Types
+        for piece_type in 0..6 {
+            let piece_idx = if us == WHITE { piece_type } else { piece_type + 6 };
+            let mut bb = state.bitboards[piece_idx];
+
+            // Phase
+            let count = bb.count_bits() as i32;
+            phase += count * PHASE_WEIGHTS[piece_type];
+
+            while bb.0 != 0 {
+                let sq = bb.get_lsb_index() as usize;
+                bb.pop_bit(sq as u8);
+
+                // 1. Fixed Material + PST
+                mg += (MG_VALS[piece_type].load(Ordering::Relaxed) + get_pst(piece_type, sq, us, true)) * us_sign;
+                eg += (EG_VALS[piece_type].load(Ordering::Relaxed) + get_pst(piece_type, sq, us, false)) * us_sign;
+
+                // 2. Attack Generation
+                let attacks = match piece_type {
+                    N => crate::movegen::get_knight_attacks(sq as u8),
+                    B => bitboard::get_bishop_attacks(sq as u8, occ),
+                    R => bitboard::get_rook_attacks(sq as u8, occ),
+                    Q => bitboard::get_queen_attacks(sq as u8, occ),
+                    K => crate::movegen::get_king_attacks(sq as u8),
+                    P => bitboard::pawn_attacks(Bitboard(1 << sq), us),
+                    _ => Bitboard(0)
+                };
+
+                attacks_by_side[us] = attacks_by_side[us] | attacks;
+
+                // 3. Mobility
+                if piece_type != P && piece_type != K {
+                     let mob_cnt = (attacks & !state.occupancies[us]).count_bits() as i32;
+                     let mob_idx = match piece_type { N=>0, B=>1, R=>2, Q=>3, _=>0 };
+                     let (offset, weight) = MOBILITY_BONUS[mob_idx];
+                     let s = (mob_cnt - offset) * weight;
+                     mg += s * us_sign;
+                     eg += s * us_sign;
+                }
+
+                // 4. Dominance (N, B, R)
+                if piece_type == N || piece_type == B || piece_type == R {
+                    let s = crate::threat::is_dominant_square(state, sq as u8, piece_type, us);
+                    mg += s * us_sign;
+                    eg += s * us_sign;
+                }
+
+                // 5. King Tropism (Penalty for being close to Enemy King)
+                // Note: Original code accumulated negative penalty into 'mg'.
+                // Close -> Bad for Enemy King -> Good for Us.
+                // We add PENALTY to US score (because penalty is positive value).
+                if piece_type != K && piece_type != P {
+                     let k_file = king_sqs[them] % 8;
+                     let k_rank = king_sqs[them] / 8;
+                     let d_file = (k_file as i32 - (sq % 8) as i32).abs();
+                     let d_rank = (k_rank as i32 - (sq / 8) as i32).abs();
+                     let dist = d_file.max(d_rank) as usize;
+                     let pen = KING_TROPISM_PENALTY[dist];
+                     mg += pen * us_sign;
+                     eg += (pen / 2) * us_sign;
+                }
+
+                // 6. King Ring Attacks
+                if piece_type != K {
+                    let att_on_ring = attacks & king_ring_them;
+                    if att_on_ring.0 != 0 {
+                        let weight = match piece_type { P=>10, N=>25, B=>25, R=>50, Q=>75, _=>0 };
+                        king_attack_weight[them] += weight;
+                        king_attack_count[them] += 1;
+
+                        let mut iter = att_on_ring;
+                        while iter.0 != 0 {
+                            let s = iter.get_lsb_index();
+                            iter.pop_bit(s as u8);
+                            ring_attack_counts[them][s as usize] += 1;
+                        }
+                    }
+                }
+
+                // 7. Coordination
+                 if piece_type == R || piece_type == B || piece_type == Q {
+                     let my_rooks = state.bitboards[if us == WHITE { R } else { r }];
+                     let my_bishops = state.bitboards[if us == WHITE { B } else { b }];
+                     let my_queens = state.bitboards[if us == WHITE { Q } else { q }];
+
+                     if piece_type == R {
+                         if (attacks & (my_rooks | my_queens)).0 != 0 { coordination_score[us] += 10; }
+                     } else if piece_type == B {
+                         if (attacks & (my_bishops | my_queens)).0 != 0 { coordination_score[us] += 10; }
+                     } else if piece_type == Q {
+                          if (bitboard::get_rook_attacks(sq as u8, occ) & my_rooks).0 != 0 { coordination_score[us] += 10; }
+                          if (bitboard::get_bishop_attacks(sq as u8, occ) & my_bishops).0 != 0 { coordination_score[us] += 10; }
+                     }
+                 }
+            }
+        }
+    }
+
+    // Post-Loop: King Safety & Threats
+    for side in [WHITE, BLACK] {
+        let us_sign = if side == WHITE { 1 } else { -1 };
+        let k_sq = king_sqs[side];
+
+        // Shield
+        let mut shield_pen = 0;
+        let k_rank = k_sq / 8;
+        if (side == WHITE && k_rank < 3) || (side == BLACK && k_rank > 4) {
+             let my_pawns = state.bitboards[if side == WHITE { P } else { p }];
+             let enemy_pawns = state.bitboards[if side == WHITE { p } else { P }];
+             let k_file = k_sq % 8;
+             for f_offset in -1..=1 {
+                 let f = k_file as i32 + f_offset;
+                 if f >= 0 && f <= 7 {
+                     let mask = bitboard::file_mask(f as usize);
+                     if (my_pawns.0 & mask.0).count_ones() == 0 {
+                         shield_pen += SHIELD_MISSING_PENALTY;
+                         if (enemy_pawns.0 & mask.0).count_ones() == 0 {
+                             shield_pen += SHIELD_OPEN_FILE_PENALTY;
+                         }
+                     }
+                 }
+             }
+        }
+        mg += shield_pen * us_sign;
+
+        // Storm
+        if pawn_entry.pawn_attacks[1-side].get_bit(k_sq as u8) {
+             mg -= 50 * us_sign;
+        }
+
+        // Danger & Clustering
+        let mut danger = king_attack_weight[side];
+        if king_attack_count[side] >= 2 {
+            danger += king_attack_count[side] * 10;
+        }
+
+        // Undefended Ring Squares
+        let ring = king_rings[side];
+        let undefended = ring & !attacks_by_side[side];
+        let attacked = ring & attacks_by_side[1-side];
+        let danger_zone = undefended & attacked;
+        danger += (danger_zone.count_bits() as i32) * 10;
+
+        // Clustering Penalty
+        let mut cluster_pen = 0;
+        let mut r_iter = ring;
+        while r_iter.0 != 0 {
+             let s = r_iter.get_lsb_index();
+             r_iter.pop_bit(s as u8);
+             let c = ring_attack_counts[side][s as usize];
+             if c >= 2 {
+                 cluster_pen += (c as i32 - 1) * 20;
+             }
+        }
+
+        // Apply penalties
+        if danger > 50 { mg -= danger * us_sign; }
+        mg -= cluster_pen * us_sign;
+        eg -= (cluster_pen / 2) * us_sign;
+    }
+
+    // Coordination
+    mg += coordination_score[WHITE] - coordination_score[BLACK];
+    eg += (coordination_score[WHITE] - coordination_score[BLACK]) / 2;
+
+    // Hanging Pieces (Only for side to move, per original logic)
+    // Actually, original logic only applied penalty to side to move.
+    // "if state.side_to_move == WHITE { mg -= threat_penalty }"
+    // We will stick to that.
+    let us = state.side_to_move;
+    let them = 1 - us;
+    let us_sign = if us == WHITE { 1 } else { -1 };
+
+    let mut hanging_val = 0;
+    let us_occ = state.occupancies[us];
+    let attacked_by_them = us_occ & attacks_by_side[them];
+    let mut iter = attacked_by_them;
+    while iter.0 != 0 {
+         let sq = iter.get_lsb_index() as u8;
+         iter.pop_bit(sq);
+         let defended = attacks_by_side[us].get_bit(sq);
+         let val = get_piece_value(state, sq);
+
+         if !defended {
+             hanging_val += val;
+         } else {
+             // Defended but attacked by pawn?
+             let pawn_attacks = bitboard::pawn_attacks(Bitboard(1<<sq), us);
+             if (pawn_attacks & state.bitboards[if them == WHITE { P } else { p }]).0 != 0 {
+                 if val > 100 { hanging_val += val - 100; }
+             }
+         }
+    }
+
+    // Apply hanging penalty to side to move
+    mg -= hanging_val * us_sign;
+    eg -= (hanging_val / 2) * us_sign;
+
+    // Scaling
     let phase = phase.clamp(0, 24);
     let mut score = (mg * phase + eg * (24 - phase)) / 24;
-
     let scale = crate::endgame::get_scale_factor(state, score);
     score = (score * scale) / 128;
 
-    if state.side_to_move == WHITE {
-        score
-    } else {
-        -score
-    }
+    if state.side_to_move == WHITE { score } else { -score }
 }
 
 fn evaluate_fixed(state: &GameState) -> (i32, i32) {
@@ -247,129 +403,21 @@ fn get_pst(piece: usize, sq: usize, side: usize, is_mg: bool) -> i32 {
     }
 }
 
-// --- NEW FEATURES ---
-
-fn evaluate_dominance(state: &GameState, side: usize) -> (i32, i32) {
-    let mut mg = 0;
-    let mut eg = 0;
-
-    // Check Knights, Bishops, Rooks
-    let pieces = [
-        (if side == WHITE { N } else { n }, 0),
-        (if side == WHITE { B } else { b }, 1),
-        (if side == WHITE { R } else { r }, 2),
-    ];
-
-    for &(piece_type, _idx) in &pieces {
-        let mut bb = state.bitboards[piece_type];
-        while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as u8;
-            bb.pop_bit(sq);
-            let score = threat::is_dominant_square(state, sq, piece_type, side);
-            mg += score;
-            eg += score;
+fn get_piece_value(state: &GameState, sq: u8) -> i32 {
+    for piece in 0..12 {
+        if state.bitboards[piece].get_bit(sq) {
+             return match piece % 6 {
+                 0 => 100, // Pawn
+                 1 => 320, // Knight
+                 2 => 330, // Bishop
+                 3 => 500, // Rook
+                 4 => 900, // Queen
+                 5 => 20000, // King
+                 _ => 0
+             };
         }
     }
-    (mg, eg)
-}
-
-fn evaluate_mobility(state: &GameState, side: usize) -> (i32, i32) {
-    let mut mg = 0;
-    let mut eg = 0;
-    let us_bb = state.occupancies[side];
-    let both_bb = state.occupancies[BOTH];
-
-    // Knight, Bishop, Rook, Queen
-    let pieces = [
-        (if side == WHITE { N } else { n }, 0),
-        (if side == WHITE { B } else { b }, 1),
-        (if side == WHITE { R } else { r }, 2),
-        (if side == WHITE { Q } else { q }, 3),
-    ];
-
-    for &(piece, idx) in &pieces {
-        let mut bb = state.bitboards[piece];
-        while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as u8;
-            bb.pop_bit(sq);
-            let attacks = match idx {
-                0 => crate::movegen::get_knight_attacks(sq),
-                1 => bitboard::get_bishop_attacks(sq, both_bb),
-                2 => bitboard::get_rook_attacks(sq, both_bb),
-                3 => bitboard::get_queen_attacks(sq, both_bb),
-                _ => Bitboard(0),
-            };
-            let mob = (attacks & !us_bb).count_bits() as i32;
-            let (offset, weight) = MOBILITY_BONUS[idx];
-            let score = (mob - offset) * weight;
-            mg += score;
-            eg += score;
-        }
-    }
-    (mg, eg)
-}
-
-fn evaluate_king(
-    state: &GameState,
-    side: usize,
-    pawn_entry: &crate::pawn::PawnEntry,
-) -> (i32, i32) {
-    let mut mg = 0;
-    let mut eg = 0;
-    let king_pc = if side == WHITE { K } else { k };
-    let king_sq = state.bitboards[king_pc].get_lsb_index() as usize;
-    let king_file = king_sq % 8;
-    let king_rank = king_sq / 8;
-
-    let my_pawns = if side == WHITE {
-        state.bitboards[P]
-    } else {
-        state.bitboards[p]
-    };
-    let enemy_pawns = if side == WHITE {
-        state.bitboards[p]
-    } else {
-        state.bitboards[P]
-    };
-
-    // 1. SHIELD
-    if (side == WHITE && king_rank < 3) || (side == BLACK && king_rank > 4) {
-        for f_offset in -1..=1 {
-            let f = king_file as i32 + f_offset;
-            if f >= 0 && f <= 7 {
-                let file_mask = bitboard::file_mask(f as usize);
-                if (my_pawns.0 & file_mask.0).count_ones() == 0 {
-                    mg += SHIELD_MISSING_PENALTY;
-                    if (enemy_pawns.0 & file_mask.0).count_ones() == 0 {
-                        mg += SHIELD_OPEN_FILE_PENALTY;
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. STORM
-    if pawn_entry.pawn_attacks[1 - side].get_bit(king_sq as u8) {
-        mg -= 50;
-    }
-
-    // 3. TROPISM
-    let enemy_start = if side == WHITE { n } else { N };
-    let enemy_end = if side == WHITE { q } else { Q };
-    for pc in enemy_start..=enemy_end {
-        let mut bb = state.bitboards[pc];
-        while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize;
-            bb.pop_bit(sq as u8);
-            let dist_file = (king_file as i32 - (sq % 8) as i32).abs();
-            let dist_rank = (king_rank as i32 - (sq / 8) as i32).abs();
-            let dist = dist_file.max(dist_rank) as usize;
-            mg -= KING_TROPISM_PENALTY[dist];
-            eg -= KING_TROPISM_PENALTY[dist] / 2;
-        }
-    }
-
-    (mg, eg)
+    0
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -398,8 +446,6 @@ pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
             trace.add(piece + 6, net);
         }
     }
-    // Tuning usually ignores transient threats or assumes clean positions
-    // For now, pass a default ThreatInfo (no threats) to match baseline tuning
-    let dummy_threat = ThreatInfo::default();
-    evaluate_hce(state, &dummy_threat)
+    // Tuning: just return optimized eval, assuming trace is only for fixed params
+    evaluate_hce(state)
 }

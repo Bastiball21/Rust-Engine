@@ -263,15 +263,15 @@ pub fn run_datagen(config: DatagenConfig) {
                     // Diff = `tt_score - (-prev_score)` = `tt_score + prev_score`.
                     // If Diff > 300, it means Opponent is doing 300cp better than expected.
 
-                    if !first_move {
-                        let diff = tt_score + prev_score; // e.g. -100 + 100 = 0 (Good). +200 + 100 = 300 (Bad).
-                        if diff > 300 {
-                            // Blunder detected or unstable.
-                            // Discard game.
-                            abort_game = true;
-                            break;
-                        }
-                    }
+                    // if !first_move {
+                    //     let diff = tt_score + prev_score; // e.g. -100 + 100 = 0 (Good). +200 + 100 = 300 (Bad).
+                    //     if diff > 1000 {
+                    //         // Blunder detected or unstable.
+                    //         // Discard game.
+                    //         abort_game = true;
+                    //         break;
+                    //     }
+                    // }
 
                     let best_move = if let Some(m) = best_move_opt {
                         m

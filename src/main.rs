@@ -73,6 +73,7 @@ fn main() {
             return;
         }
 
+
         if args[1] == "datagen" {
             // Usage: "Aether datagen <games> <threads> <depth> <filename>"
             let games = if args.len() > 2 {
