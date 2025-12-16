@@ -52,7 +52,8 @@ pub fn run_mate_suite() {
             (expected_ply * 2 + 2) as u8
         };
 
-        search::search(&state, tm, &tt, stop.clone(), search_depth, true, vec![]);
+        let mut search_data = search::SearchData::new();
+        search::search(&state, tm, &tt, stop.clone(), search_depth, true, vec![], &mut search_data);
 
         println!("(Expected: mate {})", expected_ply);
         tt.clear();
