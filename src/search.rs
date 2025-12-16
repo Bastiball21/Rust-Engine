@@ -66,6 +66,7 @@ pub struct SearchInfo<'a> {
     pub stopped: bool,
     pub tt: &'a TranspositionTable,
     pub main_thread: bool,
+    pub node_limit: Option<u64>,
 }
 
 impl<'a> SearchInfo<'a> {
@@ -75,6 +76,7 @@ impl<'a> SearchInfo<'a> {
         stop: Arc<AtomicBool>,
         tt: &'a TranspositionTable,
         main: bool,
+        node_limit: Option<u64>,
     ) -> Self {
         LMR_TABLE.get_or_init(|| {
             let mut table = [[0; 64]; 64];
@@ -99,6 +101,7 @@ impl<'a> SearchInfo<'a> {
             stopped: false,
             tt,
             main_thread: main,
+            node_limit,
         }
     }
 
@@ -108,6 +111,13 @@ impl<'a> SearchInfo<'a> {
             if self.stop_signal.load(Ordering::Relaxed) {
                 self.stopped = true;
                 return;
+            }
+            if let Some(limit) = self.node_limit {
+                if self.nodes >= limit {
+                    self.stopped = true;
+                    self.stop_signal.store(true, Ordering::Relaxed);
+                    return;
+                }
             }
             if self.main_thread && self.time_manager.check_hard_limit() {
                 self.stopped = true;
@@ -592,10 +602,11 @@ pub fn search(
     main_thread: bool,
     history: Vec<u64>,
     search_data: &mut SearchData,
+    node_limit: Option<u64>,
 ) -> (i32, Option<Move>) {
     let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
-    let mut info = Box::new(SearchInfo::new(search_data, tm, stop_signal, tt, main_thread));
+    let mut info = Box::new(SearchInfo::new(search_data, tm, stop_signal, tt, main_thread, node_limit));
     let mut path = history;
     let mut last_score = 0;
 

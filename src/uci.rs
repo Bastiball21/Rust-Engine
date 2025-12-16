@@ -133,6 +133,7 @@ pub fn uci_loop() {
                             is_main,
                             history_clone,
                             &mut search_data,
+                            None,
                         );
                     }).unwrap());
                 }
