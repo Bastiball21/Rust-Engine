@@ -11,14 +11,52 @@ use bullet_lib::{
     },
     value::{loader::DirectSequentialDataLoader, ValueTrainerBuilder},
 };
+use std::path::Path;
 
 fn main() {
     // hyperparams to fiddle with
     let hl_size = 256;
-    let dataset_path = "../aether_data.bin";
     let initial_lr = 0.001;
     let final_lr = 0.001 * 0.3f32.powi(5);
     let superbatches = 40;
+
+    // Parse command line arguments for dataset paths
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut dataset_paths = Vec::new();
+
+    if args.is_empty() {
+        dataset_paths.push("../aether_data.bin".to_string());
+    } else {
+        for arg in args {
+            let path = Path::new(&arg);
+            if path.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(path) {
+                    for entry in entries {
+                        if let Ok(entry) = entry {
+                            let path = entry.path();
+                            if path.is_file() && path.extension().map_or(false, |ext| ext == "bin") {
+                                if let Some(path_str) = path.to_str() {
+                                    dataset_paths.push(path_str.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                dataset_paths.push(arg);
+            }
+        }
+    }
+
+    if dataset_paths.is_empty() {
+        eprintln!("Error: No dataset files found.");
+        std::process::exit(1);
+    }
+
+    println!("Using datasets:");
+    for path in &dataset_paths {
+        println!("  {}", path);
+    }
 
     // Pure WDL
     let wdl_proportion = 1.0;
@@ -79,7 +117,9 @@ fn main() {
         batch_queue_size: 32,
     };
 
-    let dataloader = DirectSequentialDataLoader::new(&[dataset_path]);
+    // Convert paths to string slices for the loader
+    let path_slices: Vec<&str> = dataset_paths.iter().map(|s| s.as_str()).collect();
+    let dataloader = DirectSequentialDataLoader::new(&path_slices);
 
     trainer.run(&schedule, &settings, &dataloader);
 }
