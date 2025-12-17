@@ -1,6 +1,6 @@
 // src/datagen.rs
 use crate::search;
-use crate::state::{GameState, WHITE, BLACK};
+use crate::state::{GameState, WHITE, BLACK, P, N, B, R, Q, K, p, n, b, r, q, k};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::{TranspositionTable, FLAG_EXACT};
 use std::fs::OpenOptions;
@@ -12,6 +12,18 @@ use std::time::Instant;
 use crate::bullet_helper::convert_to_bullet;
 use bulletformat::BulletFormat;
 use std::collections::HashMap;
+
+// --- Config Constants ---
+const MERCY_CP: i32 = 1000;
+const MERCY_PLIES: usize = 8;
+const DRAW_CP: i32 = 50;
+const DRAW_PLIES: usize = 20;
+const DRAW_START_PLY: usize = 30;
+
+// High Score Threshold (Decided Game)
+const HIGH_SCORE_CP: i32 = 600;
+// Losing Side Threshold
+const LOSING_SCORE_CP: i32 = -500;
 
 pub struct DatagenConfig {
     pub num_games: usize,
@@ -57,16 +69,88 @@ impl Rng {
     }
 }
 
+// --- Helpers ---
+
+fn is_low_material(state: &GameState) -> bool {
+    // Count all pieces except kings
+    // Iterate over piece types 0..4 (P, N, B, R, Q) and 6..10
+    // Actually indices are:
+    // 0=P, 1=N, 2=B, 3=R, 4=Q, 5=K
+    // 6=p, 7=n, 8=b, 9=r, 10=q, 11=k
+
+    // We can just popcnt the occupancies excluding kings.
+    // However, we need to know if it's "low material".
+    // Let's count non-pawn non-king pieces as major/minor.
+    // Pawns also matter.
+
+    // Simple Heuristic: If piece count (excluding Kings) <= 3, it's low material.
+    // Or if only Pawns and Kings remain.
+
+    // Let's stick to total piece count (excluding kings).
+    let occ = state.occupancies[crate::state::BOTH];
+    let k_occ = state.bitboards[K] | state.bitboards[k];
+    let non_king_occ = crate::bitboard::Bitboard(occ.0 & !k_occ.0);
+
+    // Using count_ones() which is popcnt
+    if non_king_occ.0.count_ones() <= 4 {
+        return true;
+    }
+
+    false
+}
+
+fn is_trivial_endgame(state: &GameState) -> bool {
+    let w_pieces = state.occupancies[WHITE].0 & !state.bitboards[K].0;
+    let b_pieces = state.occupancies[BLACK].0 & !state.bitboards[k].0;
+
+    // K vs K
+    if w_pieces == 0 && b_pieces == 0 { return true; }
+
+    let w_count = w_pieces.count_ones();
+    let b_count = b_pieces.count_ones();
+
+    // K + X vs K (where X is 1 piece)
+    if (w_count == 1 && b_count == 0) || (w_count == 0 && b_count == 1) {
+        // Check if the piece is a pawn. If pawn, NOT trivial (unless K vs KP is trivial? No, could be win).
+        // Check for KN vs K or KB vs K.
+        // Piece types: N=1, B=2. n=7, b=8.
+        let is_minor = |bb: u64| {
+             // Check if the bit matches N or B bitboards
+             (bb & (state.bitboards[N].0 | state.bitboards[B].0 | state.bitboards[n].0 | state.bitboards[b].0)) != 0
+        };
+
+        if w_count == 1 {
+            if is_minor(w_pieces) { return true; }
+        }
+        if b_count == 1 {
+            if is_minor(b_pieces) { return true; }
+        }
+    }
+
+    // KB vs KB (Minor vs Minor) - Drawish if bishops same color? Or just low value.
+    if w_count == 1 && b_count == 1 {
+         // Check if both are minors
+        let is_minor_w = (w_pieces & (state.bitboards[N].0 | state.bitboards[B].0)) != 0;
+        let is_minor_b = (b_pieces & (state.bitboards[n].0 | state.bitboards[b].0)) != 0;
+
+        if is_minor_w && is_minor_b {
+             // KB vs KB, KN vs KN, KB vs KN...
+             return true;
+        }
+    }
+
+    false
+}
+
+
 pub fn run_datagen(config: DatagenConfig) {
-    println!("Starting Datagen (High Quality Mode)");
+    println!("Starting Datagen (Optimized)");
     println!("  Games:    {}", config.num_games);
     println!("  Threads:  {}", config.num_threads);
     println!("  Depth:    {}", config.depth);
     println!("  Output:   {}", config.filename);
-    println!("  Strategy: Node Limit (20k-50k), SplitMix64, TT Probe, Sync Channel");
+    println!("  Features: Mercy Rule, Early Draw, Dynamic Nodes, Allocation Reuse");
 
-    // Use a Bounded Channel to prevent memory explosion
-    // 1000 games buffer should be plenty (approx 200MB if games are long, usually much less)
     let (tx, rx) = mpsc::sync_channel::<Vec<bulletformat::ChessBoard>>(1000);
 
     // Writer Thread
@@ -84,13 +168,12 @@ pub fn run_datagen(config: DatagenConfig) {
         let mut positions_written = 0;
         let start_time = Instant::now();
 
-        // Iterate over the receiver. This blocks if empty, and terminates when all senders drop.
         for game_data in rx {
             bulletformat::ChessBoard::write_to_bin(&mut writer, &game_data).unwrap();
             games_written += 1;
             positions_written += game_data.len();
 
-            if games_written % 50 == 0 {
+            if games_written % 100 == 0 {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let games_per_sec = games_written as f64 / elapsed;
                 let pos_per_sec = positions_written as f64 / elapsed;
@@ -101,17 +184,25 @@ pub fn run_datagen(config: DatagenConfig) {
                 } else {
                     0.0
                 };
-                let eta = std::time::Duration::from_secs_f64(eta_secs);
+
+                // Format ETA
+                let eta_str = if eta_secs > 3600.0 {
+                    format!("{:.1}h", eta_secs / 3600.0)
+                } else if eta_secs > 60.0 {
+                    format!("{:.1}m", eta_secs / 60.0)
+                } else {
+                    format!("{:.0}s", eta_secs)
+                };
 
                 println!(
-                    "Written {} games ({:.1}%) ({} pos)... {:.1} games/s, {:.1} pos/s, Elapsed: {:.0}s, ETA: {:.0}s",
+                    "Written {} games ({:.1}%) ({} pos)... {:.1} games/s, {:.1} pos/s, Elapsed: {:.0}s, ETA: {}",
                     games_written,
                     (games_written as f64 / total_games as f64) * 100.0,
                     positions_written,
                     games_per_sec,
                     pos_per_sec,
                     elapsed,
-                    eta.as_secs()
+                    eta_str
                 );
             }
         }
@@ -134,26 +225,34 @@ pub fn run_datagen(config: DatagenConfig) {
 
         let handle = builder.spawn(move || {
             let mut tt = TranspositionTable::new(32); // 32MB per thread
-            // Seed RNG with thread ID for diversity
             let mut rng = Rng::new(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 ^ (t_id as u64).wrapping_mul(0xDEADBEEF));
             let mut search_data = search::SearchData::new();
 
+            // Reusable allocations
+            let mut rep_history: HashMap<u64, u8> = HashMap::with_capacity(300);
+            let mut history_vec: Vec<u64> = Vec::with_capacity(300);
+            let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
+
             for _ in 0..my_games {
+                // Clear reusable structures
+                tt.clear();
                 search_data.clear();
+                rep_history.clear();
+                history_vec.clear();
+                positions.clear();
+
                 // Start from standard position
                 let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
                 let mut result_val = 0.5;
                 let mut finished = false;
 
-                // Repetition History (using HashMap for O(1) check)
-                let mut rep_history: HashMap<u64, u8> = HashMap::with_capacity(300);
+                // Adjudication Counters
+                let mut mercy_counter = 0;
+                let mut draw_counter = 0;
+                let mut game_ply = 0;
+
                 rep_history.insert(state.hash, 1);
-
-                // For 3-fold repetition check, we need to know the count.
-                let mut history_vec: Vec<u64> = Vec::with_capacity(300);
                 history_vec.push(state.hash);
-
 
                 // --- 1. Random Move Phase (8-9 plies) ---
                 let random_plies = 8 + rng.range(0, 2); // 8 or 9
@@ -168,49 +267,43 @@ pub fn run_datagen(config: DatagenConfig) {
                         break;
                     }
 
-                    // Las Vegas Style: Try random move, check legality.
-                    // Fallback to filtering if luck fails.
-                    let mut chosen_move = None;
+                    // Collect all legal moves first
+                    // We need to filter illegal moves (those that leave king in check)
+                    // Since we want a UNIFORM distribution, we must know the exact count of legal moves.
+                    let mut legal_moves = Vec::with_capacity(64);
 
-                    // Try 16 times to pick a legal move randomly
-                    for _ in 0..16 {
-                        let idx = rng.range(0, moves.list.count);
-                        let m = moves.list.moves[idx];
+                    for i in 0..moves.list.count {
+                        let m = moves.list.moves[i];
                         let next_state = state.make_move(m);
                         if !crate::search::is_check(&next_state, state.side_to_move) {
-                            chosen_move = Some(m);
-                            break;
+                            legal_moves.push(m);
                         }
                     }
 
-                    if chosen_move.is_none() {
-                        // Unlucky. Filter all valid moves.
-                        let mut valid_moves = Vec::new();
-                        for i in 0..moves.list.count {
-                            let m = moves.list.moves[i];
-                            let next_state = state.make_move(m);
-                            if !crate::search::is_check(&next_state, state.side_to_move) {
-                                valid_moves.push(m);
-                            }
-                        }
-                        if valid_moves.is_empty() {
-                            abort_game = true;
-                            break;
-                        }
-                        chosen_move = Some(valid_moves[rng.range(0, valid_moves.len())]);
+                    if legal_moves.is_empty() {
+                         abort_game = true;
+                         break;
                     }
 
-                    let m = chosen_move.unwrap();
+                    // Pick one uniformly
+                    let idx = rng.range(0, legal_moves.len());
+                    let m = legal_moves[idx];
+
                     state = state.make_move(m);
+                    game_ply += 1;
 
                     *rep_history.entry(state.hash).or_insert(0) += 1;
                     history_vec.push(state.hash);
 
                     if state.halfmove_clock >= 100 { abort_game = true; break; }
+                    if is_trivial_endgame(&state) { abort_game = true; break; }
                 }
 
                 if abort_game {
-                    tt.clear();
+                    continue;
+                }
+
+                if is_trivial_endgame(&state) {
                     continue;
                 }
 
@@ -243,17 +336,71 @@ pub fn run_datagen(config: DatagenConfig) {
                         break;
                     }
 
-                    // Node Limit Selection (20k - 50k)
-                    // We can add some jitter to depth if requested, but node limit is dominant.
-                    let node_limit = 20_000 + (rng.next_u64() % 30_000);
+                    // Trivial Endgame Check
+                    if is_trivial_endgame(&state) {
+                        // Treat as draw or just abort?
+                        // Trivial endgames (K vs K) are draws.
+                        // But if we reach it during play, we can record it.
+                        // Requirements said "Skip or truncate".
+                        // Let's truncate as draw.
+                        result_val = 0.5;
+                        finished = true;
+                        break;
+                    }
 
-                    // TT Probe Logic: Check if we have an EXACT hit deep enough
+                    // Dynamic Node Limits
+                    let mut min_nodes = 15_000;
+                    let mut max_nodes = 40_000;
+
+                    // Heuristics
+                    // 1. Losing Side?
+                    // We need the *previous* evaluation to know if we are losing.
+                    // But we don't have it easily available for the side to move (we have last search score).
+                    // Actually, we can check the score from the *previous ply* if we stored it?
+                    // Alternatively, we rely on the Mercy Rule for extreme cases, and check TT?
+                    // Let's use the prompt's condition: "If side to move has eval <= -500".
+                    // We can probe TT for a quick estimate? Or just assume standard limits first.
+                    // The prompt says "If side to move has eval <= -500".
+                    // The easiest way is to use the score from the *previous* search, inverted.
+                    // But we don't have it for the first real ply.
+                    // Let's use a simpler approach:
+                    // If we have a TT entry and the score is bad for us, reduce.
+
+                    let mut is_losing = false;
+                    let mut is_winning_or_decided = false;
+
+                    if let Some((score, _, _, _)) = tt.probe_data(state.hash) {
+                         // Score is relative to side to move.
+                         if score <= LOSING_SCORE_CP {
+                             is_losing = true;
+                         }
+                         if score.abs() >= HIGH_SCORE_CP {
+                             is_winning_or_decided = true;
+                         }
+                    }
+
+                    if is_losing {
+                         min_nodes = 1000;
+                         max_nodes = 2000;
+                    } else if is_winning_or_decided {
+                         min_nodes = 2000;
+                         max_nodes = 5000;
+                    } else if game_ply < 20 {
+                         min_nodes = 2000;
+                         max_nodes = 5000;
+                    } else if is_low_material(&state) {
+                         min_nodes = 2000;
+                         max_nodes = 8000;
+                    }
+
+                    let node_limit = rng.range(min_nodes, max_nodes) as u64;
+
+                    // TT Probe Logic for fast exit
                     let mut used_tt_hit = false;
                     let mut search_score = 0;
                     let mut best_move = None;
 
                     if let Some((tt_score, tt_depth, tt_flag, tt_move)) = tt.probe_data(state.hash) {
-                         // If we have an exact score at >= target depth, skip search!
                          if tt_flag == FLAG_EXACT && tt_depth >= depth_config {
                              search_score = tt_score;
                              best_move = tt_move;
@@ -262,19 +409,14 @@ pub fn run_datagen(config: DatagenConfig) {
                     }
 
                     if !used_tt_hit {
-                        // Perform Search
-                        // We use TimeManager::new with Infinite, relying on Node Limit to stop.
                         let tm = TimeManager::new(TimeControl::Infinite, state.side_to_move, 0);
-
-                        // We do not pass `history_vec` to search here. Search uses history for cycle detection.
-                        // Our `history_vec` is valid.
                         let (s, m) = search::search(
                             &state,
                             tm,
                             &tt,
                             Arc::new(AtomicBool::new(false)),
                             depth_config,
-                            false, // not main thread (suppress output)
+                            false,
                             history_vec.clone(),
                             &mut search_data,
                             Some(node_limit),
@@ -283,8 +425,42 @@ pub fn run_datagen(config: DatagenConfig) {
                         best_move = m;
                     }
 
-                    // Score Validation & Clamping
-                    // Check for Mate Scores. If found, game over.
+                    // --- Adjudication Logic ---
+
+                    // 1. Mercy Rule
+                    if search_score.abs() >= MERCY_CP {
+                        mercy_counter += 1;
+                    } else {
+                        mercy_counter = 0;
+                    }
+
+                    if mercy_counter >= MERCY_PLIES {
+                        // Game clearly decided.
+                        if search_score > 0 {
+                             result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
+                        } else {
+                             result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
+                        }
+                        finished = true;
+                        break;
+                    }
+
+                    // 2. Early Draw Adjudication
+                    if game_ply >= DRAW_START_PLY {
+                         if search_score.abs() <= DRAW_CP {
+                             draw_counter += 1;
+                         } else {
+                             draw_counter = 0;
+                         }
+
+                         if draw_counter >= DRAW_PLIES {
+                             result_val = 0.5;
+                             finished = true;
+                             break;
+                         }
+                    }
+
+                    // Mate Check
                     if search_score.abs() > 20000 {
                          if search_score > 0 {
                              result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
@@ -295,11 +471,9 @@ pub fn run_datagen(config: DatagenConfig) {
                          break;
                     }
 
-                    // Ensure we have a move
                     let final_move = if let Some(m) = best_move {
                         m
                     } else {
-                        // Search failed or returned nothing? (Shouldn't happen with valid nodes)
                         // Fallback: Pick first legal.
                         let mut valid = moves.list.moves[0];
                         for i in 0..moves.list.count {
@@ -313,11 +487,7 @@ pub fn run_datagen(config: DatagenConfig) {
                         valid
                     };
 
-                    // Store Position
-                    // Score is strictly clamped to ensure safe casting
                     let clamped_score = search_score.clamp(-32000, 32000);
-
-                    // Datagen stores White Relative Score
                     let white_score = if state.side_to_move == WHITE {
                         clamped_score
                     } else {
@@ -326,17 +496,16 @@ pub fn run_datagen(config: DatagenConfig) {
 
                     positions.push((state.clone(), white_score as i16));
 
-                    // Make Move
                     let next_state = state.make_move(final_move);
 
-                    // Legality Sanity Check (should be redundant if search works)
+                    // Paranoid check (optional)
                     if crate::search::is_check(&next_state, state.side_to_move) {
-                        // Illegal move. Abort.
                         abort_game = true;
                         break;
                     }
 
                     state = next_state;
+                    game_ply += 1;
                     *rep_history.entry(state.hash).or_insert(0) += 1;
                     history_vec.push(state.hash);
 
@@ -348,31 +517,25 @@ pub fn run_datagen(config: DatagenConfig) {
                 }
 
                 if abort_game {
-                    tt.clear();
                     continue;
                 }
 
                 if finished {
                     let mut game_data = Vec::with_capacity(positions.len());
-                    for (pos_state, score) in positions {
-                        // Safe: score is clamped. Result is 0.0, 0.5, or 1.0.
+                    for (pos_state, score) in positions.drain(..) {
                         let board = convert_to_bullet(&pos_state, score, result_val);
                         game_data.push(board);
                     }
 
                     if !game_data.is_empty() {
-                         // This blocks if channel is full
                          tx.send(game_data).unwrap();
                     }
                 }
-
-                tt.clear();
             }
         }).unwrap();
         handles.push(handle);
     }
 
-    // Close the sender on the main thread so the writer terminates when workers are done
     drop(tx);
 
     for h in handles {
