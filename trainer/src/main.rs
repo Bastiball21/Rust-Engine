@@ -67,6 +67,7 @@ fn main() {
     let buckets = ChessBucketsMirrored::new(std::array::from_fn(|i| i));
 
     let mut trainer = ValueTrainerBuilder::default()
+        .use_devices(vec![0])
         .dual_perspective()
         .optimiser(AdamW)
         .inputs(buckets)
