@@ -697,8 +697,55 @@ impl GameState {
         new_state.side_to_move = 1 - side;
         new_state.hash ^= zobrist::side_key();
 
-        // Update Occupancies (REMOVED FULL REBUILD LOOP)
-        // Incremental updates handled above.
+        // Incremental occupancy update
+        new_state.occupancies = self.occupancies;
+
+        let source = mv.source;
+        let target = mv.target;
+        let our_side = self.side_to_move;
+        let their_side = 1 - our_side;
+
+        // Remove piece from source
+        new_state.occupancies[our_side].pop_bit(source);
+        new_state.occupancies[BOTH].pop_bit(source);
+
+        if is_castling {
+            // Castling: king and rook both move
+            let rook_source = mv.target;
+
+            // Recompute rook target since r_dst is not in scope
+            let rank_base = if our_side == WHITE { 0 } else { 56 };
+            let rook_file_dst = if (mv.target % 8) > (mv.source % 8) { 5 } else { 3 };
+            let rook_target = rank_base + rook_file_dst;
+
+            // Recompute king target (k_dst) since it is not in scope
+            let king_file_dst = if (mv.target % 8) > (mv.source % 8) { 6 } else { 2 };
+            let k_dst = rank_base + king_file_dst;
+
+            new_state.occupancies[our_side].pop_bit(rook_source);
+            new_state.occupancies[BOTH].pop_bit(rook_source);
+            new_state.occupancies[our_side].set_bit(rook_target);
+            new_state.occupancies[BOTH].set_bit(rook_target);
+
+            // Add King to destination
+            new_state.occupancies[our_side].set_bit(k_dst);
+            new_state.occupancies[BOTH].set_bit(k_dst);
+        } else {
+            // Handle captures (including en passant)
+            if mv.is_capture {
+                let cap_sq = if (piece_type == P || piece_type == p) && target == self.en_passant {
+                    if our_side == WHITE { target - 8 } else { target + 8 }
+                } else {
+                    target
+                };
+                new_state.occupancies[their_side].pop_bit(cap_sq);
+                new_state.occupancies[BOTH].pop_bit(cap_sq);
+            }
+
+            // Add piece to target
+            new_state.occupancies[our_side].set_bit(target);
+            new_state.occupancies[BOTH].set_bit(target);
+        }
 
         // --------------------------------------------------------------------
         // Update Accumulators (Logic for King Buckets)

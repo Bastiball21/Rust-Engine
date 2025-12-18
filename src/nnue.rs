@@ -215,9 +215,9 @@ pub fn make_index(perspective: usize, piece: usize, sq: usize, king_bucket: usiz
 
 pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
     if let Some(net) = NETWORK.get() {
-        // HARD INVARIANT CHECK
-        debug_assert!(stm_acc.magic == ACC_MAGIC, "STM Accumulator not initialized!");
-        debug_assert!(ntm_acc.magic == ACC_MAGIC, "NTM Accumulator not initialized!");
+        if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
+            panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid...");
+        }
 
         let mut sum = net.output_bias as i32;
 
@@ -227,98 +227,52 @@ pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
             let zero = _mm256_setzero_si256();
             let qa = _mm256_set1_epi16(QA as i16);
 
-            // Helper for processing 16 values
-            // We use a macro or closure-like block to avoid repetition
-            // But loops are fine.
-
-            // 1. STM (Friendly)
+            // Process STM (current player)
             for i in (0..LAYER1_SIZE).step_by(16) {
                 let v_ptr = stm_acc.v.as_ptr().add(i);
                 let w_ptr = net.output_weights.as_ptr().add(i);
-
-                // Load accumulator values
-                let val_vec = _mm256_loadu_si256(v_ptr as *const __m256i);
-
-                // Clamp 0..QA
-                let clamped = _mm256_min_epi16(_mm256_max_epi16(val_vec, zero), qa);
-
-                // Extract to look up in LUT
-                // This is the cost of bit-exactness via LUT in AVX2
-                let mut vals = [0i16; 16];
-                _mm256_storeu_si256(vals.as_mut_ptr() as *mut __m256i, clamped);
-
-                let mut acts = [0i16; 16];
-                for j in 0..16 {
-                    // Safety: vals[j] is clamped to 0..255, which is valid index for SCRELU
-                    let idx = vals[j] as usize;
-                    acts[j] = SCRELU[idx];
-                }
-
-                // Load activation back
-                let act_vec = _mm256_loadu_si256(acts.as_ptr() as *const __m256i);
-
-                // Load weights
-                let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
-
-                // Multiply-Add
-                let prod = _mm256_madd_epi16(act_vec, w_vec);
+                let val = _mm256_loadu_si256(v_ptr as *const __m256i);
+                let w = _mm256_loadu_si256(w_ptr as *const __m256i);
+                let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+                let sq = _mm256_mullo_epi16(clamped, clamped);
+                let activation = _mm256_mulhi_epu16(sq, _mm256_set1_epi16(257));
+                let prod = _mm256_madd_epi16(activation, w);
                 sum_vec = _mm256_add_epi32(sum_vec, prod);
             }
 
-            // 2. NTM (Enemy)
+            // Process NTM (opponent)
             for i in (0..LAYER1_SIZE).step_by(16) {
                 let v_ptr = ntm_acc.v.as_ptr().add(i);
                 let w_ptr = net.output_weights.as_ptr().add(LAYER1_SIZE + i);
-
-                let val_vec = _mm256_loadu_si256(v_ptr as *const __m256i);
-                let clamped = _mm256_min_epi16(_mm256_max_epi16(val_vec, zero), qa);
-
-                let mut vals = [0i16; 16];
-                _mm256_storeu_si256(vals.as_mut_ptr() as *mut __m256i, clamped);
-
-                let mut acts = [0i16; 16];
-                for j in 0..16 {
-                    let idx = vals[j] as usize;
-                    acts[j] = SCRELU[idx];
-                }
-
-                let act_vec = _mm256_loadu_si256(acts.as_ptr() as *const __m256i);
-                let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
-
-                let prod = _mm256_madd_epi16(act_vec, w_vec);
+                let val = _mm256_loadu_si256(v_ptr as *const __m256i);
+                let w = _mm256_loadu_si256(w_ptr as *const __m256i);
+                let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+                let sq = _mm256_mullo_epi16(clamped, clamped);
+                let activation = _mm256_mulhi_epu16(sq, _mm256_set1_epi16(257));
+                let prod = _mm256_madd_epi16(activation, w);
                 sum_vec = _mm256_add_epi32(sum_vec, prod);
             }
 
-            // Horizontal Sum
             let mut arr = [0i32; 8];
             _mm256_storeu_si256(arr.as_mut_ptr() as *mut __m256i, sum_vec);
-            for x in arr {
-                sum += x;
-            }
+            for x in arr { sum += x; }
         }
 
         #[cfg(not(target_arch = "x86_64"))]
         {
-            // Perspective 1 (STM)
             for i in 0..LAYER1_SIZE {
-                let val = stm_acc.v[i];
-                let idx = val.clamp(0, QA as i16) as usize;
-                let activation = SCRELU[idx] as i32;
-                let weight = net.output_weights[i] as i32;
-                sum += activation * weight;
+                let val = stm_acc.v[i].clamp(0, QA as i16) as i32;
+                let activation = (val * val) / QA;
+                sum += activation * net.output_weights[i] as i32;
             }
-
-            // Perspective 2 (NTM)
             for i in 0..LAYER1_SIZE {
-                let val = ntm_acc.v[i];
-                let idx = val.clamp(0, QA as i16) as usize;
-                let activation = SCRELU[idx] as i32;
-                let weight = net.output_weights[LAYER1_SIZE + i] as i32;
-                sum += activation * weight;
+                let val = ntm_acc.v[i].clamp(0, QA as i16) as i32;
+                let activation = (val * val) / QA;
+                sum += activation * net.output_weights[LAYER1_SIZE + i] as i32;
             }
         }
 
-        // Scale to centipawns
+        // Return score from **current player's perspective** (no flip needed)
         (sum * SCALE) / (QA * QB)
     } else {
         0
