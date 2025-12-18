@@ -12,6 +12,7 @@ use std::time::Instant;
 use crate::bullet_helper::convert_to_bullet;
 use bulletformat::BulletFormat;
 use std::collections::HashMap;
+use crate::book::Book;
 
 // --- Config Constants ---
 const MERCY_CP: i32 = 1000;
@@ -30,6 +31,8 @@ pub struct DatagenConfig {
     pub num_threads: usize,
     pub depth: u8,
     pub filename: String,
+    pub book_path: Option<String>,
+    pub book_ply: usize,
 }
 
 // --- SplitMix64 RNG ---
@@ -149,6 +152,29 @@ pub fn run_datagen(config: DatagenConfig) {
     println!("  Threads:  {}", config.num_threads);
     println!("  Depth:    {}", config.depth);
     println!("  Output:   {}", config.filename);
+
+    // Load Book
+    let book = if let Some(ref path) = config.book_path {
+        println!("  Book:     {} (Ply: {})", path, config.book_ply);
+        match Book::load_from_file(path, config.book_ply) {
+            Ok(bk) => {
+                if bk.positions.is_empty() {
+                    println!("WARNING: Book loaded but contains 0 positions. Using startpos.");
+                    None
+                } else {
+                    Some(Arc::new(bk))
+                }
+            },
+            Err(e) => {
+                println!("ERROR: Failed to load book: {}", e);
+                return;
+            }
+        }
+    } else {
+        println!("  Book:     None (Using Random Walk)");
+        None
+    };
+
     println!("  Features: Mercy Rule, Early Draw, Dynamic Nodes, Allocation Reuse");
 
     let (tx, rx) = mpsc::sync_channel::<Vec<bulletformat::ChessBoard>>(1000);
@@ -218,6 +244,7 @@ pub fn run_datagen(config: DatagenConfig) {
         let tx = tx.clone();
         let my_games = games_per_thread + if t_id < remainder { 1 } else { 0 };
         let depth_config = config.depth;
+        let book_arc = book.clone();
 
         let builder = thread::Builder::new()
             .name(format!("datagen_worker_{}", t_id))
@@ -241,62 +268,73 @@ pub fn run_datagen(config: DatagenConfig) {
                 history_vec.clear();
                 positions.clear();
 
-                // Start from standard position
-                let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+                // Select Start Position
+                let mut state;
+                let mut game_ply = 0;
+
+                if let Some(ref bk) = book_arc {
+                    let idx = rng.range(0, bk.positions.len());
+                    state = bk.positions[idx];
+                    // Book positions are assumed to be "ply 0" of the generation sequence.
+                } else {
+                    state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+                }
+
                 let mut result_val = 0.5;
                 let mut finished = false;
 
                 // Adjudication Counters
                 let mut mercy_counter = 0;
                 let mut draw_counter = 0;
-                let mut game_ply = 0;
 
                 rep_history.insert(state.hash, 1);
                 history_vec.push(state.hash);
 
-                // --- 1. Random Move Phase (8-9 plies) ---
-                let random_plies = 8 + rng.range(0, 2); // 8 or 9
+                // --- 1. Random Move Phase ---
+                // Skip if using book (as per plan), otherwise 8-9 plies.
                 let mut abort_game = false;
 
-                for _ in 0..random_plies {
-                    let mut moves = crate::movegen::MoveGenerator::new();
-                    moves.generate_moves(&state);
+                if book_arc.is_none() {
+                    let random_plies = 8 + rng.range(0, 2); // 8 or 9
 
-                    if moves.list.count == 0 {
-                        abort_game = true;
-                        break;
-                    }
+                    for _ in 0..random_plies {
+                        let mut moves = crate::movegen::MoveGenerator::new();
+                        moves.generate_moves(&state);
 
-                    // Collect all legal moves first
-                    // We need to filter illegal moves (those that leave king in check)
-                    // Since we want a UNIFORM distribution, we must know the exact count of legal moves.
-                    let mut legal_moves = Vec::with_capacity(64);
-
-                    for i in 0..moves.list.count {
-                        let m = moves.list.moves[i];
-                        let next_state = state.make_move(m);
-                        if !crate::search::is_check(&next_state, state.side_to_move) {
-                            legal_moves.push(m);
+                        if moves.list.count == 0 {
+                            abort_game = true;
+                            break;
                         }
+
+                        // Collect all legal moves first
+                        let mut legal_moves = Vec::with_capacity(64);
+
+                        for i in 0..moves.list.count {
+                            let m = moves.list.moves[i];
+                            let next_state = state.make_move(m);
+                            if !crate::search::is_check(&next_state, state.side_to_move) {
+                                legal_moves.push(m);
+                            }
+                        }
+
+                        if legal_moves.is_empty() {
+                             abort_game = true;
+                             break;
+                        }
+
+                        // Pick one uniformly
+                        let idx = rng.range(0, legal_moves.len());
+                        let m = legal_moves[idx];
+
+                        state = state.make_move(m);
+                        game_ply += 1;
+
+                        *rep_history.entry(state.hash).or_insert(0) += 1;
+                        history_vec.push(state.hash);
+
+                        if state.halfmove_clock >= 100 { abort_game = true; break; }
+                        if is_trivial_endgame(&state) { abort_game = true; break; }
                     }
-
-                    if legal_moves.is_empty() {
-                         abort_game = true;
-                         break;
-                    }
-
-                    // Pick one uniformly
-                    let idx = rng.range(0, legal_moves.len());
-                    let m = legal_moves[idx];
-
-                    state = state.make_move(m);
-                    game_ply += 1;
-
-                    *rep_history.entry(state.hash).or_insert(0) += 1;
-                    history_vec.push(state.hash);
-
-                    if state.halfmove_clock >= 100 { abort_game = true; break; }
-                    if is_trivial_endgame(&state) { abort_game = true; break; }
                 }
 
                 if abort_game {
@@ -338,11 +376,6 @@ pub fn run_datagen(config: DatagenConfig) {
 
                     // Trivial Endgame Check
                     if is_trivial_endgame(&state) {
-                        // Treat as draw or just abort?
-                        // Trivial endgames (K vs K) are draws.
-                        // But if we reach it during play, we can record it.
-                        // Requirements said "Skip or truncate".
-                        // Let's truncate as draw.
                         result_val = 0.5;
                         finished = true;
                         break;
@@ -352,25 +385,10 @@ pub fn run_datagen(config: DatagenConfig) {
                     let mut min_nodes = 15_000;
                     let mut max_nodes = 40_000;
 
-                    // Heuristics
-                    // 1. Losing Side?
-                    // We need the *previous* evaluation to know if we are losing.
-                    // But we don't have it easily available for the side to move (we have last search score).
-                    // Actually, we can check the score from the *previous ply* if we stored it?
-                    // Alternatively, we rely on the Mercy Rule for extreme cases, and check TT?
-                    // Let's use the prompt's condition: "If side to move has eval <= -500".
-                    // We can probe TT for a quick estimate? Or just assume standard limits first.
-                    // The prompt says "If side to move has eval <= -500".
-                    // The easiest way is to use the score from the *previous* search, inverted.
-                    // But we don't have it for the first real ply.
-                    // Let's use a simpler approach:
-                    // If we have a TT entry and the score is bad for us, reduce.
-
                     let mut is_losing = false;
                     let mut is_winning_or_decided = false;
 
                     if let Some((score, _, _, _)) = tt.probe_data(state.hash) {
-                         // Score is relative to side to move.
                          if score <= LOSING_SCORE_CP {
                              is_losing = true;
                          }
@@ -435,7 +453,6 @@ pub fn run_datagen(config: DatagenConfig) {
                     }
 
                     if mercy_counter >= MERCY_PLIES {
-                        // Game clearly decided.
                         if search_score > 0 {
                              result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
                         } else {
@@ -498,7 +515,6 @@ pub fn run_datagen(config: DatagenConfig) {
 
                     let next_state = state.make_move(final_move);
 
-                    // Paranoid check (optional)
                     if crate::search::is_check(&next_state, state.side_to_move) {
                         abort_game = true;
                         break;
