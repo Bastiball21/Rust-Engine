@@ -35,6 +35,10 @@ pub fn uci_loop() {
     // Let's try to load "nn-aether.nnue" silently.
     if std::path::Path::new("nn-aether.nnue").exists() {
         crate::nnue::init_nnue("nn-aether.nnue");
+        // CRITICAL FIX: The initial game_state was created BEFORE NNUE was loaded.
+        // It has empty accumulators (all zeros).
+        // We MUST refresh it now that the network is loaded.
+        game_state.refresh_accumulator();
     }
 
     let stop_signal = Arc::new(AtomicBool::new(false));
@@ -111,6 +115,14 @@ pub fn uci_loop() {
                     // Subsequent incremental updates will keep it valid.
                     // state_clone.refresh_accumulator();
 
+                    // Extra Safety: Since we copy state_clone, check if it's potentially stale relative to network.
+                    // If network is loaded, force refresh just to be absolutely safe against race conditions?
+                    // But refresh is expensive (relatively).
+                    // However, for the ROOT node, it's negligible (microseconds).
+                    // This fixes any edge case where state was updated while network was loading.
+                    let mut safe_state = state_clone;
+                    safe_state.refresh_accumulator();
+
                     let stop_clone = stop_signal.clone();
                     let tm_clone = tm;
                     let history_clone = game_history.clone();
@@ -125,7 +137,7 @@ pub fn uci_loop() {
                         let mut search_data = search::SearchData::new();
                         // Pass reference to the TT inside the Arc
                         search::search(
-                            &state_clone,
+                            &safe_state,
                             tm_clone,
                             &tt_clone,
                             stop_clone,

@@ -1,6 +1,7 @@
 // src/main.rs
 #![allow(unused_imports, unused_variables, dead_code)]
 mod bitboard;
+mod book;
 mod bullet_helper;
 mod datagen;
 mod endgame;
@@ -35,10 +36,9 @@ fn main() {
     bitboard::init_magic_tables();
     movegen::init_move_tables();
     eval::init_eval();
-     threat::init_threat();
+    threat::init_threat();
 
-    // 2. Load NNUE (Disabled)
-    // nnue::init_nnue();
+    // 2. Load NNUE (Implicitly loaded in uci_loop or init_nnue)
 
     // 3. Check for arguments (CLI Mode)
     let args: Vec<String> = env::args().collect();
@@ -73,9 +73,8 @@ fn main() {
             return;
         }
 
-
         if args[1] == "datagen" {
-            // Usage: "Aether datagen <games> <threads> <depth> <filename>"
+            // Usage: "Aether datagen <games> <threads> <depth> <filename> [book_path] [book_ply]"
             let games = if args.len() > 2 {
                 args[2].parse().unwrap_or(100)
             } else {
@@ -100,11 +99,26 @@ fn main() {
                 "aether_data.bin".to_string()
             };
 
+            // Optional Book
+            let book_path = if args.len() > 6 {
+                Some(args[6].clone())
+            } else {
+                None
+            };
+
+            let book_ply = if args.len() > 7 {
+                args[7].parse().unwrap_or(16)
+            } else {
+                16
+            };
+
             let config = datagen::DatagenConfig {
                 num_games: games,
                 num_threads: threads,
                 depth,
                 filename,
+                book_path,
+                book_ply,
             };
 
             datagen::run_datagen(config);
