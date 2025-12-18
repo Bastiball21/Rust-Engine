@@ -13,6 +13,7 @@ pub const NUM_BUCKETS: usize = 32; // Matches bullet_lib ChessBuckets (Standard 
 const QA: i32 = 255;
 const QB: i32 = 64;
 const SCALE: i32 = 400; // Eval scale from trainer
+const ACC_MAGIC: u16 = 0x1234;
 
 // SAFE GLOBAL NETWORK
 pub static NETWORK: OnceLock<Network> = OnceLock::new();
@@ -21,6 +22,7 @@ pub static NETWORK: OnceLock<Network> = OnceLock::new();
 #[repr(align(64))]
 pub struct Accumulator {
     pub v: [i16; LAYER1_SIZE],
+    pub magic: u16, // Safety check for initialization
 }
 
 impl Accumulator {
@@ -28,9 +30,11 @@ impl Accumulator {
         // Initialize with biases if network is loaded, else 0
         let mut acc = Accumulator {
             v: [0; LAYER1_SIZE],
+            magic: 0,
         };
         if let Some(net) = NETWORK.get() {
             acc.v.copy_from_slice(&net.feature_biases);
+            acc.magic = ACC_MAGIC;
         }
         acc
     }
@@ -39,6 +43,7 @@ impl Accumulator {
         if let Some(net) = NETWORK.get() {
             // Start with biases
             self.v.copy_from_slice(&net.feature_biases);
+            self.magic = ACC_MAGIC;
 
             let king_bucket = get_king_bucket(perspective, king_sq);
 
@@ -59,6 +64,8 @@ impl Accumulator {
                     }
                 }
             }
+        } else {
+             self.magic = 0;
         }
     }
 
@@ -195,6 +202,14 @@ pub fn make_index(perspective: usize, piece: usize, sq: usize, king_bucket: usiz
 
 pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
     if let Some(net) = NETWORK.get() {
+        // HARD INVARIANT CHECK
+        // If network is loaded, accumulators MUST have been initialized/refreshed.
+        if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
+            panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid (magic check failed). \
+                   This indicates a GameState was created before NNUE load and not refreshed. \
+                   Please ensure GameState::refresh_accumulator() is called after loading the network.");
+        }
+
         let mut sum = net.output_bias as i32;
 
         #[cfg(target_arch = "x86_64")]
@@ -380,7 +395,7 @@ mod tests {
     #[test]
     fn test_accumulator_logic() {
         // Mock Accumulator
-        let acc = Accumulator { v: [0; LAYER1_SIZE] };
+        let acc = Accumulator { v: [0; LAYER1_SIZE], magic: 0 };
         for x in acc.v { assert_eq!(x, 0); }
 
         // We can't easily test with weights without a file or mocking the Network global,
