@@ -324,7 +324,7 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     let scale = crate::endgame::get_scale_factor(state, score);
     score = (score * scale) / 128;
 
-    if state.side_to_move == WHITE { score } else { -score }
+    score
 }
 
 fn evaluate_fixed(state: &GameState) -> (i32, i32) {
