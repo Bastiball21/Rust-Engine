@@ -4,7 +4,7 @@
 use crate::bitboard::Bitboard;
 use crate::nnue::Accumulator;
 use crate::zobrist;
-use smallvec::SmallVec;
+// Removed SmallVec dependency
 
 pub const P: usize = 0;
 pub const N: usize = 1;
@@ -22,6 +22,33 @@ pub const k: usize = 11;
 pub const WHITE: usize = 0;
 pub const BLACK: usize = 1;
 pub const BOTH: usize = 2;
+
+// Helper to replace SmallVec with stack array
+pub struct UpdateList {
+    pub items: [(usize, usize); 4],
+    pub len: usize,
+}
+
+impl UpdateList {
+    pub fn new() -> Self {
+        UpdateList {
+            items: [(0, 0); 4],
+            len: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, item: (usize, usize)) {
+        if self.len < 4 {
+            self.items[self.len] = item;
+            self.len += 1;
+        }
+    }
+
+    pub fn as_slice(&self) -> &[(usize, usize)] {
+        &self.items[0..self.len]
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Move {
@@ -379,9 +406,12 @@ impl GameState {
         let mut new_state = *self;
         let side = self.side_to_move;
 
-        // NNUE Incremental Update Tracking
-        let mut added: SmallVec<[(usize, usize); 4]> = SmallVec::new();
-        let mut removed: SmallVec<[(usize, usize); 4]> = SmallVec::new();
+        // Incremental Occupancy Updates: Initialize from current state
+        new_state.occupancies = self.occupancies;
+
+        // NNUE Incremental Update Tracking (Using Stack Array)
+        let mut added = UpdateList::new();
+        let mut removed = UpdateList::new();
 
         if side == BLACK {
             new_state.fullmove_number += 1;
@@ -425,30 +455,30 @@ impl GameState {
             new_state.bitboards[piece_type].pop_bit(mv.source);
             removed.push((piece_type, mv.source as usize));
 
+            // Occupancy Update: Remove King from Source
+            new_state.occupancies[side].pop_bit(mv.source);
+            new_state.occupancies[BOTH].pop_bit(mv.source);
+
             // 2. Remove Rook from Target (Rook's source)
             let rook_type = if side == WHITE { R } else { r };
             new_state.hash ^= zobrist::piece_key(rook_type, mv.target as usize);
             new_state.bitboards[rook_type].pop_bit(mv.target);
             removed.push((rook_type, mv.target as usize));
 
+            // Occupancy Update: Remove Rook from Source
+            new_state.occupancies[side].pop_bit(mv.target);
+            new_state.occupancies[BOTH].pop_bit(mv.target);
+
             // 3. Determine Destinations
             let rank_base = if side == WHITE { 0 } else { 56 };
             let king_file_dst;
             let rook_file_dst;
 
-            // Which side?
-            // We can check if Rook file > King file (Kingside) or < (Queenside)
-            // Or compare mv.target vs mv.source
-            if mv.target > mv.source { // Kingside (usually, but be careful with indices 0-63 vs file)
-                 // Careful: if King on B1, Rook on A1. Target < Source.
-                 // Rook on H1, King on B1. Target > Source.
-                 // Correct logic: Compare files.
+            if mv.target > mv.source { // Kingside
                  if (mv.target % 8) > (mv.source % 8) {
-                     // Kingside
                      king_file_dst = 6; // g-file
                      rook_file_dst = 5; // f-file
                  } else {
-                     // Queenside
                      king_file_dst = 2; // c-file
                      rook_file_dst = 3; // d-file
                  }
@@ -470,9 +500,17 @@ impl GameState {
             new_state.hash ^= zobrist::piece_key(piece_type, k_dst as usize);
             added.push((piece_type, k_dst as usize));
 
+            // Occupancy Update: Add King
+            new_state.occupancies[side].set_bit(k_dst);
+            new_state.occupancies[BOTH].set_bit(k_dst);
+
             new_state.bitboards[rook_type].set_bit(r_dst);
             new_state.hash ^= zobrist::piece_key(rook_type, r_dst as usize);
             added.push((rook_type, r_dst as usize));
+
+            // Occupancy Update: Add Rook
+            new_state.occupancies[side].set_bit(r_dst);
+            new_state.occupancies[BOTH].set_bit(r_dst);
 
             // Castling resets halfmove clock
             new_state.halfmove_clock = 0;
@@ -489,6 +527,11 @@ impl GameState {
 
             new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
             new_state.bitboards[piece_type].pop_bit(mv.source);
+
+            // Occupancy Update: Remove Piece from Source
+            new_state.occupancies[side].pop_bit(mv.source);
+            new_state.occupancies[BOTH].pop_bit(mv.source);
+
 
             // 2. Add moving piece (or promo) to target
             let actual_piece = if let Some(promo) = mv.promotion {
@@ -508,9 +551,14 @@ impl GameState {
 
             added.push((actual_piece, mv.target as usize));
 
+            // Occupancy Update: Add Piece to Target
+            new_state.occupancies[side].set_bit(mv.target);
+            new_state.occupancies[BOTH].set_bit(mv.target);
+
             if mv.is_capture {
                 let enemy_start = if side == WHITE { p } else { P };
                 let enemy_end = if side == WHITE { k } else { K };
+                let enemy_side = 1 - side;
 
                 if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
                     // En Passant Capture
@@ -524,8 +572,19 @@ impl GameState {
                     new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
 
                     removed.push((enemy_pawn, cap_sq as usize));
+
+                    // Occupancy Update: Remove Enemy Pawn
+                    new_state.occupancies[enemy_side].pop_bit(cap_sq);
+                    new_state.occupancies[BOTH].pop_bit(cap_sq);
                 } else {
-                    // Normal Capture
+                    // Normal Capture: Target square occupancy is tricky because we just ADDED our piece there.
+                    // But we haven't removed the enemy piece yet from bitboards, only logically.
+                    // Wait, we just added our piece to 'new_state.occupancies[side]'.
+                    // And 'occupancies[BOTH]' now has it.
+                    // The enemy piece is still in 'occupancies[enemy]' and 'bitboards[enemy]'.
+                    // So 'occupancies[BOTH]' has it from the enemy side too.
+                    // We must remove the enemy piece from 'occupancies[enemy]' and 'occupancies[BOTH]'.
+
                     for pp in enemy_start..=enemy_end {
                         if new_state.bitboards[pp].get_bit(mv.target) {
                             new_state.bitboards[pp].pop_bit(mv.target);
@@ -534,6 +593,40 @@ impl GameState {
                             break;
                         }
                     }
+                    // Occupancy Update: Remove Enemy Piece from Target
+                    new_state.occupancies[enemy_side].pop_bit(mv.target);
+                    // Note: BOTH already has our piece, so it remains set.
+                    // But we popped the enemy contribution.
+                    // Since BOTH = WHITE | BLACK, and we just added WHITE, removing BLACK leaves WHITE.
+                    // So strictly, BOTH.pop_bit(target) would be WRONG if we just added our piece!
+                    // BUT: 'pop_bit' just clears the bit. It doesn't check if another piece is there.
+                    // Correct logic:
+                    // 1. Remove Enemy from Enemy Occ.
+                    // 2. Recalculate BOTH at target? Or just know it's occupied by us.
+                    // actually, BOTH is just (side | enemy).
+                    // If we just added 'side' at target, BOTH has bit set.
+                    // If we remove 'enemy' at target, BOTH should still have bit set.
+                    // So we should NOT pop from BOTH for normal capture at target.
+                    // EXCEPT: En Passant capture is different (different square).
+
+                    // For Normal Capture:
+                    // new_state.occupancies[BOTH] is already correct (set by our move).
+                    // We only need to clear new_state.occupancies[enemy] at target.
+
+                    // Wait, let's trace carefully.
+                    // Step 1: Remove Source. (Both popped). OK.
+                    // Step 2: Add Target (Friendly). (Both set). OK.
+                    // Step 3: Capture Target (Enemy).
+                    // We must remove from Enemy Occ.
+                    // We MUST NOT remove from Both Occ because Friendly is there now.
+
+                    // Implementation:
+                    // new_state.occupancies[enemy_side].pop_bit(mv.target);
+                    // (Done)
+
+                    // But wait, look at En Passant block above:
+                    // cap_sq is different from target.
+                    // So there we pop from BOTH. Correct.
                 }
             }
 
@@ -604,15 +697,8 @@ impl GameState {
         new_state.side_to_move = 1 - side;
         new_state.hash ^= zobrist::side_key();
 
-        // Update Occupancies
-        new_state.occupancies = [Bitboard(0); 3];
-        for pp in P..=K {
-            new_state.occupancies[WHITE] = new_state.occupancies[WHITE] | new_state.bitboards[pp];
-        }
-        for pp in p..=k {
-            new_state.occupancies[BLACK] = new_state.occupancies[BLACK] | new_state.bitboards[pp];
-        }
-        new_state.occupancies[BOTH] = new_state.occupancies[WHITE] | new_state.occupancies[BLACK];
+        // Update Occupancies (REMOVED FULL REBUILD LOOP)
+        // Incremental updates handled above.
 
         // --------------------------------------------------------------------
         // Update Accumulators (Logic for King Buckets)
@@ -631,7 +717,7 @@ impl GameState {
         if old_bucket_w != new_bucket_w {
             new_state.accumulator[WHITE].refresh(&new_state.bitboards, WHITE, new_k_sq_white);
         } else {
-            new_state.accumulator[WHITE].update(&added, &removed, WHITE, new_k_sq_white);
+            new_state.accumulator[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, new_k_sq_white);
         }
 
         // Check Black Accumulator
@@ -641,7 +727,7 @@ impl GameState {
         if old_bucket_b != new_bucket_b {
             new_state.accumulator[BLACK].refresh(&new_state.bitboards, BLACK, new_k_sq_black);
         } else {
-            new_state.accumulator[BLACK].update(&added, &removed, BLACK, new_k_sq_black);
+            new_state.accumulator[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, new_k_sq_black);
         }
 
         new_state
