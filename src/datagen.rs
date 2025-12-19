@@ -505,13 +505,8 @@ pub fn run_datagen(config: DatagenConfig) {
                     };
 
                     let clamped_score = search_score.clamp(-32000, 32000);
-                    let white_score = if state.side_to_move == WHITE {
-                        clamped_score
-                    } else {
-                        -clamped_score
-                    };
 
-                    positions.push((state.clone(), white_score as i16));
+                    positions.push((state.clone(), clamped_score as i16));
 
                     let next_state = state.make_move(final_move);
 

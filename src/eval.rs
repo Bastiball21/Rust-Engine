@@ -80,7 +80,7 @@ pub fn init_eval() {
 pub fn evaluate(state: &GameState) -> i32 {
     if crate::nnue::NETWORK.get().is_some() {
         let score = crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move]);
-        return if state.side_to_move == BLACK { -score } else { score };
+        return score;
     }
     let score = evaluate_hce(state);
     if state.side_to_move == BLACK { -score } else { score }
