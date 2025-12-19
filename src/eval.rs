@@ -82,7 +82,8 @@ pub fn evaluate(state: &GameState) -> i32 {
         let score = crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move]);
         return if state.side_to_move == BLACK { -score } else { score };
     }
-    evaluate_hce(state)
+    let score = evaluate_hce(state);
+    if state.side_to_move == BLACK { -score } else { score }
 }
 
 pub fn evaluate_hce(state: &GameState) -> i32 {
@@ -445,4 +446,40 @@ pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
     }
     // Tuning: just return optimized eval, assuming trace is only for fixed params
     evaluate_hce(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{GameState, BLACK};
+
+    #[test]
+    fn test_hce_evaluation_perspective() {
+        // Initialize globals
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        crate::eval::init_eval();
+        crate::threat::init_threat();
+
+        // 1. Black Winning Position (Black King safe, White King in corner, Black Queen attacking)
+        // FEN: 7k/8/8/8/8/8/8/K6q b - - 0 1
+        // Black to move.
+        let fen = "7k/8/8/8/8/8/8/K6q b - - 0 1";
+        let state = GameState::parse_fen(fen);
+
+        assert_eq!(state.side_to_move, BLACK);
+
+        // Ensure NNUE is NOT used
+        assert!(crate::nnue::NETWORK.get().is_none());
+
+        let score = evaluate(&state);
+
+        println!("Score for Black (Winning): {}", score);
+
+        // Score should be positive because it is relative to side to move (Black).
+        // Since Black is winning, score > 0.
+        // If bug exists, it returns absolute score (negative), so score < 0.
+        assert!(score > 0, "Score should be positive for winning side (Black), got {}", score);
+    }
 }
