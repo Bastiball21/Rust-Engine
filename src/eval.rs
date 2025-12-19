@@ -302,6 +302,11 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     while iter.0 != 0 {
          let sq = iter.get_lsb_index() as u8;
          iter.pop_bit(sq);
+
+         if sq == king_sqs[us] as u8 {
+            continue;
+         }
+
          let defended = attacks_by_side[us].get_bit(sq);
          let val = get_piece_value(state, sq);
 
@@ -452,6 +457,35 @@ pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
 mod tests {
     use super::*;
     use crate::state::{GameState, BLACK};
+
+    #[test]
+    fn test_king_hanging_bug() {
+        // Initialize globals
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        crate::eval::init_eval();
+        crate::threat::init_threat();
+
+        // Position: White King at e1, Black Rook at e2. King is in check.
+        // No other pieces. King is attacked by Rook.
+        // King square e1 is NOT defended by any white piece (no other pieces).
+        // Bug: King is marked as "hanging", penalty 20,000 applied.
+        let fen = "8/8/8/8/8/8/4r3/4K3 w - - 0 1";
+        let state = GameState::parse_fen(fen);
+
+        let score = evaluate(&state);
+        println!("Score: {}", score);
+
+        // Without fix, score should be roughly:
+        // Material: 0 vs 500 (Rook) -> -500
+        // Hanging King: -20,000
+        // Total: ~ -20,500
+        //
+        // With fix, score should be ~ -500 (plus/minus PST/positional).
+
+        assert!(score > -10000, "Score {} indicates King is treated as hanging (approx -20000)", score);
+    }
 
     #[test]
     fn test_hce_evaluation_perspective() {
