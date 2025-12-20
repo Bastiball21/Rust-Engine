@@ -1,5 +1,5 @@
-use crate::state::{GameState, Move, P, N, B, R, Q, K, r};
 use crate::movegen::MoveGenerator;
+use crate::state::{r, GameState, Move, B, K, N, P, Q, R};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
@@ -10,7 +10,9 @@ pub struct Book {
 
 impl Book {
     pub fn new() -> Self {
-        Book { positions: Vec::new() }
+        Book {
+            positions: Vec::new(),
+        }
     }
 
     pub fn load_from_file(path: &str, start_ply: usize) -> io::Result<Self> {
@@ -98,9 +100,9 @@ impl Book {
 
         // Last game
         if !current_moves.is_empty() {
-             if let Some(pos) = process_pgn_game(&current_moves, start_ply) {
-                 positions.push(pos);
-             }
+            if let Some(pos) = process_pgn_game(&current_moves, start_ply) {
+                positions.push(pos);
+            }
         }
 
         println!("Loaded {} positions from PGN", positions.len());
@@ -109,7 +111,8 @@ impl Book {
 }
 
 fn process_pgn_game(move_text: &str, stop_ply: usize) -> Option<GameState> {
-    let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let mut state =
+        GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
     // Remove comments { ... } and ( ... )
     // Simple regex replacement is hard without regex crate.
@@ -121,9 +124,17 @@ fn process_pgn_game(move_text: &str, stop_ply: usize) -> Option<GameState> {
     for c in move_text.chars() {
         match c {
             '{' => depth_brace += 1,
-            '}' => if depth_brace > 0 { depth_brace -= 1 },
+            '}' => {
+                if depth_brace > 0 {
+                    depth_brace -= 1
+                }
+            }
             '(' => depth_paren += 1,
-            ')' => if depth_paren > 0 { depth_paren -= 1 },
+            ')' => {
+                if depth_paren > 0 {
+                    depth_paren -= 1
+                }
+            }
             _ => {
                 if depth_brace == 0 && depth_paren == 0 {
                     clean_text.push(c);
@@ -229,14 +240,19 @@ fn parse_san(state: &GameState, san: &str) -> Option<Move> {
                 'Q' => Some(4),
                 _ => None,
             };
-            remainder = &remainder[..remainder.len()-1];
+            remainder = &remainder[..remainder.len() - 1];
         }
     }
 
     // Target Square: Last 2 chars of remainder should be file/rank
-    if remainder.len() < 2 { return None; }
-    let tgt_str = &remainder[remainder.len()-2..];
-    if let (Some(f), Some(rnk)) = (parse_file(tgt_str.chars().nth(0)?), parse_rank(tgt_str.chars().nth(1)?)) {
+    if remainder.len() < 2 {
+        return None;
+    }
+    let tgt_str = &remainder[remainder.len() - 2..];
+    if let (Some(f), Some(rnk)) = (
+        parse_file(tgt_str.chars().nth(0)?),
+        parse_rank(tgt_str.chars().nth(1)?),
+    ) {
         target_sq = rnk * 8 + f;
     } else {
         return None;
@@ -263,9 +279,9 @@ fn parse_san(state: &GameState, san: &str) -> Option<Move> {
     // If Pawn, and capture (x), we usually have file constraint (exd5)
     // If not explicit, the first char of original san was file.
     if piece_type == P && san.contains('x') && file_constraint.is_none() {
-         if let Some(f) = parse_file(san.chars().next()?) {
-             file_constraint = Some(f);
-         }
+        if let Some(f) = parse_file(san.chars().next()?) {
+            file_constraint = Some(f);
+        }
     }
 
     // Matching
@@ -275,22 +291,32 @@ fn parse_san(state: &GameState, san: &str) -> Option<Move> {
         let m = generator.list.moves[i];
 
         // 1. Match Target
-        if m.target != target_sq { continue; }
+        if m.target != target_sq {
+            continue;
+        }
 
         // 2. Match Piece Type (Moving Piece)
         let moved_piece = get_piece_at(state, m.source)?;
         let moved_type = moved_piece % 6;
-        if moved_type != piece_type { continue; }
+        if moved_type != piece_type {
+            continue;
+        }
 
         // 3. Match Promotion
-        if m.promotion != promotion { continue; }
+        if m.promotion != promotion {
+            continue;
+        }
 
         // 4. Match Constraints
         if let Some(f) = file_constraint {
-            if (m.source % 8) != f { continue; }
+            if (m.source % 8) != f {
+                continue;
+            }
         }
         if let Some(rnk) = rank_constraint {
-            if (m.source / 8) != rnk { continue; }
+            if (m.source / 8) != rnk {
+                continue;
+            }
         }
 
         // Found a candidate.
@@ -343,7 +369,11 @@ fn find_castling_move(state: &GameState, kingside: bool) -> Option<Move> {
     let mut generator = MoveGenerator::new();
     generator.generate_moves(state);
 
-    let k_start = if state.side_to_move == crate::state::WHITE { 4 } else { 60 };
+    let k_start = if state.side_to_move == crate::state::WHITE {
+        4
+    } else {
+        60
+    };
 
     for i in 0..generator.list.count {
         let m = generator.list.moves[i];
@@ -355,7 +385,11 @@ fn find_castling_move(state: &GameState, kingside: bool) -> Option<Move> {
             if let Some(p) = captured {
                 // p is friendly rook?
                 // White R=3, Black r=9.
-                let expected_rook = if state.side_to_move == crate::state::WHITE { R } else { r };
+                let expected_rook = if state.side_to_move == crate::state::WHITE {
+                    R
+                } else {
+                    r
+                };
                 if p == expected_rook {
                     // Check side
                     // Kingside: Rook file > King file
@@ -370,7 +404,7 @@ fn find_castling_move(state: &GameState, kingside: bool) -> Option<Move> {
                     let is_ks = r_file > k_file;
 
                     if is_ks == kingside {
-                         let next = state.make_move(m);
+                        let next = state.make_move(m);
                         if !crate::search::is_check(&next, state.side_to_move) {
                             return Some(m);
                         }

@@ -30,21 +30,21 @@ pub struct ThreatInfo {
     pub check_proximity: i32,
 
     // New Features
-    pub clustering_score: [i32; 2],   // Feature #5: Multiple attackers on key squares
+    pub clustering_score: [i32; 2], // Feature #5: Multiple attackers on key squares
     pub coordination_score: [i32; 2], // Feature #2: Batteries and connected pieces
 }
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ThreatDeltaScore {
-    pub threat_score: i32,     // Raw "threat created" score
-    pub dominance_bonus: i32,  // Dominant square bonus
-    pub defensive_bonus: i32,  // Defensive value (evasion)
-    pub is_tactical: bool,     // Whether this move is "Tactical" enough to affect search
+    pub threat_score: i32,    // Raw "threat created" score
+    pub dominance_bonus: i32, // Dominant square bonus
+    pub defensive_bonus: i32, // Defensive value (evasion)
+    pub is_tactical: bool,    // Whether this move is "Tactical" enough to affect search
 
     // New
-    pub prophylaxis_score: i32, // Feature #1
-    pub pawn_lever_score: i32,  // Feature #3
-    pub coordination_bonus: i32,// Feature #2 (Dynamic)
+    pub prophylaxis_score: i32,  // Feature #1
+    pub pawn_lever_score: i32,   // Feature #3
+    pub coordination_bonus: i32, // Feature #2 (Dynamic)
 }
 
 // --- INITIALIZATION ---
@@ -118,7 +118,9 @@ pub fn analyze_move_threat_impact(
 
     // 2. Defensive Move
     // If we are currently under threat, does this move help?
-    if current_threat.static_threat_score > 0 || current_threat.king_danger_score[state.side_to_move] > 50 {
+    if current_threat.static_threat_score > 0
+        || current_threat.king_danger_score[state.side_to_move] > 50
+    {
         delta.defensive_bonus = evaluate_defensive_move(state, mv, current_threat);
     }
 
@@ -138,7 +140,10 @@ pub fn analyze_move_threat_impact(
     delta.threat_score = estimate_threat_creation(state, mv);
 
     // Classification
-    if delta.threat_score > SACRIFICE_THREAT_THRESHOLD || delta.defensive_bonus > 50 || delta.dominance_bonus > 30 {
+    if delta.threat_score > SACRIFICE_THREAT_THRESHOLD
+        || delta.defensive_bonus > 50
+        || delta.dominance_bonus > 30
+    {
         delta.is_tactical = true;
     }
 
@@ -222,8 +227,9 @@ fn evaluate_defensive_move(state: &GameState, mv: Move, threat: &ThreatInfo) -> 
     if threat.king_danger_score[us] > 0 {
         let king_sq = state.bitboards[if us == WHITE { K } else { k }].get_lsb_index() as u8;
         let dist = (king_sq as i32 - mv.target as i32).abs(); // Crude distance
-        if dist < 16 { // Nearby
-             score += 10;
+        if dist < 16 {
+            // Nearby
+            score += 10;
         }
     }
 
@@ -258,11 +264,19 @@ fn get_pawn_lever_score(state: &GameState, mv: Move) -> i32 {
     // Bonus for advanced ranks (4,5 for White, 3,2 for Black)
     let rank = mv.target / 8;
     if us == WHITE {
-        if rank >= 3 { score += 10; }
-        if rank >= 4 { score += 10; }
+        if rank >= 3 {
+            score += 10;
+        }
+        if rank >= 4 {
+            score += 10;
+        }
     } else {
-        if rank <= 4 { score += 10; }
-        if rank <= 3 { score += 10; }
+        if rank <= 4 {
+            score += 10;
+        }
+        if rank <= 3 {
+            score += 10;
+        }
     }
 
     score
@@ -289,26 +303,33 @@ fn evaluate_coordination_impact(state: &GameState, mv: Move) -> i32 {
     let friendly_queens = state.bitboards[if us == WHITE { Q } else { q }];
 
     match piece % 6 {
-        3 => { // R
+        3 => {
+            // R
             // Check file/rank for other R or Q
             let attacks = bitboard::get_rook_attacks(mv.target, occ);
             if (attacks & (friendly_rooks | friendly_queens)).0 != 0 {
                 score += 15;
             }
-        },
-        2 => { // B
+        }
+        2 => {
+            // B
             let attacks = bitboard::get_bishop_attacks(mv.target, occ);
-             if (attacks & (friendly_bishops | friendly_queens)).0 != 0 {
+            if (attacks & (friendly_bishops | friendly_queens)).0 != 0 {
                 score += 15;
             }
-        },
-        4 => { // Q
+        }
+        4 => {
+            // Q
             let r_attacks = bitboard::get_rook_attacks(mv.target, occ);
-            if (r_attacks & friendly_rooks).0 != 0 { score += 15; }
+            if (r_attacks & friendly_rooks).0 != 0 {
+                score += 15;
+            }
 
             let b_attacks = bitboard::get_bishop_attacks(mv.target, occ);
-            if (b_attacks & friendly_bishops).0 != 0 { score += 15; }
-        },
+            if (b_attacks & friendly_bishops).0 != 0 {
+                score += 15;
+            }
+        }
         _ => {}
     }
 
@@ -326,8 +347,8 @@ fn estimate_threat_creation(state: &GameState, mv: Move) -> i32 {
     // We use the 'slow' generators or bitboard helpers for the specific square.
     // Optimization: Use `bitboard` helpers.
     let occ = state.occupancies[BOTH]; // Note: This is OLD occupancy. Target is empty (quiet move). Source is occupied.
-    // For slider attacks from 'target', we need to pretend source is empty and target is occupied.
-    // Update occupancy for ray cast
+                                       // For slider attacks from 'target', we need to pretend source is empty and target is occupied.
+                                       // Update occupancy for ray cast
     let mut new_occ = occ;
     new_occ.pop_bit(mv.source);
     new_occ.set_bit(mv.target);
@@ -358,7 +379,7 @@ fn estimate_threat_creation(state: &GameState, mv: Move) -> i32 {
         if victim > piece_type {
             score += (get_piece_value_simple(victim) - get_piece_value_simple(piece_type)) / 2;
         } else if victim == piece_type {
-             score += 20; // Attack equal value
+            score += 20; // Attack equal value
         }
     }
 
@@ -393,21 +414,24 @@ pub fn is_dominant_square(state: &GameState, sq: u8, piece_idx: usize, side: usi
                 // Supported by pawn?
                 let pawn = if side == WHITE { P } else { p };
                 let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << sq), 1 - side); // Attack FROM sq AS opponent = squares that attack sq? No.
-                // We want squares that attack `sq`.
-                // Pawns that attack `sq` are `pawn_attacks(sq, them)` relative to us.
-                // Correct: Pawn attacks from `sq` by US go forward.
-                // We want to know if `sq` is attacked by OUR pawns.
-                // `pawn_attacks(Bitboard(1<<sq), them)` gives squares that `sq` would attack if it was `them`.
-                // Wait. `pawn_attacks(bb, side)` returns squares attacked BY `bb` of `side`.
-                // Squares that attack `sq` with a pawn of `side`:
-                // If white pawn on A2 attacks B3. `pawn_attacks(A2, White)` -> B3.
-                // We want to know if `sq` is in `pawn_attacks(OurPawns, Us)`.
+                                                                                        // We want squares that attack `sq`.
+                                                                                        // Pawns that attack `sq` are `pawn_attacks(sq, them)` relative to us.
+                                                                                        // Correct: Pawn attacks from `sq` by US go forward.
+                                                                                        // We want to know if `sq` is attacked by OUR pawns.
+                                                                                        // `pawn_attacks(Bitboard(1<<sq), them)` gives squares that `sq` would attack if it was `them`.
+                                                                                        // Wait. `pawn_attacks(bb, side)` returns squares attacked BY `bb` of `side`.
+                                                                                        // Squares that attack `sq` with a pawn of `side`:
+                                                                                        // If white pawn on A2 attacks B3. `pawn_attacks(A2, White)` -> B3.
+                                                                                        // We want to know if `sq` is in `pawn_attacks(OurPawns, Us)`.
                 let our_pawns = state.bitboards[pawn];
-                let defended_by_pawn = (bitboard::pawn_attacks(our_pawns, side) & Bitboard(1<<sq)).0 != 0;
+                let defended_by_pawn =
+                    (bitboard::pawn_attacks(our_pawns, side) & Bitboard(1 << sq)).0 != 0;
 
                 if defended_by_pawn {
                     score += 25; // Supported knight
-                    if relative_rank >= 4 { score += 15; } // Deep outpost
+                    if relative_rank >= 4 {
+                        score += 15;
+                    } // Deep outpost
                 }
 
                 // Center Control
@@ -415,13 +439,13 @@ pub fn is_dominant_square(state: &GameState, sq: u8, piece_idx: usize, side: usi
                     score += 10;
                 }
             }
-        },
+        }
         B => {
-             // Center / Long Diagonals
-             if (file >= 2 && file <= 5) && (rank >= 2 && rank <= 5) {
-                 score += 10;
-             }
-        },
+            // Center / Long Diagonals
+            if (file >= 2 && file <= 5) && (rank >= 2 && rank <= 5) {
+                score += 10;
+            }
+        }
         R => {
             // Open File (No pawns of ours)
             let our_pawns = state.bitboards[if side == WHITE { P } else { p }];
@@ -434,7 +458,7 @@ pub fn is_dominant_square(state: &GameState, sq: u8, piece_idx: usize, side: usi
                     score += 30;
                 }
             }
-        },
+        }
         _ => {}
     }
 
@@ -478,7 +502,8 @@ fn compute_attacks_and_rings(state: &GameState, info: &mut ThreatInfo) {
 
         // Sliders (B/R/Q)
         let bishop_type = if side == WHITE { B } else { b };
-        let mut bishops = state.bitboards[bishop_type] | state.bitboards[if side == WHITE { Q } else { q }];
+        let mut bishops =
+            state.bitboards[bishop_type] | state.bitboards[if side == WHITE { Q } else { q }];
         while bishops.0 != 0 {
             let sq = bishops.get_lsb_index() as u8;
             bishops.pop_bit(sq);
@@ -486,7 +511,8 @@ fn compute_attacks_and_rings(state: &GameState, info: &mut ThreatInfo) {
         }
 
         let rook_type = if side == WHITE { R } else { r };
-        let mut rooks = state.bitboards[rook_type] | state.bitboards[if side == WHITE { Q } else { q }];
+        let mut rooks =
+            state.bitboards[rook_type] | state.bitboards[if side == WHITE { Q } else { q }];
         while rooks.0 != 0 {
             let sq = rooks.get_lsb_index() as u8;
             rooks.pop_bit(sq);
@@ -525,10 +551,11 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
             hanging_val += piece_val;
         } else {
             // Defended, but maybe attacked by lower value?
-            let pawn_attacks = bitboard::pawn_attacks(Bitboard(1<<sq), us); // Squares that attack 'sq' as pawn
+            let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << sq), us); // Squares that attack 'sq' as pawn
             if (pawn_attacks & state.bitboards[if them == WHITE { P } else { p }]).0 != 0 {
-                if piece_val > 100 { // > Pawn
-                     hanging_val += piece_val - 100;
+                if piece_val > 100 {
+                    // > Pawn
+                    hanging_val += piece_val - 100;
                 }
             }
         }
@@ -560,14 +587,14 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
         // Pawns
         let mut pawns = enemy_pawns;
         if (bitboard::pawn_attacks(pawns, enemy) & ring_3).0 != 0 {
-             while pawns.0 != 0 {
-                 let sq = pawns.get_lsb_index() as u8;
-                 pawns.pop_bit(sq);
-                 if (bitboard::pawn_attacks(Bitboard(1<<sq), enemy) & ring_3).0 != 0 {
-                     attacker_count += 1;
-                     attacker_weight += 10;
-                 }
-             }
+            while pawns.0 != 0 {
+                let sq = pawns.get_lsb_index() as u8;
+                pawns.pop_bit(sq);
+                if (bitboard::pawn_attacks(Bitboard(1 << sq), enemy) & ring_3).0 != 0 {
+                    attacker_count += 1;
+                    attacker_weight += 10;
+                }
+            }
         }
 
         // Knights
@@ -682,14 +709,14 @@ fn count_attackers(state: &GameState, sq: u8, side: usize) -> i32 {
     let pawns = state.bitboards[if side == WHITE { P } else { p }];
     if (bitboard::pawn_attacks(Bitboard(1 << sq), 1 - side) & pawns).0 != 0 {
         count += 1; // Count as 1 even if 2 pawns?
-        // bitboard::pawn_attacks(sq, us) gives squares that attack sq? No.
-        // bitboard::pawn_attacks(sq, them) returns captures.
-        // We use reverse logic: pawn_attacks(sq, US) -> squares that attack sq (if they are occupied by pawns)
-        // Correct.
-        // Ideally we count how many bits.
-        // But Pawn attacks are max 2.
-        // (bitboard::pawn_attacks(Bitboard(1 << sq), 1 - side) & pawns).count_bits();
-        // Since `pawn_attacks` returns a bitboard, we can count bits.
+                    // bitboard::pawn_attacks(sq, us) gives squares that attack sq? No.
+                    // bitboard::pawn_attacks(sq, them) returns captures.
+                    // We use reverse logic: pawn_attacks(sq, US) -> squares that attack sq (if they are occupied by pawns)
+                    // Correct.
+                    // Ideally we count how many bits.
+                    // But Pawn attacks are max 2.
+                    // (bitboard::pawn_attacks(Bitboard(1 << sq), 1 - side) & pawns).count_bits();
+                    // Since `pawn_attacks` returns a bitboard, we can count bits.
         let attackers = bitboard::pawn_attacks(Bitboard(1 << sq), 1 - side) & pawns;
         count += attackers.count_bits() as i32;
     }
@@ -700,11 +727,13 @@ fn count_attackers(state: &GameState, sq: u8, side: usize) -> i32 {
 
     let occ = state.occupancies[BOTH];
 
-    let b_q = state.bitboards[if side == WHITE { B } else { b }] | state.bitboards[if side == WHITE { Q } else { q }];
+    let b_q = state.bitboards[if side == WHITE { B } else { b }]
+        | state.bitboards[if side == WHITE { Q } else { q }];
     let b_att = bitboard::get_bishop_attacks(sq, occ) & b_q;
     count += b_att.count_bits() as i32;
 
-    let r_q = state.bitboards[if side == WHITE { R } else { r }] | state.bitboards[if side == WHITE { Q } else { q }];
+    let r_q = state.bitboards[if side == WHITE { R } else { r }]
+        | state.bitboards[if side == WHITE { Q } else { q }];
     let r_att = bitboard::get_rook_attacks(sq, occ) & r_q;
     count += r_att.count_bits() as i32;
 
@@ -742,7 +771,7 @@ fn compute_coordination(state: &GameState, info: &mut ThreatInfo) {
             let sq = b_iter.get_lsb_index() as u8;
             b_iter.pop_bit(sq);
             let att = bitboard::get_bishop_attacks(sq, occ);
-             if (att & (bishops | queens)).0 != 0 {
+            if (att & (bishops | queens)).0 != 0 {
                 score += 10;
             }
         }
@@ -787,10 +816,14 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
         let next_state = enemy_state.make_move(mv); // Now side to move is US again
 
         // Check legality
-        let enemy_king = if enemy_state.side_to_move == WHITE { K } else { k };
+        let enemy_king = if enemy_state.side_to_move == WHITE {
+            K
+        } else {
+            k
+        };
         let k_sq = next_state.bitboards[enemy_king].get_lsb_index() as u8;
         if movegen::is_square_attacked(&next_state, k_sq, next_state.side_to_move) {
-             continue; // Illegal move by enemy
+            continue; // Illegal move by enemy
         }
 
         // --- NEW: 2-Ply Lookahead for Critical Lines ---
@@ -842,33 +875,47 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
 
                 // Use a simplified logic: if we can capture the piece that just moved?
                 if my_mv.target == mv.target {
-                     // Recapture!
-                     let recovery_state = next_state.make_move(my_mv);
-                     // Check legality...
-                     let my_k = if next_state.side_to_move == WHITE { K } else { k };
-                     let mk_sq = recovery_state.bitboards[my_k].get_lsb_index() as u8;
-                     if !movegen::is_square_attacked(&recovery_state, mk_sq, recovery_state.side_to_move) {
-                          let rec_eval = eval::evaluate_hce(&recovery_state);
-                          if rec_eval > best_response_eval {
-                              best_response_eval = rec_eval;
-                          }
-                     }
+                    // Recapture!
+                    let recovery_state = next_state.make_move(my_mv);
+                    // Check legality...
+                    let my_k = if next_state.side_to_move == WHITE {
+                        K
+                    } else {
+                        k
+                    };
+                    let mk_sq = recovery_state.bitboards[my_k].get_lsb_index() as u8;
+                    if !movegen::is_square_attacked(
+                        &recovery_state,
+                        mk_sq,
+                        recovery_state.side_to_move,
+                    ) {
+                        let rec_eval = eval::evaluate_hce(&recovery_state);
+                        if rec_eval > best_response_eval {
+                            best_response_eval = rec_eval;
+                        }
+                    }
                 }
             }
 
             // If we found a recapture that saves the score, use that.
             if best_response_eval > -29000 {
                 // If recapture restores score close to original, then the threat is not real.
-                 let drop = current_eval - best_response_eval;
-                 if drop > max_drop { max_drop = drop; }
+                let drop = current_eval - best_response_eval;
+                if drop > max_drop {
+                    max_drop = drop;
+                }
             } else {
                 // No recapture? Use the raw drop (assuming we are screwed)
                 let drop = current_eval - temp_eval;
-                if drop > max_drop { max_drop = drop; }
+                if drop > max_drop {
+                    max_drop = drop;
+                }
             }
         } else {
-             let drop = current_eval - temp_eval;
-             if drop > max_drop { max_drop = drop; }
+            let drop = current_eval - temp_eval;
+            if drop > max_drop {
+                max_drop = drop;
+            }
         }
 
         if max_drop > 300 {
@@ -888,15 +935,15 @@ fn get_piece_value(state: &GameState, sq: u8) -> i32 {
     // Simple lookup
     for piece in 0..12 {
         if state.bitboards[piece].get_bit(sq) {
-             return match piece % 6 {
-                 0 => 100, // Pawn
-                 1 => 320, // Knight
-                 2 => 330, // Bishop
-                 3 => 500, // Rook
-                 4 => 900, // Queen
-                 5 => 20000, // King
-                 _ => 0
-             };
+            return match piece % 6 {
+                0 => 100,   // Pawn
+                1 => 320,   // Knight
+                2 => 330,   // Bishop
+                3 => 500,   // Rook
+                4 => 900,   // Queen
+                5 => 20000, // King
+                _ => 0,
+            };
         }
     }
     0
@@ -910,7 +957,7 @@ fn get_piece_value_simple(piece_type: usize) -> i32 {
         3 => 500,
         4 => 900,
         5 => 20000,
-        _ => 0
+        _ => 0,
     }
 }
 

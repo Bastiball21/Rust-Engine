@@ -1,18 +1,18 @@
 // src/datagen.rs
+use crate::book::Book;
+use crate::bullet_helper::convert_to_bullet;
 use crate::search;
-use crate::state::{GameState, WHITE, BLACK, P, N, B, R, Q, K, p, n, b, r, q, k};
+use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, K, N, P, Q, R, WHITE};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::{TranspositionTable, FLAG_EXACT};
-use std::fs::OpenOptions;
-use std::io::BufWriter;
-use std::sync::{atomic::AtomicBool, Arc};
-use std::thread;
-use std::sync::mpsc;
-use std::time::Instant;
-use crate::bullet_helper::convert_to_bullet;
 use bulletformat::BulletFormat;
 use std::collections::HashMap;
-use crate::book::Book;
+use std::fs::OpenOptions;
+use std::io::BufWriter;
+use std::sync::mpsc;
+use std::sync::{atomic::AtomicBool, Arc};
+use std::thread;
+use std::time::Instant;
 
 // --- Config Constants ---
 const MERCY_CP: i32 = 1000;
@@ -56,7 +56,9 @@ impl Rng {
     // Bias-free range (Lemire's method)
     fn range(&mut self, min: usize, max: usize) -> usize {
         let range = (max - min) as u64;
-        if range == 0 { return min; }
+        if range == 0 {
+            return min;
+        }
         let mut x = self.next_u64();
         let mut m = (x as u128).wrapping_mul(range as u128);
         let mut l = m as u64;
@@ -107,7 +109,9 @@ fn is_trivial_endgame(state: &GameState) -> bool {
     let b_pieces = state.occupancies[BLACK].0 & !state.bitboards[k].0;
 
     // K vs K
-    if w_pieces == 0 && b_pieces == 0 { return true; }
+    if w_pieces == 0 && b_pieces == 0 {
+        return true;
+    }
 
     let w_count = w_pieces.count_ones();
     let b_count = b_pieces.count_ones();
@@ -118,33 +122,40 @@ fn is_trivial_endgame(state: &GameState) -> bool {
         // Check for KN vs K or KB vs K.
         // Piece types: N=1, B=2. n=7, b=8.
         let is_minor = |bb: u64| {
-             // Check if the bit matches N or B bitboards
-             (bb & (state.bitboards[N].0 | state.bitboards[B].0 | state.bitboards[n].0 | state.bitboards[b].0)) != 0
+            // Check if the bit matches N or B bitboards
+            (bb & (state.bitboards[N].0
+                | state.bitboards[B].0
+                | state.bitboards[n].0
+                | state.bitboards[b].0))
+                != 0
         };
 
         if w_count == 1 {
-            if is_minor(w_pieces) { return true; }
+            if is_minor(w_pieces) {
+                return true;
+            }
         }
         if b_count == 1 {
-            if is_minor(b_pieces) { return true; }
+            if is_minor(b_pieces) {
+                return true;
+            }
         }
     }
 
     // KB vs KB (Minor vs Minor) - Drawish if bishops same color? Or just low value.
     if w_count == 1 && b_count == 1 {
-         // Check if both are minors
+        // Check if both are minors
         let is_minor_w = (w_pieces & (state.bitboards[N].0 | state.bitboards[B].0)) != 0;
         let is_minor_b = (b_pieces & (state.bitboards[n].0 | state.bitboards[b].0)) != 0;
 
         if is_minor_w && is_minor_b {
-             // KB vs KB, KN vs KN, KB vs KN...
-             return true;
+            // KB vs KB, KN vs KN, KB vs KN...
+            return true;
         }
     }
 
     false
 }
-
 
 pub fn run_datagen(config: DatagenConfig) {
     println!("Starting Datagen (Optimized)");
@@ -164,7 +175,7 @@ pub fn run_datagen(config: DatagenConfig) {
                 } else {
                     Some(Arc::new(bk))
                 }
-            },
+            }
             Err(e) => {
                 println!("ERROR: Failed to load book: {}", e);
                 return;
@@ -232,7 +243,10 @@ pub fn run_datagen(config: DatagenConfig) {
                 );
             }
         }
-        println!("Writer thread finished. Total games: {}, Total pos: {}", games_written, positions_written);
+        println!(
+            "Writer thread finished. Total games: {}, Total pos: {}",
+            games_written, positions_written
+        );
     });
 
     // Worker Threads
@@ -250,300 +264,338 @@ pub fn run_datagen(config: DatagenConfig) {
             .name(format!("datagen_worker_{}", t_id))
             .stack_size(8 * 1024 * 1024);
 
-        let handle = builder.spawn(move || {
-            let mut tt = TranspositionTable::new(32); // 32MB per thread
-            let mut rng = Rng::new(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 ^ (t_id as u64).wrapping_mul(0xDEADBEEF));
-            let mut search_data = search::SearchData::new();
+        let handle = builder
+            .spawn(move || {
+                let mut tt = TranspositionTable::new(32); // 32MB per thread
+                let mut rng = Rng::new(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64
+                        ^ (t_id as u64).wrapping_mul(0xDEADBEEF),
+                );
+                let mut search_data = search::SearchData::new();
 
-            // Reusable allocations
-            let mut rep_history: HashMap<u64, u8> = HashMap::with_capacity(300);
-            let mut history_vec: Vec<u64> = Vec::with_capacity(300);
-            let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
+                // Reusable allocations
+                let mut rep_history: HashMap<u64, u8> = HashMap::with_capacity(300);
+                let mut history_vec: Vec<u64> = Vec::with_capacity(300);
+                let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
 
-            for _ in 0..my_games {
-                // Clear reusable structures
-                tt.clear();
-                search_data.clear();
-                rep_history.clear();
-                history_vec.clear();
-                positions.clear();
+                for _ in 0..my_games {
+                    // Clear reusable structures
+                    tt.clear();
+                    search_data.clear();
+                    rep_history.clear();
+                    history_vec.clear();
+                    positions.clear();
 
-                // Select Start Position
-                let mut state;
-                let mut game_ply = 0;
+                    // Select Start Position
+                    let mut state;
+                    let mut game_ply = 0;
 
-                if let Some(ref bk) = book_arc {
-                    let idx = rng.range(0, bk.positions.len());
-                    state = bk.positions[idx];
-                    // Book positions are assumed to be "ply 0" of the generation sequence.
-                } else {
-                    state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                }
+                    if let Some(ref bk) = book_arc {
+                        let idx = rng.range(0, bk.positions.len());
+                        state = bk.positions[idx];
+                        // Book positions are assumed to be "ply 0" of the generation sequence.
+                    } else {
+                        state = GameState::parse_fen(
+                            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                        );
+                    }
 
-                let mut result_val = 0.5;
-                let mut finished = false;
+                    let mut result_val = 0.5;
+                    let mut finished = false;
 
-                // Adjudication Counters
-                let mut mercy_counter = 0;
-                let mut draw_counter = 0;
+                    // Adjudication Counters
+                    let mut mercy_counter = 0;
+                    let mut draw_counter = 0;
 
-                rep_history.insert(state.hash, 1);
-                history_vec.push(state.hash);
+                    rep_history.insert(state.hash, 1);
+                    history_vec.push(state.hash);
 
-                // --- 1. Random Move Phase ---
-                // Skip if using book (as per plan), otherwise 8-9 plies.
-                let mut abort_game = false;
+                    // --- 1. Random Move Phase ---
+                    // Skip if using book (as per plan), otherwise 8-9 plies.
+                    let mut abort_game = false;
 
-                if book_arc.is_none() {
-                    let random_plies = 8 + rng.range(0, 2); // 8 or 9
+                    if book_arc.is_none() {
+                        let random_plies = 8 + rng.range(0, 2); // 8 or 9
 
-                    for _ in 0..random_plies {
+                        for _ in 0..random_plies {
+                            let mut moves = crate::movegen::MoveGenerator::new();
+                            moves.generate_moves(&state);
+
+                            if moves.list.count == 0 {
+                                abort_game = true;
+                                break;
+                            }
+
+                            // Collect all legal moves first
+                            let mut legal_moves = Vec::with_capacity(64);
+
+                            for i in 0..moves.list.count {
+                                let m = moves.list.moves[i];
+                                let next_state = state.make_move(m);
+                                if !crate::search::is_check(&next_state, state.side_to_move) {
+                                    legal_moves.push(m);
+                                }
+                            }
+
+                            if legal_moves.is_empty() {
+                                abort_game = true;
+                                break;
+                            }
+
+                            // Pick one uniformly
+                            let idx = rng.range(0, legal_moves.len());
+                            let m = legal_moves[idx];
+
+                            state = state.make_move(m);
+                            game_ply += 1;
+
+                            *rep_history.entry(state.hash).or_insert(0) += 1;
+                            history_vec.push(state.hash);
+
+                            if state.halfmove_clock >= 100 {
+                                abort_game = true;
+                                break;
+                            }
+                            if is_trivial_endgame(&state) {
+                                abort_game = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if abort_game {
+                        continue;
+                    }
+
+                    if is_trivial_endgame(&state) {
+                        continue;
+                    }
+
+                    // --- 2. Real Search Loop ---
+                    loop {
+                        // Repetition Check
+                        if let Some(&count) = rep_history.get(&state.hash) {
+                            if count >= 3 {
+                                result_val = 0.5;
+                                finished = true;
+                                break;
+                            }
+                        }
+                        if state.halfmove_clock >= 100 {
+                            result_val = 0.5;
+                            finished = true;
+                            break;
+                        }
+
                         let mut moves = crate::movegen::MoveGenerator::new();
                         moves.generate_moves(&state);
 
                         if moves.list.count == 0 {
+                            if crate::search::is_in_check(&state) {
+                                result_val = if state.side_to_move == WHITE {
+                                    0.0
+                                } else {
+                                    1.0
+                                };
+                            } else {
+                                result_val = 0.5;
+                            }
+                            finished = true;
+                            break;
+                        }
+
+                        // Trivial Endgame Check
+                        if is_trivial_endgame(&state) {
+                            result_val = 0.5;
+                            finished = true;
+                            break;
+                        }
+
+                        // Dynamic Node Limits
+                        let mut min_nodes = 15_000;
+                        let mut max_nodes = 40_000;
+
+                        let mut is_losing = false;
+                        let mut is_winning_or_decided = false;
+
+                        if let Some((score, _, _, _)) = tt.probe_data(state.hash) {
+                            if score <= LOSING_SCORE_CP {
+                                is_losing = true;
+                            }
+                            if score.abs() >= HIGH_SCORE_CP {
+                                is_winning_or_decided = true;
+                            }
+                        }
+
+                        if is_losing {
+                            min_nodes = 1000;
+                            max_nodes = 2000;
+                        } else if is_winning_or_decided {
+                            min_nodes = 2000;
+                            max_nodes = 5000;
+                        } else if game_ply < 20 {
+                            min_nodes = 2000;
+                            max_nodes = 5000;
+                        } else if is_low_material(&state) {
+                            min_nodes = 2000;
+                            max_nodes = 8000;
+                        }
+
+                        let node_limit = rng.range(min_nodes, max_nodes) as u64;
+
+                        // TT Probe Logic for fast exit
+                        let mut used_tt_hit = false;
+                        let mut search_score = 0;
+                        let mut best_move = None;
+
+                        if let Some((tt_score, tt_depth, tt_flag, tt_move)) =
+                            tt.probe_data(state.hash)
+                        {
+                            if tt_flag == FLAG_EXACT && tt_depth >= depth_config {
+                                search_score = tt_score;
+                                best_move = tt_move;
+                                used_tt_hit = true;
+                            }
+                        }
+
+                        if !used_tt_hit {
+                            let tm = TimeManager::new(TimeControl::Infinite, state.side_to_move, 0);
+                            let (s, m) = search::search(
+                                &state,
+                                tm,
+                                &tt,
+                                Arc::new(AtomicBool::new(false)),
+                                depth_config,
+                                false,
+                                history_vec.clone(),
+                                &mut search_data,
+                                Some(node_limit),
+                            );
+                            search_score = s;
+                            best_move = m;
+                        }
+
+                        // --- Adjudication Logic ---
+
+                        // 1. Mercy Rule
+                        if search_score.abs() >= MERCY_CP {
+                            mercy_counter += 1;
+                        } else {
+                            mercy_counter = 0;
+                        }
+
+                        if mercy_counter >= MERCY_PLIES {
+                            if search_score > 0 {
+                                result_val = if state.side_to_move == WHITE {
+                                    1.0
+                                } else {
+                                    0.0
+                                };
+                            } else {
+                                result_val = if state.side_to_move == WHITE {
+                                    0.0
+                                } else {
+                                    1.0
+                                };
+                            }
+                            finished = true;
+                            break;
+                        }
+
+                        // 2. Early Draw Adjudication
+                        if game_ply >= DRAW_START_PLY {
+                            if search_score.abs() <= DRAW_CP {
+                                draw_counter += 1;
+                            } else {
+                                draw_counter = 0;
+                            }
+
+                            if draw_counter >= DRAW_PLIES {
+                                result_val = 0.5;
+                                finished = true;
+                                break;
+                            }
+                        }
+
+                        // Mate Check
+                        if search_score.abs() > 20000 {
+                            if search_score > 0 {
+                                result_val = if state.side_to_move == WHITE {
+                                    1.0
+                                } else {
+                                    0.0
+                                };
+                            } else {
+                                result_val = if state.side_to_move == WHITE {
+                                    0.0
+                                } else {
+                                    1.0
+                                };
+                            }
+                            finished = true;
+                            break;
+                        }
+
+                        let final_move = if let Some(m) = best_move {
+                            m
+                        } else {
+                            // Fallback: Pick first legal.
+                            let mut valid = moves.list.moves[0];
+                            for i in 0..moves.list.count {
+                                let m = moves.list.moves[i];
+                                let next_state = state.make_move(m);
+                                if !crate::search::is_check(&next_state, state.side_to_move) {
+                                    valid = m;
+                                    break;
+                                }
+                            }
+                            valid
+                        };
+
+                        let clamped_score = search_score.clamp(-32000, 32000);
+
+                        positions.push((state.clone(), clamped_score as i16));
+
+                        let next_state = state.make_move(final_move);
+
+                        if crate::search::is_check(&next_state, state.side_to_move) {
                             abort_game = true;
                             break;
                         }
 
-                        // Collect all legal moves first
-                        let mut legal_moves = Vec::with_capacity(64);
-
-                        for i in 0..moves.list.count {
-                            let m = moves.list.moves[i];
-                            let next_state = state.make_move(m);
-                            if !crate::search::is_check(&next_state, state.side_to_move) {
-                                legal_moves.push(m);
-                            }
-                        }
-
-                        if legal_moves.is_empty() {
-                             abort_game = true;
-                             break;
-                        }
-
-                        // Pick one uniformly
-                        let idx = rng.range(0, legal_moves.len());
-                        let m = legal_moves[idx];
-
-                        state = state.make_move(m);
+                        state = next_state;
                         game_ply += 1;
-
                         *rep_history.entry(state.hash).or_insert(0) += 1;
                         history_vec.push(state.hash);
 
-                        if state.halfmove_clock >= 100 { abort_game = true; break; }
-                        if is_trivial_endgame(&state) { abort_game = true; break; }
-                    }
-                }
-
-                if abort_game {
-                    continue;
-                }
-
-                if is_trivial_endgame(&state) {
-                    continue;
-                }
-
-                // --- 2. Real Search Loop ---
-                loop {
-                    // Repetition Check
-                    if let Some(&count) = rep_history.get(&state.hash) {
-                         if count >= 3 {
-                             result_val = 0.5;
-                             finished = true;
-                             break;
-                         }
-                    }
-                    if state.halfmove_clock >= 100 {
-                        result_val = 0.5;
-                        finished = true;
-                        break;
-                    }
-
-                    let mut moves = crate::movegen::MoveGenerator::new();
-                    moves.generate_moves(&state);
-
-                    if moves.list.count == 0 {
-                        if crate::search::is_in_check(&state) {
-                            result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
-                        } else {
+                        if history_vec.len() > 600 {
                             result_val = 0.5;
+                            finished = true;
+                            break;
                         }
-                        finished = true;
-                        break;
                     }
 
-                    // Trivial Endgame Check
-                    if is_trivial_endgame(&state) {
-                        result_val = 0.5;
-                        finished = true;
-                        break;
+                    if abort_game {
+                        continue;
                     }
 
-                    // Dynamic Node Limits
-                    let mut min_nodes = 15_000;
-                    let mut max_nodes = 40_000;
-
-                    let mut is_losing = false;
-                    let mut is_winning_or_decided = false;
-
-                    if let Some((score, _, _, _)) = tt.probe_data(state.hash) {
-                         if score <= LOSING_SCORE_CP {
-                             is_losing = true;
-                         }
-                         if score.abs() >= HIGH_SCORE_CP {
-                             is_winning_or_decided = true;
-                         }
-                    }
-
-                    if is_losing {
-                         min_nodes = 1000;
-                         max_nodes = 2000;
-                    } else if is_winning_or_decided {
-                         min_nodes = 2000;
-                         max_nodes = 5000;
-                    } else if game_ply < 20 {
-                         min_nodes = 2000;
-                         max_nodes = 5000;
-                    } else if is_low_material(&state) {
-                         min_nodes = 2000;
-                         max_nodes = 8000;
-                    }
-
-                    let node_limit = rng.range(min_nodes, max_nodes) as u64;
-
-                    // TT Probe Logic for fast exit
-                    let mut used_tt_hit = false;
-                    let mut search_score = 0;
-                    let mut best_move = None;
-
-                    if let Some((tt_score, tt_depth, tt_flag, tt_move)) = tt.probe_data(state.hash) {
-                         if tt_flag == FLAG_EXACT && tt_depth >= depth_config {
-                             search_score = tt_score;
-                             best_move = tt_move;
-                             used_tt_hit = true;
-                         }
-                    }
-
-                    if !used_tt_hit {
-                        let tm = TimeManager::new(TimeControl::Infinite, state.side_to_move, 0);
-                        let (s, m) = search::search(
-                            &state,
-                            tm,
-                            &tt,
-                            Arc::new(AtomicBool::new(false)),
-                            depth_config,
-                            false,
-                            history_vec.clone(),
-                            &mut search_data,
-                            Some(node_limit),
-                        );
-                        search_score = s;
-                        best_move = m;
-                    }
-
-                    // --- Adjudication Logic ---
-
-                    // 1. Mercy Rule
-                    if search_score.abs() >= MERCY_CP {
-                        mercy_counter += 1;
-                    } else {
-                        mercy_counter = 0;
-                    }
-
-                    if mercy_counter >= MERCY_PLIES {
-                        if search_score > 0 {
-                             result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
-                        } else {
-                             result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
+                    if finished {
+                        let mut game_data = Vec::with_capacity(positions.len());
+                        for (pos_state, score) in positions.drain(..) {
+                            let board = convert_to_bullet(&pos_state, score, result_val);
+                            game_data.push(board);
                         }
-                        finished = true;
-                        break;
-                    }
 
-                    // 2. Early Draw Adjudication
-                    if game_ply >= DRAW_START_PLY {
-                         if search_score.abs() <= DRAW_CP {
-                             draw_counter += 1;
-                         } else {
-                             draw_counter = 0;
-                         }
-
-                         if draw_counter >= DRAW_PLIES {
-                             result_val = 0.5;
-                             finished = true;
-                             break;
-                         }
-                    }
-
-                    // Mate Check
-                    if search_score.abs() > 20000 {
-                         if search_score > 0 {
-                             result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
-                         } else {
-                             result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
-                         }
-                         finished = true;
-                         break;
-                    }
-
-                    let final_move = if let Some(m) = best_move {
-                        m
-                    } else {
-                        // Fallback: Pick first legal.
-                        let mut valid = moves.list.moves[0];
-                        for i in 0..moves.list.count {
-                            let m = moves.list.moves[i];
-                            let next_state = state.make_move(m);
-                            if !crate::search::is_check(&next_state, state.side_to_move) {
-                                valid = m;
-                                break;
-                            }
+                        if !game_data.is_empty() {
+                            tx.send(game_data).unwrap();
                         }
-                        valid
-                    };
-
-                    let clamped_score = search_score.clamp(-32000, 32000);
-
-                    positions.push((state.clone(), clamped_score as i16));
-
-                    let next_state = state.make_move(final_move);
-
-                    if crate::search::is_check(&next_state, state.side_to_move) {
-                        abort_game = true;
-                        break;
-                    }
-
-                    state = next_state;
-                    game_ply += 1;
-                    *rep_history.entry(state.hash).or_insert(0) += 1;
-                    history_vec.push(state.hash);
-
-                    if history_vec.len() > 600 {
-                        result_val = 0.5;
-                        finished = true;
-                        break;
                     }
                 }
-
-                if abort_game {
-                    continue;
-                }
-
-                if finished {
-                    let mut game_data = Vec::with_capacity(positions.len());
-                    for (pos_state, score) in positions.drain(..) {
-                        let board = convert_to_bullet(&pos_state, score, result_val);
-                        game_data.push(board);
-                    }
-
-                    if !game_data.is_empty() {
-                         tx.send(game_data).unwrap();
-                    }
-                }
-            }
-        }).unwrap();
+            })
+            .unwrap();
         handles.push(handle);
     }
 

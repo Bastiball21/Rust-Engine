@@ -53,7 +53,17 @@ pub fn run_mate_suite() {
         };
 
         let mut search_data = search::SearchData::new();
-        search::search(&state, tm, &tt, stop.clone(), search_depth, true, vec![], &mut search_data, None);
+        search::search(
+            &state,
+            tm,
+            &tt,
+            stop.clone(),
+            search_depth,
+            true,
+            vec![],
+            &mut search_data,
+            None,
+        );
 
         println!("(Expected: mate {})", expected_ply);
         tt.clear();

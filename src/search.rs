@@ -3,7 +3,7 @@ use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::movegen::{self, MoveGenerator};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
-use crate::threat::{self, ThreatInfo, ThreatDeltaScore};
+use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
 use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,12 +142,12 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
     // If so, treat as "not giving check" via direct attack (King doesn't attack enemy king)
     // But we must perform slow check because castling is complex.
     if piece == K || piece == k {
-         // If target has friendly rook, castling
-         let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
-         if friendly_rooks.get_bit(mv.target) {
-              // It's castling. Fallback to slow check.
-              return false;
-         }
+        // If target has friendly rook, castling
+        let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
+        if friendly_rooks.get_bit(mv.target) {
+            // It's castling. Fallback to slow check.
+            return false;
+        }
     }
 
     let attacks = match piece {
@@ -606,7 +606,14 @@ pub fn search(
 ) -> (i32, Option<Move>) {
     let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
-    let mut info = Box::new(SearchInfo::new(search_data, tm, stop_signal, tt, main_thread, node_limit));
+    let mut info = Box::new(SearchInfo::new(
+        search_data,
+        tm,
+        stop_signal,
+        tt,
+        main_thread,
+        node_limit,
+    ));
     let mut path = history;
     let mut last_score = 0;
 
@@ -664,23 +671,25 @@ pub fn search(
 
         // OPTIMIZATION: Dynamic Time Management & Verification
         if main_thread && depth > 5 {
-             // Verification Logic:
-             // If we are in the "verification range" (depth 15-32) and the best move is tactical,
-             // or the search is unstable, we extend the soft time limit.
-             if depth >= 15 && depth <= 32 {
-                 if let Some(bm) = best_move {
-                     let is_tactical = bm.is_capture || bm.promotion.is_some() || is_check(state, state.side_to_move); // Note: state side is us, checks are checks we Give? No.
-                     // `best_move` is a move FROM `state`.
-                     // `is_capture` and `promotion` are flags in `Move`.
-                     // To check if it gives check, we need `moves_gives_check`.
-                     let gives_check = moves_gives_check(state, bm);
+            // Verification Logic:
+            // If we are in the "verification range" (depth 15-32) and the best move is tactical,
+            // or the search is unstable, we extend the soft time limit.
+            if depth >= 15 && depth <= 32 {
+                if let Some(bm) = best_move {
+                    let is_tactical = bm.is_capture
+                        || bm.promotion.is_some()
+                        || is_check(state, state.side_to_move); // Note: state side is us, checks are checks we Give? No.
+                                                                // `best_move` is a move FROM `state`.
+                                                                // `is_capture` and `promotion` are flags in `Move`.
+                                                                // To check if it gives check, we need `moves_gives_check`.
+                    let gives_check = moves_gives_check(state, bm);
 
-                     if is_tactical || gives_check {
-                         // Extend soft limit by 20%
-                         info.time_manager.soft_limit += info.time_manager.soft_limit / 5;
-                     }
-                 }
-             }
+                    if is_tactical || gives_check {
+                        // Extend soft limit by 20%
+                        info.time_manager.soft_limit += info.time_manager.soft_limit / 5;
+                    }
+                }
+            }
         }
 
         if main_thread && info.time_manager.check_soft_limit() {
@@ -840,12 +849,12 @@ fn negamax(
     // Tactical Extensions: Pawn to 7th
     // If the previous move put a pawn on the 7th rank (for White) or 2nd rank (for Black), extend.
     if let Some(pm) = prev_move {
-         let p_piece = get_piece_type_safe(state, pm.target);
-         let rank = pm.target / 8;
-         // P=0, p=6. Rank 6 is 7th, Rank 1 is 2nd.
-         if (p_piece == P && rank == 6) || (p_piece == p && rank == 1) {
-             extensions += 1;
-         }
+        let p_piece = get_piece_type_safe(state, pm.target);
+        let rank = pm.target / 8;
+        // P=0, p=6. Rank 6 is 7th, Rank 1 is 2nd.
+        if (p_piece == P && rank == 6) || (p_piece == p && rank == 1) {
+            extensions += 1;
+        }
     }
 
     let mut tt_move = None;
@@ -1129,7 +1138,8 @@ fn negamax(
                 }
 
                 if ply < MAX_PLY
-                    && (info.data.killers[ply][0] == Some(mv) || info.data.killers[ply][1] == Some(mv))
+                    && (info.data.killers[ply][0] == Some(mv)
+                        || info.data.killers[ply][1] == Some(mv))
                 {
                     reduction = reduction.saturating_sub(1);
                 }
@@ -1229,20 +1239,20 @@ fn negamax(
         } else {
             // HISTORY PENALTY
             if is_quiet {
-                 let from = mv.source as usize;
-                 let to = mv.target as usize;
-                 let bonus = (new_depth as i32) * (new_depth as i32);
-                 // Penalize logic: -bonus
-                 update_history(&mut info.data.history[from][to], -bonus);
+                let from = mv.source as usize;
+                let to = mv.target as usize;
+                let bonus = (new_depth as i32) * (new_depth as i32);
+                // Penalize logic: -bonus
+                update_history(&mut info.data.history[from][to], -bonus);
 
-                 if let Some(pm) = prev_move {
-                        let p_piece = get_piece_type_safe(state, pm.target);
-                        let p_to = pm.target as usize;
-                        let idx = p_piece * 64 + p_to;
-                        let c_piece = get_piece_type_safe(state, mv.source);
-                        let c_to = mv.target as usize;
-                        update_history(&mut info.data.cont_history[idx][c_piece][c_to], -bonus);
-                 }
+                if let Some(pm) = prev_move {
+                    let p_piece = get_piece_type_safe(state, pm.target);
+                    let p_to = pm.target as usize;
+                    let idx = p_piece * 64 + p_to;
+                    let c_piece = get_piece_type_safe(state, mv.source);
+                    let c_to = mv.target as usize;
+                    update_history(&mut info.data.cont_history[idx][c_piece][c_to], -bonus);
+                }
             }
         }
 
@@ -1322,13 +1332,25 @@ pub fn format_move_uci(mv: Move, state: &GameState) -> String {
                       (state.bitboards[if piece == 5 { R } else { r }].get_bit(to));
 
     if !chess960 && is_castling {
-        if from == 4 { // White King on e1
+        if from == 4 {
+            // White King on e1
             // Check Kingside (target > source or file compare)
-            if to > from { to = 6; } // g1
-            else { to = 2; } // c1
-        } else if from == 60 { // Black King on e8
-            if to > from { to = 62; } // g8
-            else { to = 58; } // c8
+            if to > from {
+                to = 6;
+            }
+            // g1
+            else {
+                to = 2;
+            } // c1
+        } else if from == 60 {
+            // Black King on e8
+            if to > from {
+                to = 62;
+            }
+            // g8
+            else {
+                to = 58;
+            } // c8
         }
     }
 

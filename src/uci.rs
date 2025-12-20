@@ -1,6 +1,6 @@
 use crate::movegen::{self, MoveGenerator};
 use crate::search;
-use crate::state::{GameState, Move, K, k};
+use crate::state::{k, GameState, Move, K};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::TranspositionTable;
 use std::io::{self, BufRead};
@@ -133,21 +133,25 @@ pub fn uci_loop() {
                         .name(format!("search_worker_{}", i))
                         .stack_size(8 * 1024 * 1024);
 
-                    search_threads.push(builder.spawn(move || {
-                        let mut search_data = search::SearchData::new();
-                        // Pass reference to the TT inside the Arc
-                        search::search(
-                            &safe_state,
-                            tm_clone,
-                            &tt_clone,
-                            stop_clone,
-                            depth,
-                            is_main,
-                            history_clone,
-                            &mut search_data,
-                            None,
-                        );
-                    }).unwrap());
+                    search_threads.push(
+                        builder
+                            .spawn(move || {
+                                let mut search_data = search::SearchData::new();
+                                // Pass reference to the TT inside the Arc
+                                search::search(
+                                    &safe_state,
+                                    tm_clone,
+                                    &tt_clone,
+                                    stop_clone,
+                                    depth,
+                                    is_main,
+                                    history_clone,
+                                    &mut search_data,
+                                    None,
+                                );
+                            })
+                            .unwrap(),
+                    );
                 }
             }
             "stop" => {
@@ -317,10 +321,10 @@ fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
 
             if expected_rook_sq != 64 {
                 // Check if King->Rook move exists in generator
-                 for i in 0..generator.list.count {
+                for i in 0..generator.list.count {
                     let mv = generator.list.moves[i];
                     if mv.source == src && mv.target == expected_rook_sq {
-                         return Some(mv);
+                        return Some(mv);
                     }
                 }
             }

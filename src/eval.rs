@@ -73,17 +73,23 @@ impl Trace {
 
 // --- INIT ---
 
-pub fn init_eval() {
-}
+pub fn init_eval() {}
 
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState) -> i32 {
     if crate::nnue::NETWORK.get().is_some() {
-        let score = crate::nnue::evaluate(&state.accumulator[state.side_to_move], &state.accumulator[1 - state.side_to_move]);
+        let score = crate::nnue::evaluate(
+            &state.accumulator[state.side_to_move],
+            &state.accumulator[1 - state.side_to_move],
+        );
         return score;
     }
     let score = evaluate_hce(state);
-    if state.side_to_move == BLACK { -score } else { score }
+    if state.side_to_move == BLACK {
+        -score
+    } else {
+        score
+    }
 }
 
 pub fn evaluate_hce(state: &GameState) -> i32 {
@@ -100,15 +106,19 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     let mut king_rings = [Bitboard(0); 2];
     let mut king_sqs = [0usize; 2];
     for side in [WHITE, BLACK] {
-         let k_bb = state.bitboards[if side == WHITE { K } else { k }];
-         let k_sq = if k_bb.0 != 0 { k_bb.get_lsb_index() as usize } else { 0 };
-         king_sqs[side] = k_sq;
-         king_rings[side] = crate::movegen::get_king_attacks(k_sq as u8);
+        let k_bb = state.bitboards[if side == WHITE { K } else { k }];
+        let k_sq = if k_bb.0 != 0 {
+            k_bb.get_lsb_index() as usize
+        } else {
+            0
+        };
+        king_sqs[side] = k_sq;
+        king_rings[side] = crate::movegen::get_king_attacks(k_sq as u8);
     }
 
     let mut attacks_by_side = [Bitboard(0); 2];
     let mut king_attack_weight = [0; 2]; // Accumulated danger score
-    let mut king_attack_count = [0; 2];  // Count of attackers on ring
+    let mut king_attack_count = [0; 2]; // Count of attackers on ring
     let mut ring_attack_counts = [[0u8; 64]; 2]; // [Side][Square]
 
     let mut coordination_score = [0; 2];
@@ -122,22 +132,36 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
 
         let king_ring_them = king_rings[them];
 
+        // ⚡ Bolt: Hoist invariant bitboard lookups
+        let us_occupancies = state.occupancies[us];
+        let my_rooks = state.bitboards[if us == WHITE { R } else { r }];
+        let my_bishops = state.bitboards[if us == WHITE { B } else { b }];
+        let my_queens = state.bitboards[if us == WHITE { Q } else { q }];
+
         // Iterate Piece Types
         for piece_type in 0..6 {
-            let piece_idx = if us == WHITE { piece_type } else { piece_type + 6 };
+            let piece_idx = if us == WHITE {
+                piece_type
+            } else {
+                piece_type + 6
+            };
             let mut bb = state.bitboards[piece_idx];
 
             // Phase
             let count = bb.count_bits() as i32;
             phase += count * PHASE_WEIGHTS[piece_type];
 
+            // ⚡ Bolt: Hoist atomic loads
+            let base_mg = MG_VALS[piece_type].load(Ordering::Relaxed);
+            let base_eg = EG_VALS[piece_type].load(Ordering::Relaxed);
+
             while bb.0 != 0 {
                 let sq = bb.get_lsb_index() as usize;
                 bb.pop_bit(sq as u8);
 
                 // 1. Fixed Material + PST
-                mg += (MG_VALS[piece_type].load(Ordering::Relaxed) + get_pst(piece_type, sq, us, true)) * us_sign;
-                eg += (EG_VALS[piece_type].load(Ordering::Relaxed) + get_pst(piece_type, sq, us, false)) * us_sign;
+                mg += (base_mg + get_pst(piece_type, sq, us, true)) * us_sign;
+                eg += (base_eg + get_pst(piece_type, sq, us, false)) * us_sign;
 
                 // 2. Attack Generation
                 let attacks = match piece_type {
@@ -147,19 +171,25 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
                     Q => bitboard::get_queen_attacks(sq as u8, occ),
                     K => crate::movegen::get_king_attacks(sq as u8),
                     P => bitboard::pawn_attacks(Bitboard(1 << sq), us),
-                    _ => Bitboard(0)
+                    _ => Bitboard(0),
                 };
 
                 attacks_by_side[us] = attacks_by_side[us] | attacks;
 
                 // 3. Mobility
                 if piece_type != P && piece_type != K {
-                     let mob_cnt = (attacks & !state.occupancies[us]).count_bits() as i32;
-                     let mob_idx = match piece_type { N=>0, B=>1, R=>2, Q=>3, _=>0 };
-                     let (offset, weight) = MOBILITY_BONUS[mob_idx];
-                     let s = (mob_cnt - offset) * weight;
-                     mg += s * us_sign;
-                     eg += s * us_sign;
+                    let mob_cnt = (attacks & !us_occupancies).count_bits() as i32;
+                    let mob_idx = match piece_type {
+                        N => 0,
+                        B => 1,
+                        R => 2,
+                        Q => 3,
+                        _ => 0,
+                    };
+                    let (offset, weight) = MOBILITY_BONUS[mob_idx];
+                    let s = (mob_cnt - offset) * weight;
+                    mg += s * us_sign;
+                    eg += s * us_sign;
                 }
 
                 // 4. Dominance (N, B, R)
@@ -174,21 +204,28 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
                 // Close -> Bad for Enemy King -> Good for Us.
                 // We add PENALTY to US score (because penalty is positive value).
                 if piece_type != K && piece_type != P {
-                     let k_file = king_sqs[them] % 8;
-                     let k_rank = king_sqs[them] / 8;
-                     let d_file = (k_file as i32 - (sq % 8) as i32).abs();
-                     let d_rank = (k_rank as i32 - (sq / 8) as i32).abs();
-                     let dist = d_file.max(d_rank) as usize;
-                     let pen = KING_TROPISM_PENALTY[dist];
-                     mg += pen * us_sign;
-                     eg += (pen / 2) * us_sign;
+                    let k_file = king_sqs[them] % 8;
+                    let k_rank = king_sqs[them] / 8;
+                    let d_file = (k_file as i32 - (sq % 8) as i32).abs();
+                    let d_rank = (k_rank as i32 - (sq / 8) as i32).abs();
+                    let dist = d_file.max(d_rank) as usize;
+                    let pen = KING_TROPISM_PENALTY[dist];
+                    mg += pen * us_sign;
+                    eg += (pen / 2) * us_sign;
                 }
 
                 // 6. King Ring Attacks
                 if piece_type != K {
                     let att_on_ring = attacks & king_ring_them;
                     if att_on_ring.0 != 0 {
-                        let weight = match piece_type { P=>10, N=>25, B=>25, R=>50, Q=>75, _=>0 };
+                        let weight = match piece_type {
+                            P => 10,
+                            N => 25,
+                            B => 25,
+                            R => 50,
+                            Q => 75,
+                            _ => 0,
+                        };
                         king_attack_weight[them] += weight;
                         king_attack_count[them] += 1;
 
@@ -202,20 +239,24 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
                 }
 
                 // 7. Coordination
-                 if piece_type == R || piece_type == B || piece_type == Q {
-                     let my_rooks = state.bitboards[if us == WHITE { R } else { r }];
-                     let my_bishops = state.bitboards[if us == WHITE { B } else { b }];
-                     let my_queens = state.bitboards[if us == WHITE { Q } else { q }];
-
-                     if piece_type == R {
-                         if (attacks & (my_rooks | my_queens)).0 != 0 { coordination_score[us] += 10; }
-                     } else if piece_type == B {
-                         if (attacks & (my_bishops | my_queens)).0 != 0 { coordination_score[us] += 10; }
-                     } else if piece_type == Q {
-                          if (bitboard::get_rook_attacks(sq as u8, occ) & my_rooks).0 != 0 { coordination_score[us] += 10; }
-                          if (bitboard::get_bishop_attacks(sq as u8, occ) & my_bishops).0 != 0 { coordination_score[us] += 10; }
-                     }
-                 }
+                if piece_type == R || piece_type == B || piece_type == Q {
+                    if piece_type == R {
+                        if (attacks & (my_rooks | my_queens)).0 != 0 {
+                            coordination_score[us] += 10;
+                        }
+                    } else if piece_type == B {
+                        if (attacks & (my_bishops | my_queens)).0 != 0 {
+                            coordination_score[us] += 10;
+                        }
+                    } else if piece_type == Q {
+                        if (bitboard::get_rook_attacks(sq as u8, occ) & my_rooks).0 != 0 {
+                            coordination_score[us] += 10;
+                        }
+                        if (bitboard::get_bishop_attacks(sq as u8, occ) & my_bishops).0 != 0 {
+                            coordination_score[us] += 10;
+                        }
+                    }
+                }
             }
         }
     }
@@ -229,27 +270,27 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
         let mut shield_pen = 0;
         let k_rank = k_sq / 8;
         if (side == WHITE && k_rank < 3) || (side == BLACK && k_rank > 4) {
-             let my_pawns = state.bitboards[if side == WHITE { P } else { p }];
-             let enemy_pawns = state.bitboards[if side == WHITE { p } else { P }];
-             let k_file = k_sq % 8;
-             for f_offset in -1..=1 {
-                 let f = k_file as i32 + f_offset;
-                 if f >= 0 && f <= 7 {
-                     let mask = bitboard::file_mask(f as usize);
-                     if (my_pawns.0 & mask.0).count_ones() == 0 {
-                         shield_pen += SHIELD_MISSING_PENALTY;
-                         if (enemy_pawns.0 & mask.0).count_ones() == 0 {
-                             shield_pen += SHIELD_OPEN_FILE_PENALTY;
-                         }
-                     }
-                 }
-             }
+            let my_pawns = state.bitboards[if side == WHITE { P } else { p }];
+            let enemy_pawns = state.bitboards[if side == WHITE { p } else { P }];
+            let k_file = k_sq % 8;
+            for f_offset in -1..=1 {
+                let f = k_file as i32 + f_offset;
+                if f >= 0 && f <= 7 {
+                    let mask = bitboard::file_mask(f as usize);
+                    if (my_pawns.0 & mask.0).count_ones() == 0 {
+                        shield_pen += SHIELD_MISSING_PENALTY;
+                        if (enemy_pawns.0 & mask.0).count_ones() == 0 {
+                            shield_pen += SHIELD_OPEN_FILE_PENALTY;
+                        }
+                    }
+                }
+            }
         }
         mg += shield_pen * us_sign;
 
         // Storm
-        if pawn_entry.pawn_attacks[1-side].get_bit(k_sq as u8) {
-             mg -= 50 * us_sign;
+        if pawn_entry.pawn_attacks[1 - side].get_bit(k_sq as u8) {
+            mg -= 50 * us_sign;
         }
 
         // Danger & Clustering
@@ -261,7 +302,7 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
         // Undefended Ring Squares
         let ring = king_rings[side];
         let undefended = ring & !attacks_by_side[side];
-        let attacked = ring & attacks_by_side[1-side];
+        let attacked = ring & attacks_by_side[1 - side];
         let danger_zone = undefended & attacked;
         danger += (danger_zone.count_bits() as i32) * 10;
 
@@ -269,16 +310,18 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
         let mut cluster_pen = 0;
         let mut r_iter = ring;
         while r_iter.0 != 0 {
-             let s = r_iter.get_lsb_index();
-             r_iter.pop_bit(s as u8);
-             let c = ring_attack_counts[side][s as usize];
-             if c >= 2 {
-                 cluster_pen += (c as i32 - 1) * 20;
-             }
+            let s = r_iter.get_lsb_index();
+            r_iter.pop_bit(s as u8);
+            let c = ring_attack_counts[side][s as usize];
+            if c >= 2 {
+                cluster_pen += (c as i32 - 1) * 20;
+            }
         }
 
         // Apply penalties
-        if danger > 50 { mg -= danger * us_sign; }
+        if danger > 50 {
+            mg -= danger * us_sign;
+        }
         mg -= cluster_pen * us_sign;
         eg -= (cluster_pen / 2) * us_sign;
     }
@@ -300,25 +343,27 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     let attacked_by_them = us_occ & attacks_by_side[them];
     let mut iter = attacked_by_them;
     while iter.0 != 0 {
-         let sq = iter.get_lsb_index() as u8;
-         iter.pop_bit(sq);
+        let sq = iter.get_lsb_index() as u8;
+        iter.pop_bit(sq);
 
-         if sq == king_sqs[us] as u8 {
+        if sq == king_sqs[us] as u8 {
             continue;
-         }
+        }
 
-         let defended = attacks_by_side[us].get_bit(sq);
-         let val = get_piece_value(state, sq);
+        let defended = attacks_by_side[us].get_bit(sq);
+        let val = get_piece_value(state, sq);
 
-         if !defended {
-             hanging_val += val;
-         } else {
-             // Defended but attacked by pawn?
-             let pawn_attacks = bitboard::pawn_attacks(Bitboard(1<<sq), us);
-             if (pawn_attacks & state.bitboards[if them == WHITE { P } else { p }]).0 != 0 {
-                 if val > 100 { hanging_val += val - 100; }
-             }
-         }
+        if !defended {
+            hanging_val += val;
+        } else {
+            // Defended but attacked by pawn?
+            let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << sq), us);
+            if (pawn_attacks & state.bitboards[if them == WHITE { P } else { p }]).0 != 0 {
+                if val > 100 {
+                    hanging_val += val - 100;
+                }
+            }
+        }
     }
 
     // Apply hanging penalty to side to move
@@ -409,15 +454,15 @@ fn get_pst(piece: usize, sq: usize, side: usize, is_mg: bool) -> i32 {
 fn get_piece_value(state: &GameState, sq: u8) -> i32 {
     for piece in 0..12 {
         if state.bitboards[piece].get_bit(sq) {
-             return match piece % 6 {
-                 0 => 100, // Pawn
-                 1 => 320, // Knight
-                 2 => 330, // Bishop
-                 3 => 500, // Rook
-                 4 => 900, // Queen
-                 5 => 20000, // King
-                 _ => 0
-             };
+            return match piece % 6 {
+                0 => 100,   // Pawn
+                1 => 320,   // Knight
+                2 => 330,   // Bishop
+                3 => 500,   // Rook
+                4 => 900,   // Queen
+                5 => 20000, // King
+                _ => 0,
+            };
         }
     }
     0
@@ -484,7 +529,11 @@ mod tests {
         //
         // With fix, score should be ~ -500 (plus/minus PST/positional).
 
-        assert!(score > -10000, "Score {} indicates King is treated as hanging (approx -20000)", score);
+        assert!(
+            score > -10000,
+            "Score {} indicates King is treated as hanging (approx -20000)",
+            score
+        );
     }
 
     #[test]
@@ -514,6 +563,10 @@ mod tests {
         // Score should be positive because it is relative to side to move (Black).
         // Since Black is winning, score > 0.
         // If bug exists, it returns absolute score (negative), so score < 0.
-        assert!(score > 0, "Score should be positive for winning side (Black), got {}", score);
+        assert!(
+            score > 0,
+            "Score should be positive for winning side (Black), got {}",
+            score
+        );
     }
 }
