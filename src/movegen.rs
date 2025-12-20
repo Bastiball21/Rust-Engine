@@ -453,17 +453,8 @@ pub fn gives_check(state: &GameState, mv: Move) -> bool {
     let to = mv.target;
 
     // 0. Locate Piece Type (Expensive lookups minimized)
-    let mut piece = 12;
-    let start = if side == WHITE { P } else { p };
-    let end = if side == WHITE { K } else { k };
-
-    // FIX: Renamed loop variable 'p' to 'current_p' to avoid conflict with imported constant 'p'
-    for current_p in start..=end {
-        if state.bitboards[current_p].get_bit(from) {
-            piece = current_p;
-            break;
-        }
-    }
+    // MAILBOX OPTIMIZATION: Use board array
+    let piece = state.board[from as usize] as usize;
 
     // Castling and promotions are rare; fallback to safe slow check to prevent bugs
     // Chess960 Castling: Check if target is own rook

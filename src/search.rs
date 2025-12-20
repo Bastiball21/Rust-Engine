@@ -452,37 +452,20 @@ fn score_move(
     score.min(70000)
 }
 
-// Optimized: Checks side occupancy first to halve the bitboard lookups
+// Optimized: Uses Mailbox Array for O(1) lookup
+#[inline(always)]
 fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
-    // Check White pieces
-    if state.occupancies[WHITE].get_bit(square) {
-        for piece in 0..6 {
-            if state.bitboards[piece].get_bit(square) {
-                return piece;
-            }
-        }
-    }
-    // Check Black pieces
-    else if state.occupancies[BLACK].get_bit(square) {
-        for piece in 6..12 {
-            if state.bitboards[piece].get_bit(square) {
-                return piece;
-            }
-        }
-    }
-    // Empty or Invalid
-    12
+    let piece = state.board[square as usize] as usize;
+    // We treat NO_PIECE as 12 in other logic, assuming NO_PIECE constant matches.
+    // If state::NO_PIECE is 12, this is direct.
+    // Let's ensure we return 12 for empty/invalid.
+    piece
 }
 
+// Similar to get_piece_type_safe, just semantic distinction in code
+#[inline(always)]
 fn get_victim_type(state: &GameState, square: u8) -> usize {
-    let start = if state.side_to_move == WHITE { 6 } else { 0 };
-    let end = if state.side_to_move == WHITE { 11 } else { 5 };
-    for piece in start..=end {
-        if state.bitboards[piece].get_bit(square) {
-            return piece;
-        }
-    }
-    12
+    state.board[square as usize] as usize
 }
 
 fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String, Option<Move>) {

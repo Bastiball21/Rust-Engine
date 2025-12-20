@@ -4,7 +4,6 @@
 use crate::bitboard::Bitboard;
 use crate::nnue::Accumulator;
 use crate::zobrist;
-// Removed SmallVec dependency
 
 pub const P: usize = 0;
 pub const N: usize = 1;
@@ -18,6 +17,7 @@ pub const b: usize = 8;
 pub const r: usize = 9;
 pub const q: usize = 10;
 pub const k: usize = 11;
+pub const NO_PIECE: usize = 12;
 
 pub const WHITE: usize = 0;
 pub const BLACK: usize = 1;
@@ -73,6 +73,7 @@ impl Default for Move {
 pub struct GameState {
     pub bitboards: [Bitboard; 12],
     pub occupancies: [Bitboard; 3],
+    pub board: [u8; 64], // Mailbox representation (NO_PIECE if empty)
     pub side_to_move: usize,
     pub castling_rights: u8,
     pub en_passant: u8,
@@ -90,6 +91,7 @@ impl GameState {
         GameState {
             bitboards: [Bitboard(0); 12],
             occupancies: [Bitboard(0); 3],
+            board: [NO_PIECE as u8; 64],
             side_to_move: 0,
             castling_rights: 0,
             en_passant: 64,
@@ -177,9 +179,12 @@ impl GameState {
                     'r' => r,
                     'q' => q,
                     'k' => k,
-                    _ => 0,
+                    _ => NO_PIECE,
                 };
-                state.bitboards[piece].set_bit(square as u8);
+                if piece != NO_PIECE {
+                    state.bitboards[piece].set_bit(square as u8);
+                    state.board[square as usize] = piece as u8;
+                }
                 file += 1;
             }
         }
@@ -458,15 +463,18 @@ impl GameState {
 
         new_state.halfmove_clock += 1;
 
-        let mut piece_type = 12;
-        let start_range = if side == WHITE { P } else { p };
-        let end_range = if side == WHITE { K } else { k };
+        // MAILBOX OPTIMIZATION: Get piece from board array instead of loop
+        let mut piece_type = self.board[mv.source as usize] as usize;
 
-        // Identify moving piece
-        for pp in start_range..=end_range {
-            if self.bitboards[pp].get_bit(mv.source) {
-                piece_type = pp;
-                break;
+        // Safety fallback (should be covered by legal generation, but keeps logic consistent)
+        if piece_type == NO_PIECE {
+            let start_range = if side == WHITE { P } else { p };
+            let end_range = if side == WHITE { K } else { k };
+            for pp in start_range..=end_range {
+                if self.bitboards[pp].get_bit(mv.source) {
+                    piece_type = pp;
+                    break;
+                }
             }
         }
 
@@ -474,9 +482,11 @@ impl GameState {
 
         // Detect Castling: King capturing friendly rook
         if piece_type == K || piece_type == k {
-            let friendly_rooks = self.bitboards[if side == WHITE { R } else { r }];
-            if friendly_rooks.get_bit(mv.target) {
-                is_castling = true;
+            // MAILBOX OPTIMIZATION: Check target square content directly
+            let target_piece = self.board[mv.target as usize] as usize;
+            let rook_type = if side == WHITE { R } else { r };
+            if target_piece == rook_type {
+                 is_castling = true;
             }
         }
 
@@ -492,6 +502,7 @@ impl GameState {
             // 1. Remove King from Source
             new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
             new_state.bitboards[piece_type].pop_bit(mv.source);
+            new_state.board[mv.source as usize] = NO_PIECE as u8; // MAILBOX
             removed.push((piece_type, mv.source as usize));
 
             // Occupancy Update: Remove King from Source
@@ -502,6 +513,7 @@ impl GameState {
             let rook_type = if side == WHITE { R } else { r };
             new_state.hash ^= zobrist::piece_key(rook_type, mv.target as usize);
             new_state.bitboards[rook_type].pop_bit(mv.target);
+            new_state.board[mv.target as usize] = NO_PIECE as u8; // MAILBOX
             removed.push((rook_type, mv.target as usize));
 
             // Occupancy Update: Remove Rook from Source
@@ -537,6 +549,7 @@ impl GameState {
 
             // 4. Place King and Rook at Destinations
             new_state.bitboards[piece_type].set_bit(k_dst);
+            new_state.board[k_dst as usize] = piece_type as u8; // MAILBOX
             new_state.hash ^= zobrist::piece_key(piece_type, k_dst as usize);
             added.push((piece_type, k_dst as usize));
 
@@ -545,6 +558,7 @@ impl GameState {
             new_state.occupancies[BOTH].set_bit(k_dst);
 
             new_state.bitboards[rook_type].set_bit(r_dst);
+            new_state.board[r_dst as usize] = rook_type as u8; // MAILBOX
             new_state.hash ^= zobrist::piece_key(rook_type, r_dst as usize);
             added.push((rook_type, r_dst as usize));
 
@@ -566,6 +580,7 @@ impl GameState {
 
             new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
             new_state.bitboards[piece_type].pop_bit(mv.source);
+            new_state.board[mv.source as usize] = NO_PIECE as u8; // MAILBOX
 
             // Occupancy Update: Remove Piece from Source
             new_state.occupancies[side].pop_bit(mv.source);
@@ -586,6 +601,7 @@ impl GameState {
                 new_state.bitboards[piece_type].set_bit(mv.target);
                 new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
             }
+            new_state.board[mv.target as usize] = actual_piece as u8; // MAILBOX
 
             added.push((actual_piece, mv.target as usize));
 
@@ -594,8 +610,6 @@ impl GameState {
             new_state.occupancies[BOTH].set_bit(mv.target);
 
             if mv.is_capture {
-                let enemy_start = if side == WHITE { p } else { P };
-                let enemy_end = if side == WHITE { k } else { K };
                 let enemy_side = 1 - side;
 
                 if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
@@ -607,6 +621,7 @@ impl GameState {
                     };
                     let enemy_pawn = if side == WHITE { p } else { P };
                     new_state.bitboards[enemy_pawn].pop_bit(cap_sq);
+                    new_state.board[cap_sq as usize] = NO_PIECE as u8; // MAILBOX
                     new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
 
                     removed.push((enemy_pawn, cap_sq as usize));
@@ -615,56 +630,21 @@ impl GameState {
                     new_state.occupancies[enemy_side].pop_bit(cap_sq);
                     new_state.occupancies[BOTH].pop_bit(cap_sq);
                 } else {
-                    // Normal Capture: Target square occupancy is tricky because we just ADDED our piece there.
-                    // But we haven't removed the enemy piece yet from bitboards, only logically.
-                    // Wait, we just added our piece to 'new_state.occupancies[side]'.
-                    // And 'occupancies[BOTH]' now has it.
-                    // The enemy piece is still in 'occupancies[enemy]' and 'bitboards[enemy]'.
-                    // So 'occupancies[BOTH]' has it from the enemy side too.
-                    // We must remove the enemy piece from 'occupancies[enemy]' and 'occupancies[BOTH]'.
+                    // Normal Capture:
+                    // We must find which enemy piece was captured.
+                    // IMPORTANT: We just overwrote new_state.board[target] with our piece!
+                    // But we can check 'self.board[target]' (old state) to see what was there.
+                    let captured_piece = self.board[mv.target as usize] as usize;
 
-                    for pp in enemy_start..=enemy_end {
-                        if new_state.bitboards[pp].get_bit(mv.target) {
-                            new_state.bitboards[pp].pop_bit(mv.target);
-                            new_state.hash ^= zobrist::piece_key(pp, mv.target as usize);
-                            removed.push((pp, mv.target as usize));
-                            break;
-                        }
+                    if captured_piece != NO_PIECE {
+                         new_state.bitboards[captured_piece].pop_bit(mv.target);
+                         new_state.hash ^= zobrist::piece_key(captured_piece, mv.target as usize);
+                         removed.push((captured_piece, mv.target as usize));
+                         // Note: We don't need to clear board[target] because we already wrote our piece there.
                     }
+
                     // Occupancy Update: Remove Enemy Piece from Target
                     new_state.occupancies[enemy_side].pop_bit(mv.target);
-                    // Note: BOTH already has our piece, so it remains set.
-                    // But we popped the enemy contribution.
-                    // Since BOTH = WHITE | BLACK, and we just added WHITE, removing BLACK leaves WHITE.
-                    // So strictly, BOTH.pop_bit(target) would be WRONG if we just added our piece!
-                    // BUT: 'pop_bit' just clears the bit. It doesn't check if another piece is there.
-                    // Correct logic:
-                    // 1. Remove Enemy from Enemy Occ.
-                    // 2. Recalculate BOTH at target? Or just know it's occupied by us.
-                    // actually, BOTH is just (side | enemy).
-                    // If we just added 'side' at target, BOTH has bit set.
-                    // If we remove 'enemy' at target, BOTH should still have bit set.
-                    // So we should NOT pop from BOTH for normal capture at target.
-                    // EXCEPT: En Passant capture is different (different square).
-
-                    // For Normal Capture:
-                    // new_state.occupancies[BOTH] is already correct (set by our move).
-                    // We only need to clear new_state.occupancies[enemy] at target.
-
-                    // Wait, let's trace carefully.
-                    // Step 1: Remove Source. (Both popped). OK.
-                    // Step 2: Add Target (Friendly). (Both set). OK.
-                    // Step 3: Capture Target (Enemy).
-                    // We must remove from Enemy Occ.
-                    // We MUST NOT remove from Both Occ because Friendly is there now.
-
-                    // Implementation:
-                    // new_state.occupancies[enemy_side].pop_bit(mv.target);
-                    // (Done)
-
-                    // But wait, look at En Passant block above:
-                    // cap_sq is different from target.
-                    // So there we pop from BOTH. Correct.
                 }
             }
 
