@@ -10,8 +10,14 @@ use std::sync::{
 };
 use std::thread;
 
+use crate::syzygy;
+
 // Global UCI Option
 pub static UCI_CHESS960: AtomicBool = AtomicBool::new(false);
+
+pub fn parse_move_wrapper(state: &GameState, move_str: &str) -> Option<Move> {
+    parse_move(state, move_str)
+}
 
 pub fn uci_loop() {
     let stdin = io::stdin();
@@ -187,6 +193,9 @@ pub fn uci_loop() {
                     } else if parts[2] == "UCI_Chess960" && parts[3] == "value" {
                         let val = parts[4] == "true";
                         UCI_CHESS960.store(val, Ordering::Relaxed);
+                    } else if parts[2] == "SyzygyPath" && parts[3] == "value" {
+                        let path = parts[4];
+                        syzygy::init_tablebase(path);
                     }
                 }
             }
@@ -249,7 +258,7 @@ fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
     history
 }
 
-fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
+pub fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
     let mut generator = crate::movegen::MoveGenerator::new();
     generator.generate_moves(state);
     let src_str = &move_str[0..2];

@@ -24,6 +24,7 @@ mod tt;
 mod tuning;
 mod uci;
 mod zobrist; // Tests
+mod syzygy; // Added
 
 use std::env;
 use std::thread;

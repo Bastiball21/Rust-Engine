@@ -72,6 +72,10 @@ impl Bitboard {
         self.0.count_ones()
     }
     #[inline(always)]
+    pub fn count(&self) -> usize {
+        self.0.count_ones() as usize
+    }
+    #[inline(always)]
     pub fn get_lsb_index(&self) -> u32 {
         self.0.trailing_zeros()
     }
