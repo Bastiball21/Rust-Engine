@@ -1,6 +1,7 @@
 // src/search.rs
 use crate::bitboard::{self, Bitboard};
 use crate::eval;
+use crate::syzygy;
 use crate::movegen::{self, MoveGenerator};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
@@ -653,6 +654,31 @@ pub fn search(
         _ => MAX_PLY as u8,
     };
 
+    // Syzygy Root Probe
+    if main_thread {
+        if let Some((tb_move, tb_score)) = syzygy::probe_root(state) {
+            println!("info string Syzygy Found: Score {} Move {:?}", tb_score, tb_move);
+            // If winning/decisive, just play it.
+            // But we might want to search a bit if we want PV.
+            // For now, if TB returns, we can trust it.
+            // If it's a win, score is high.
+            // Let's print info and return.
+            let score_str = if tb_score > MATE_SCORE {
+                 format!("mate {}", (MATE_VALUE - tb_score + 1) / 2)
+            } else if tb_score < -MATE_SCORE {
+                 format!("mate -{}", (MATE_VALUE + tb_score + 1) / 2)
+            } else {
+                 format!("cp {}", tb_score)
+            };
+
+            println!("info depth 1 seldepth 1 score {} nodes 0 nps 0 hashfull {} time 0 pv {}",
+                     score_str, tt.hashfull(), format_move_uci(tb_move, state));
+
+            println!("bestmove {}", format_move_uci(tb_move, state));
+            return (tb_score, Some(tb_move));
+        }
+    }
+
     // Store start time for info reporting (independent of limits)
     let start_time = std::time::Instant::now();
 
@@ -870,6 +896,33 @@ fn negamax(
     if ply >= MAX_PLY {
         return eval::evaluate(state, alpha, beta);
     }
+
+    // Syzygy Probing in Search (WDL)
+    // Only probe if not at root (root handled separately), and not too deep (efficiency).
+    // Usually probe if ply > 0 and piece count is low.
+    // Optimization: Check piece count < X.
+    // fathom handles piece count check internally usually? No, we should check.
+    // 5-man or 6-man TBs.
+    // Probe if <= 6 pieces (arbitrary limit for performance, assume 6-man TB max)
+    if ply > 0 && state.occupancies[BOTH].count_bits() <= 6 && state.castling_rights == 0 {
+        if let Some(wdl_score) = syzygy::probe_wdl(state) {
+            // Syzygy says result.
+            // If winning, wdl_score ~ 20000.
+            // If losing, wdl_score ~ -20000.
+            // Draw ~ 0.
+
+            // Bounds check
+            if wdl_score >= beta {
+                return wdl_score; // Beta Cutoff
+            }
+            if wdl_score <= alpha {
+                return wdl_score; // Alpha Cutoff (Fail Low)
+            }
+            // Exact score?
+            return wdl_score;
+        }
+    }
+
     info.nodes += 1;
     if ply > info.seldepth as usize {
         info.seldepth = ply as u8;

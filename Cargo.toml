@@ -8,6 +8,8 @@ smallvec = "1.15.1"
 bulletformat = { git = "https://github.com/jw1912/bulletformat" }
 log = "0.4.29"
 simplelog = "0.12.2"
+# using pyrrhic-rs for syzygy since fathom binding is tricky blindly
+pyrrhic-rs = "0.2.0"
 
 [features]
 default = ["bmi2"]
