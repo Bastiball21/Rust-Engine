@@ -4,7 +4,6 @@
 use crate::bitboard::Bitboard;
 use crate::nnue::Accumulator;
 use crate::zobrist;
-// Removed SmallVec dependency
 
 pub const P: usize = 0;
 pub const N: usize = 1;
@@ -18,6 +17,7 @@ pub const b: usize = 8;
 pub const r: usize = 9;
 pub const q: usize = 10;
 pub const k: usize = 11;
+pub const NO_PIECE: usize = 12;
 
 pub const WHITE: usize = 0;
 pub const BLACK: usize = 1;
@@ -70,9 +70,22 @@ impl Default for Move {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct UnmakeInfo {
+    pub captured: u8, // piece type or NO_PIECE
+    pub en_passant: u8,
+    pub castling_rights: u8,
+    pub halfmove_clock: u8,
+    pub old_hash: u64,
+    pub is_castling: bool,
+    // Accumulator backup for King moves (rare)
+    pub acc_backup: Option<[Accumulator; 2]>,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct GameState {
     pub bitboards: [Bitboard; 12],
     pub occupancies: [Bitboard; 3],
+    pub board: [u8; 64], // Mailbox representation (NO_PIECE if empty)
     pub side_to_move: usize,
     pub castling_rights: u8,
     pub en_passant: u8,
@@ -90,6 +103,7 @@ impl GameState {
         GameState {
             bitboards: [Bitboard(0); 12],
             occupancies: [Bitboard(0); 3],
+            board: [NO_PIECE as u8; 64],
             side_to_move: 0,
             castling_rights: 0,
             en_passant: 64,
@@ -177,9 +191,12 @@ impl GameState {
                     'r' => r,
                     'q' => q,
                     'k' => k,
-                    _ => 0,
+                    _ => NO_PIECE,
                 };
-                state.bitboards[piece].set_bit(square as u8);
+                if piece != NO_PIECE {
+                    state.bitboards[piece].set_bit(square as u8);
+                    state.board[square as usize] = piece as u8;
+                }
                 file += 1;
             }
         }
@@ -441,72 +458,137 @@ impl GameState {
         new_state
     }
 
+    pub fn make_null_move_inplace(&mut self) -> UnmakeInfo {
+        let old_hash = self.hash;
+        let old_en_passant = self.en_passant;
+        let old_castling_rights = self.castling_rights;
+        let old_halfmove_clock = self.halfmove_clock;
+
+        self.side_to_move = 1 - self.side_to_move;
+        self.hash ^= zobrist::side_key();
+
+        if self.en_passant != 64 {
+            let file = (self.en_passant % 8) as u8;
+            self.hash ^= zobrist::en_passant_key(file);
+            self.en_passant = 64;
+        }
+
+        self.halfmove_clock = 0;
+
+        // Note: Fullmove number usually increments after Black moves.
+        // We handle this in make_move. We should do it here too?
+        // Logic: if Side was BLACK, we moved to WHITE, so increment.
+        // But self.side_to_move is now flipped.
+        // So if self.side_to_move == WHITE, it means BLACK just moved.
+        if self.side_to_move == WHITE {
+            self.fullmove_number += 1;
+        }
+
+        UnmakeInfo {
+            captured: NO_PIECE as u8,
+            en_passant: old_en_passant,
+            castling_rights: old_castling_rights,
+            halfmove_clock: old_halfmove_clock,
+            old_hash,
+            is_castling: false,
+            acc_backup: None,
+        }
+    }
+
+    pub fn unmake_null_move(&mut self, info: UnmakeInfo) {
+        if self.side_to_move == WHITE {
+             self.fullmove_number -= 1;
+        }
+        self.side_to_move = 1 - self.side_to_move;
+
+        self.en_passant = info.en_passant;
+        self.halfmove_clock = info.halfmove_clock;
+        self.hash = info.old_hash;
+        // Castling rights don't change in null move
+    }
+
+    // Legacy support for Copy-Make (can be removed later or kept for tests)
     pub fn make_move(&self, mv: Move) -> GameState {
         let mut new_state = *self;
-        let side = self.side_to_move;
+        new_state.make_move_inplace(mv);
+        new_state
+    }
 
-        // Incremental Occupancy Updates: Initialize from current state
-        new_state.occupancies = self.occupancies;
+    pub fn make_move_inplace(&mut self, mv: Move) -> UnmakeInfo {
+        let side = self.side_to_move;
+        let captured_piece;
+        let old_hash = self.hash;
+        let old_en_passant = self.en_passant;
+        let old_castling_rights = self.castling_rights;
+        let old_halfmove_clock = self.halfmove_clock;
+
+        let mut acc_backup = None;
 
         // NNUE Incremental Update Tracking (Using Stack Array)
         let mut added = UpdateList::new();
         let mut removed = UpdateList::new();
 
         if side == BLACK {
-            new_state.fullmove_number += 1;
+            self.fullmove_number += 1;
         }
 
-        new_state.halfmove_clock += 1;
+        self.halfmove_clock += 1;
 
-        let mut piece_type = 12;
-        let start_range = if side == WHITE { P } else { p };
-        let end_range = if side == WHITE { K } else { k };
+        // MAILBOX OPTIMIZATION: Get piece from board array instead of loop
+        let mut piece_type = self.board[mv.source as usize] as usize;
 
-        // Identify moving piece
-        for pp in start_range..=end_range {
-            if self.bitboards[pp].get_bit(mv.source) {
-                piece_type = pp;
-                break;
-            }
+        if piece_type == NO_PIECE {
+            // Should not happen in legal search
+             let start_range = if side == WHITE { P } else { p };
+             let end_range = if side == WHITE { K } else { k };
+             for pp in start_range..=end_range {
+                 if self.bitboards[pp].get_bit(mv.source) {
+                     piece_type = pp;
+                     break;
+                 }
+             }
         }
 
         let mut is_castling = false;
 
-        // Detect Castling: King capturing friendly rook
+        // Detect Castling
         if piece_type == K || piece_type == k {
-            let friendly_rooks = self.bitboards[if side == WHITE { R } else { r }];
-            if friendly_rooks.get_bit(mv.target) {
-                is_castling = true;
+            let target_piece = self.board[mv.target as usize] as usize;
+            let rook_type = if side == WHITE { R } else { r };
+            if target_piece == rook_type {
+                 is_castling = true;
             }
         }
 
         // Update En Passant: Reset it for next move
         if self.en_passant != 64 {
             let file = (self.en_passant % 8) as u8;
-            new_state.hash ^= zobrist::en_passant_key(file);
+            self.hash ^= zobrist::en_passant_key(file);
         }
-        new_state.en_passant = 64;
+        self.en_passant = 64;
 
         if is_castling {
-            // CASTLING LOGIC (Unified)
+            captured_piece = NO_PIECE as u8; // Castling "captures" own rook but we handle restore manually
+
             // 1. Remove King from Source
-            new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
-            new_state.bitboards[piece_type].pop_bit(mv.source);
+            self.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
+            self.bitboards[piece_type].pop_bit(mv.source);
+            self.board[mv.source as usize] = NO_PIECE as u8;
             removed.push((piece_type, mv.source as usize));
 
-            // Occupancy Update: Remove King from Source
-            new_state.occupancies[side].pop_bit(mv.source);
-            new_state.occupancies[BOTH].pop_bit(mv.source);
+            // Occupancy Update
+            self.occupancies[side].pop_bit(mv.source);
+            self.occupancies[BOTH].pop_bit(mv.source);
 
             // 2. Remove Rook from Target (Rook's source)
             let rook_type = if side == WHITE { R } else { r };
-            new_state.hash ^= zobrist::piece_key(rook_type, mv.target as usize);
-            new_state.bitboards[rook_type].pop_bit(mv.target);
+            self.hash ^= zobrist::piece_key(rook_type, mv.target as usize);
+            self.bitboards[rook_type].pop_bit(mv.target);
+            self.board[mv.target as usize] = NO_PIECE as u8;
             removed.push((rook_type, mv.target as usize));
 
-            // Occupancy Update: Remove Rook from Source
-            new_state.occupancies[side].pop_bit(mv.target);
-            new_state.occupancies[BOTH].pop_bit(mv.target);
+            self.occupancies[side].pop_bit(mv.target);
+            self.occupancies[BOTH].pop_bit(mv.target);
 
             // 3. Determine Destinations
             let rank_base = if side == WHITE { 0 } else { 56 };
@@ -536,24 +618,23 @@ impl GameState {
             let r_dst = rank_base + rook_file_dst;
 
             // 4. Place King and Rook at Destinations
-            new_state.bitboards[piece_type].set_bit(k_dst);
-            new_state.hash ^= zobrist::piece_key(piece_type, k_dst as usize);
+            self.bitboards[piece_type].set_bit(k_dst);
+            self.board[k_dst as usize] = piece_type as u8;
+            self.hash ^= zobrist::piece_key(piece_type, k_dst as usize);
             added.push((piece_type, k_dst as usize));
 
-            // Occupancy Update: Add King
-            new_state.occupancies[side].set_bit(k_dst);
-            new_state.occupancies[BOTH].set_bit(k_dst);
+            self.occupancies[side].set_bit(k_dst);
+            self.occupancies[BOTH].set_bit(k_dst);
 
-            new_state.bitboards[rook_type].set_bit(r_dst);
-            new_state.hash ^= zobrist::piece_key(rook_type, r_dst as usize);
+            self.bitboards[rook_type].set_bit(r_dst);
+            self.board[r_dst as usize] = rook_type as u8;
+            self.hash ^= zobrist::piece_key(rook_type, r_dst as usize);
             added.push((rook_type, r_dst as usize));
 
-            // Occupancy Update: Add Rook
-            new_state.occupancies[side].set_bit(r_dst);
-            new_state.occupancies[BOTH].set_bit(r_dst);
+            self.occupancies[side].set_bit(r_dst);
+            self.occupancies[BOTH].set_bit(r_dst);
 
-            // Castling resets halfmove clock
-            new_state.halfmove_clock = 0;
+            self.halfmove_clock = 0;
         } else {
             // NORMAL MOVE LOGIC
 
@@ -561,15 +642,15 @@ impl GameState {
             removed.push((piece_type, mv.source as usize));
 
             if piece_type == P || piece_type == p || mv.is_capture {
-                new_state.halfmove_clock = 0;
+                self.halfmove_clock = 0;
             }
 
-            new_state.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
-            new_state.bitboards[piece_type].pop_bit(mv.source);
+            self.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
+            self.bitboards[piece_type].pop_bit(mv.source);
+            self.board[mv.source as usize] = NO_PIECE as u8;
 
-            // Occupancy Update: Remove Piece from Source
-            new_state.occupancies[side].pop_bit(mv.source);
-            new_state.occupancies[BOTH].pop_bit(mv.source);
+            self.occupancies[side].pop_bit(mv.source);
+            self.occupancies[BOTH].pop_bit(mv.source);
 
             // 2. Add moving piece (or promo) to target
             let actual_piece = if let Some(promo) = mv.promotion {
@@ -580,95 +661,62 @@ impl GameState {
             };
 
             if mv.promotion.is_some() {
-                new_state.bitboards[actual_piece].set_bit(mv.target);
-                new_state.hash ^= zobrist::piece_key(actual_piece, mv.target as usize);
+                self.bitboards[actual_piece].set_bit(mv.target);
+                self.hash ^= zobrist::piece_key(actual_piece, mv.target as usize);
             } else {
-                new_state.bitboards[piece_type].set_bit(mv.target);
-                new_state.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
+                self.bitboards[piece_type].set_bit(mv.target);
+                self.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
             }
 
-            added.push((actual_piece, mv.target as usize));
-
-            // Occupancy Update: Add Piece to Target
-            new_state.occupancies[side].set_bit(mv.target);
-            new_state.occupancies[BOTH].set_bit(mv.target);
-
+            // Capture Logic
             if mv.is_capture {
-                let enemy_start = if side == WHITE { p } else { P };
-                let enemy_end = if side == WHITE { k } else { K };
                 let enemy_side = 1 - side;
-
-                if (piece_type == P || piece_type == p) && mv.target == self.en_passant {
-                    // En Passant Capture
+                if (piece_type == P || piece_type == p) && mv.target == old_en_passant {
+                    // En Passant
                     let cap_sq = if side == WHITE {
                         mv.target - 8
                     } else {
                         mv.target + 8
                     };
                     let enemy_pawn = if side == WHITE { p } else { P };
-                    new_state.bitboards[enemy_pawn].pop_bit(cap_sq);
-                    new_state.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
+                    captured_piece = enemy_pawn as u8;
 
+                    self.bitboards[enemy_pawn].pop_bit(cap_sq);
+                    self.board[cap_sq as usize] = NO_PIECE as u8;
+                    self.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
                     removed.push((enemy_pawn, cap_sq as usize));
 
-                    // Occupancy Update: Remove Enemy Pawn
-                    new_state.occupancies[enemy_side].pop_bit(cap_sq);
-                    new_state.occupancies[BOTH].pop_bit(cap_sq);
+                    self.occupancies[enemy_side].pop_bit(cap_sq);
+                    self.occupancies[BOTH].pop_bit(cap_sq);
+
+                    // Target was empty for EP
+                    self.board[mv.target as usize] = actual_piece as u8;
                 } else {
-                    // Normal Capture: Target square occupancy is tricky because we just ADDED our piece there.
-                    // But we haven't removed the enemy piece yet from bitboards, only logically.
-                    // Wait, we just added our piece to 'new_state.occupancies[side]'.
-                    // And 'occupancies[BOTH]' now has it.
-                    // The enemy piece is still in 'occupancies[enemy]' and 'bitboards[enemy]'.
-                    // So 'occupancies[BOTH]' has it from the enemy side too.
-                    // We must remove the enemy piece from 'occupancies[enemy]' and 'occupancies[BOTH]'.
-
-                    for pp in enemy_start..=enemy_end {
-                        if new_state.bitboards[pp].get_bit(mv.target) {
-                            new_state.bitboards[pp].pop_bit(mv.target);
-                            new_state.hash ^= zobrist::piece_key(pp, mv.target as usize);
-                            removed.push((pp, mv.target as usize));
-                            break;
-                        }
+                    // Normal Capture
+                    captured_piece = self.board[mv.target as usize];
+                    if captured_piece != NO_PIECE as u8 {
+                         let cap_p = captured_piece as usize;
+                         self.bitboards[cap_p].pop_bit(mv.target);
+                         self.hash ^= zobrist::piece_key(cap_p, mv.target as usize);
+                         removed.push((cap_p, mv.target as usize));
+                         // Note: board update for captured piece is implicit (overwritten below)
                     }
-                    // Occupancy Update: Remove Enemy Piece from Target
-                    new_state.occupancies[enemy_side].pop_bit(mv.target);
-                    // Note: BOTH already has our piece, so it remains set.
-                    // But we popped the enemy contribution.
-                    // Since BOTH = WHITE | BLACK, and we just added WHITE, removing BLACK leaves WHITE.
-                    // So strictly, BOTH.pop_bit(target) would be WRONG if we just added our piece!
-                    // BUT: 'pop_bit' just clears the bit. It doesn't check if another piece is there.
-                    // Correct logic:
-                    // 1. Remove Enemy from Enemy Occ.
-                    // 2. Recalculate BOTH at target? Or just know it's occupied by us.
-                    // actually, BOTH is just (side | enemy).
-                    // If we just added 'side' at target, BOTH has bit set.
-                    // If we remove 'enemy' at target, BOTH should still have bit set.
-                    // So we should NOT pop from BOTH for normal capture at target.
-                    // EXCEPT: En Passant capture is different (different square).
-
-                    // For Normal Capture:
-                    // new_state.occupancies[BOTH] is already correct (set by our move).
-                    // We only need to clear new_state.occupancies[enemy] at target.
-
-                    // Wait, let's trace carefully.
-                    // Step 1: Remove Source. (Both popped). OK.
-                    // Step 2: Add Target (Friendly). (Both set). OK.
-                    // Step 3: Capture Target (Enemy).
-                    // We must remove from Enemy Occ.
-                    // We MUST NOT remove from Both Occ because Friendly is there now.
-
-                    // Implementation:
-                    // new_state.occupancies[enemy_side].pop_bit(mv.target);
-                    // (Done)
-
-                    // But wait, look at En Passant block above:
-                    // cap_sq is different from target.
-                    // So there we pop from BOTH. Correct.
+                    self.occupancies[enemy_side].pop_bit(mv.target);
+                    self.board[mv.target as usize] = actual_piece as u8;
                 }
+            } else {
+                captured_piece = NO_PIECE as u8;
+                self.board[mv.target as usize] = actual_piece as u8;
             }
 
-            if piece_type == P || piece_type == p {
+            added.push((actual_piece, mv.target as usize));
+
+            // Occupancy Add
+            self.occupancies[side].set_bit(mv.target);
+            self.occupancies[BOTH].set_bit(mv.target);
+
+            // Set new EP
+             if piece_type == P || piece_type == p {
                 let diff = (mv.target as i8 - mv.source as i8).abs();
                 if diff == 16 {
                     let ep_sq = if side == WHITE {
@@ -676,211 +724,278 @@ impl GameState {
                     } else {
                         mv.target + 8
                     };
-                    new_state.en_passant = ep_sq;
-                    new_state.hash ^= zobrist::en_passant_key((ep_sq % 8) as u8);
+                    self.en_passant = ep_sq;
+                    self.hash ^= zobrist::en_passant_key((ep_sq % 8) as u8);
                 }
             }
         }
 
-        // COMMON UPDATES (Castling Rights, Occupancies, Hash, Accumulator)
-
-        // Update Castling Rights
+        // CASTLING RIGHTS UPDATE
         // Remove rights if they were present
-        if (new_state.castling_rights & 1) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(WHITE, 0, new_state.castling_rook_files[WHITE][0]);
+        if (self.castling_rights & 1) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(WHITE, 0, self.castling_rook_files[WHITE][0]);
         }
-        if (new_state.castling_rights & 2) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(WHITE, 1, new_state.castling_rook_files[WHITE][1]);
+        if (self.castling_rights & 2) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(WHITE, 1, self.castling_rook_files[WHITE][1]);
         }
-        if (new_state.castling_rights & 4) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(BLACK, 0, new_state.castling_rook_files[BLACK][0]);
+        if (self.castling_rights & 4) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(BLACK, 0, self.castling_rook_files[BLACK][0]);
         }
-        if (new_state.castling_rights & 8) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(BLACK, 1, new_state.castling_rook_files[BLACK][1]);
+        if (self.castling_rights & 8) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(BLACK, 1, self.castling_rook_files[BLACK][1]);
         }
-        new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
+        self.hash ^= zobrist::castling_key(self.castling_rights);
 
-        // Update rights logic
-        // 1. King moves/captured? (Captured handled by source check if we want, but King never captured)
-        // 2. Rook moves/captured?
-
-        // If King moves, lose both rights
+        // Logic
         if piece_type == K {
-            new_state.castling_rights &= !3;
+            self.castling_rights &= !3;
         }
         if piece_type == k {
-            new_state.castling_rights &= !12;
+            self.castling_rights &= !12;
         }
 
-        // If Rook moves or is captured, lose specific right
-        // Check Source (Piece moved) and Target (Piece captured) against Rook Files
-        // Careful: We need to check against SPECIFIC rook files now, not just 0/7/56/63.
-
-        // Helper to check against file
+        // Remove 'mut' from 'check_rook_rights' callback to avoid unused warning
         let check_rook_rights = |sq: u8, rights: &mut u8, files: [[u8; 2]; 2]| {
             let f = sq % 8;
             let rank_val = sq / 8;
-
-            // White Rooks (Rank 0)
             if rank_val == 0 {
-                if f == files[WHITE][0] {
-                    *rights &= !1;
-                } // Kingside
-                if f == files[WHITE][1] {
-                    *rights &= !2;
-                } // Queenside
+                if f == files[WHITE][0] { *rights &= !1; }
+                if f == files[WHITE][1] { *rights &= !2; }
             }
-            // Black Rooks (Rank 7)
             if rank_val == 7 {
-                if f == files[BLACK][0] {
-                    *rights &= !4;
-                }
-                if f == files[BLACK][1] {
-                    *rights &= !8;
-                }
+                if f == files[BLACK][0] { *rights &= !4; }
+                if f == files[BLACK][1] { *rights &= !8; }
             }
         };
 
-        check_rook_rights(
-            mv.source,
-            &mut new_state.castling_rights,
-            new_state.castling_rook_files,
-        );
-        check_rook_rights(
-            mv.target,
-            &mut new_state.castling_rights,
-            new_state.castling_rook_files,
-        );
+        check_rook_rights(mv.source, &mut self.castling_rights, self.castling_rook_files);
+        check_rook_rights(mv.target, &mut self.castling_rights, self.castling_rook_files);
 
-        // Re-add rights keys for remaining rights
-        new_state.hash ^= zobrist::castling_key(new_state.castling_rights);
-        if (new_state.castling_rights & 1) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(WHITE, 0, new_state.castling_rook_files[WHITE][0]);
+        // Re-add rights keys
+        self.hash ^= zobrist::castling_key(self.castling_rights);
+        if (self.castling_rights & 1) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(WHITE, 0, self.castling_rook_files[WHITE][0]);
         }
-        if (new_state.castling_rights & 2) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(WHITE, 1, new_state.castling_rook_files[WHITE][1]);
+        if (self.castling_rights & 2) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(WHITE, 1, self.castling_rook_files[WHITE][1]);
         }
-        if (new_state.castling_rights & 4) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(BLACK, 0, new_state.castling_rook_files[BLACK][0]);
+        if (self.castling_rights & 4) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(BLACK, 0, self.castling_rook_files[BLACK][0]);
         }
-        if (new_state.castling_rights & 8) != 0 {
-            new_state.hash ^=
-                zobrist::castling_file_key(BLACK, 1, new_state.castling_rook_files[BLACK][1]);
+        if (self.castling_rights & 8) != 0 {
+            self.hash ^=
+                zobrist::castling_file_key(BLACK, 1, self.castling_rook_files[BLACK][1]);
         }
 
-        new_state.side_to_move = 1 - side;
-        new_state.hash ^= zobrist::side_key();
-
-        // Incremental occupancy update
-        new_state.occupancies = self.occupancies;
-
-        let source = mv.source;
-        let target = mv.target;
-        let our_side = self.side_to_move;
-        let their_side = 1 - our_side;
-
-        // Remove piece from source
-        new_state.occupancies[our_side].pop_bit(source);
-        new_state.occupancies[BOTH].pop_bit(source);
-
-        if is_castling {
-            // Castling: king and rook both move
-            let rook_source = mv.target;
-
-            // Recompute rook target since r_dst is not in scope
-            let rank_base = if our_side == WHITE { 0 } else { 56 };
-            let rook_file_dst = if (mv.target % 8) > (mv.source % 8) {
-                5
-            } else {
-                3
-            };
-            let rook_target = rank_base + rook_file_dst;
-
-            // Recompute king target (k_dst) since it is not in scope
-            let king_file_dst = if (mv.target % 8) > (mv.source % 8) {
-                6
-            } else {
-                2
-            };
-            let k_dst = rank_base + king_file_dst;
-
-            new_state.occupancies[our_side].pop_bit(rook_source);
-            new_state.occupancies[BOTH].pop_bit(rook_source);
-            new_state.occupancies[our_side].set_bit(rook_target);
-            new_state.occupancies[BOTH].set_bit(rook_target);
-
-            // Add King to destination
-            new_state.occupancies[our_side].set_bit(k_dst);
-            new_state.occupancies[BOTH].set_bit(k_dst);
-        } else {
-            // Handle captures (including en passant)
-            if mv.is_capture {
-                let cap_sq = if (piece_type == P || piece_type == p) && target == self.en_passant {
-                    if our_side == WHITE {
-                        target - 8
-                    } else {
-                        target + 8
-                    }
-                } else {
-                    target
-                };
-                new_state.occupancies[their_side].pop_bit(cap_sq);
-                new_state.occupancies[BOTH].pop_bit(cap_sq);
-            }
-
-            // Add piece to target
-            new_state.occupancies[our_side].set_bit(target);
-            new_state.occupancies[BOTH].set_bit(target);
-        }
+        self.side_to_move = 1 - side;
+        self.hash ^= zobrist::side_key();
 
         // --------------------------------------------------------------------
         // Update Accumulators (Logic for King Buckets)
         // --------------------------------------------------------------------
 
-        let old_k_sq_white = self.bitboards[K].get_lsb_index() as usize;
-        let old_k_sq_black = self.bitboards[k].get_lsb_index() as usize;
+        // We need to check if King bucket changed.
+        // If King moved, potential bucket change.
+        // We check if either King's bucket changed.
 
-        let new_k_sq_white = new_state.bitboards[K].get_lsb_index() as usize;
-        let new_k_sq_black = new_state.bitboards[k].get_lsb_index() as usize;
+        let new_k_sq_white = self.bitboards[K].get_lsb_index() as usize;
+        let new_k_sq_black = self.bitboards[k].get_lsb_index() as usize;
 
-        // Check White Accumulator
-        let old_bucket_w = crate::nnue::get_king_bucket(WHITE, old_k_sq_white);
+        // We know old positions? We can infer or check if piece_type == K/k.
+        let (old_k_sq_w, old_k_sq_b) = if piece_type == K {
+             (mv.source as usize, new_k_sq_black)
+        } else if piece_type == k {
+             (new_k_sq_white, mv.source as usize)
+        } else {
+             (new_k_sq_white, new_k_sq_black)
+        };
+
+        let old_bucket_w = crate::nnue::get_king_bucket(WHITE, old_k_sq_w);
         let new_bucket_w = crate::nnue::get_king_bucket(WHITE, new_k_sq_white);
 
-        if old_bucket_w != new_bucket_w {
-            new_state.accumulator[WHITE].refresh(&new_state.bitboards, WHITE, new_k_sq_white);
-        } else {
-            new_state.accumulator[WHITE].update(
-                added.as_slice(),
-                removed.as_slice(),
-                WHITE,
-                new_k_sq_white,
-            );
-        }
-
-        // Check Black Accumulator
-        let old_bucket_b = crate::nnue::get_king_bucket(BLACK, old_k_sq_black);
+        let old_bucket_b = crate::nnue::get_king_bucket(BLACK, old_k_sq_b);
         let new_bucket_b = crate::nnue::get_king_bucket(BLACK, new_k_sq_black);
 
-        if old_bucket_b != new_bucket_b {
-            new_state.accumulator[BLACK].refresh(&new_state.bitboards, BLACK, new_k_sq_black);
-        } else {
-            new_state.accumulator[BLACK].update(
-                added.as_slice(),
-                removed.as_slice(),
-                BLACK,
-                new_k_sq_black,
-            );
+        let mut needs_backup = false;
+        if old_bucket_w != new_bucket_w || old_bucket_b != new_bucket_b {
+             needs_backup = true;
         }
 
-        new_state
+        if needs_backup {
+             acc_backup = Some(self.accumulator); // Clone full accumulators (2KB)
+             // Refresh
+             if old_bucket_w != new_bucket_w {
+                  self.accumulator[WHITE].refresh(&self.bitboards, WHITE, new_k_sq_white);
+             } else {
+                  self.accumulator[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, new_k_sq_white);
+             }
+             if old_bucket_b != new_bucket_b {
+                  self.accumulator[BLACK].refresh(&self.bitboards, BLACK, new_k_sq_black);
+             } else {
+                  self.accumulator[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, new_k_sq_black);
+             }
+        } else {
+             self.accumulator[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, new_k_sq_white);
+             self.accumulator[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, new_k_sq_black);
+        }
+
+        UnmakeInfo {
+            captured: captured_piece,
+            en_passant: old_en_passant,
+            castling_rights: old_castling_rights,
+            halfmove_clock: old_halfmove_clock,
+            old_hash,
+            is_castling,
+            acc_backup,
+        }
+    }
+
+    pub fn unmake_move(&mut self, mv: Move, info: UnmakeInfo) {
+        // Reverse Move Logic
+        // 1. Restore Side
+        self.side_to_move = 1 - self.side_to_move;
+        let side = self.side_to_move; // Now back to original side
+        if side == BLACK {
+            self.fullmove_number -= 1;
+        }
+
+        // 2. Restore Scalar Fields
+        self.en_passant = info.en_passant;
+        self.castling_rights = info.castling_rights;
+        self.halfmove_clock = info.halfmove_clock;
+        self.hash = info.old_hash;
+
+        let mut added = UpdateList::new();
+        let mut removed = UpdateList::new();
+
+        if info.is_castling {
+             // Castling Unmake
+             // Make Logic: K from src->k_dst, R from tgt->r_dst.
+             // We need to move K from k_dst->src, R from r_dst->tgt.
+
+             let rank_base = if side == WHITE { 0 } else { 56 };
+             let king_file_dst;
+             let rook_file_dst;
+
+             if mv.target > mv.source {
+                 if (mv.target % 8) > (mv.source % 8) {
+                     king_file_dst = 6;
+                     rook_file_dst = 5;
+                 } else {
+                     king_file_dst = 2;
+                     rook_file_dst = 3;
+                 }
+             } else {
+                 if (mv.target % 8) > (mv.source % 8) {
+                     king_file_dst = 6;
+                     rook_file_dst = 5;
+                 } else {
+                     king_file_dst = 2;
+                     rook_file_dst = 3;
+                 }
+             }
+
+             let k_dst = rank_base + king_file_dst;
+             let r_dst = rank_base + rook_file_dst;
+
+             let k_piece = if side == WHITE { K } else { k };
+             let r_piece = if side == WHITE { R } else { r };
+
+             // Remove from destinations
+             self.bitboards[k_piece].pop_bit(k_dst);
+             self.board[k_dst as usize] = NO_PIECE as u8;
+             self.occupancies[side].pop_bit(k_dst);
+             self.occupancies[BOTH].pop_bit(k_dst);
+             removed.push((k_piece, k_dst as usize));
+
+             self.bitboards[r_piece].pop_bit(r_dst);
+             self.board[r_dst as usize] = NO_PIECE as u8;
+             self.occupancies[side].pop_bit(r_dst);
+             self.occupancies[BOTH].pop_bit(r_dst);
+             removed.push((r_piece, r_dst as usize));
+
+             // Add back to sources
+             self.bitboards[k_piece].set_bit(mv.source);
+             self.board[mv.source as usize] = k_piece as u8;
+             self.occupancies[side].set_bit(mv.source);
+             self.occupancies[BOTH].set_bit(mv.source);
+             added.push((k_piece, mv.source as usize));
+
+             self.bitboards[r_piece].set_bit(mv.target);
+             self.board[mv.target as usize] = r_piece as u8;
+             self.occupancies[side].set_bit(mv.target);
+             self.occupancies[BOTH].set_bit(mv.target);
+             added.push((r_piece, mv.target as usize));
+
+        } else {
+             // Normal Unmake
+             let target = mv.target;
+             let source = mv.source;
+
+             // What is at target?
+             // If promotion, it's the promoted piece.
+             // If normal, it's the mover.
+             let moved_piece = self.board[target as usize] as usize; // This is what is currently at target
+
+             // Remove from target
+             self.bitboards[moved_piece].pop_bit(target);
+             self.board[target as usize] = NO_PIECE as u8;
+             self.occupancies[side].pop_bit(target);
+             self.occupancies[BOTH].pop_bit(target);
+             removed.push((moved_piece, target as usize));
+
+             // Place back at source
+             // If promotion, we placed PromotedPiece. We remove it (done above).
+             // We need to place Pawn at source.
+             let original_piece = if mv.promotion.is_some() {
+                  if side == WHITE { P } else { p }
+             } else {
+                  moved_piece
+             };
+
+             self.bitboards[original_piece].set_bit(source);
+             self.board[source as usize] = original_piece as u8;
+             self.occupancies[side].set_bit(source);
+             self.occupancies[BOTH].set_bit(source);
+             added.push((original_piece, source as usize));
+
+             // Restore captured piece
+             if mv.is_capture {
+                  let captured = info.captured as usize;
+                  let enemy_side = 1 - side;
+                  let cap_sq = if (original_piece == P || original_piece == p) && target == info.en_passant {
+                       // EP Capture
+                       if side == WHITE { target - 8 } else { target + 8 }
+                  } else {
+                       target
+                  };
+
+                  self.bitboards[captured].set_bit(cap_sq);
+                  self.board[cap_sq as usize] = captured as u8;
+                  self.occupancies[enemy_side].set_bit(cap_sq);
+                  self.occupancies[BOTH].set_bit(cap_sq);
+                  added.push((captured, cap_sq as usize));
+             }
+        }
+
+        // NNUE Restore
+        if let Some(backup) = info.acc_backup {
+             self.accumulator = backup;
+        } else {
+             // Inverse update
+             let k_sq_white = self.bitboards[K].get_lsb_index() as usize;
+             let k_sq_black = self.bitboards[k].get_lsb_index() as usize;
+
+             self.accumulator[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, k_sq_white);
+             self.accumulator[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, k_sq_black);
+        }
     }
 }
 

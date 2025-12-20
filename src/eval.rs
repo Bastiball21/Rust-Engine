@@ -79,6 +79,19 @@ pub fn init_eval() {}
 
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
+    // Lazy Eval Gating for NNUE
+    let lazy_score = evaluate_lazy(state);
+
+    // Margin for Lazy Eval (Conservative)
+    let margin = LAZY_EVAL_MARGIN;
+
+    if lazy_score + margin <= alpha {
+        return alpha;
+    }
+    if lazy_score - margin >= beta {
+        return beta;
+    }
+
     if crate::nnue::NETWORK.get().is_some() {
         let score = crate::nnue::evaluate(
             &state.accumulator[state.side_to_move],
@@ -86,12 +99,55 @@ pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
         );
         return score;
     }
+
+    // Fallback to HCE if no network
+    // Note: evaluate_hce returns ABSOLUTE score
     let score = evaluate_hce(state, alpha, beta);
     if state.side_to_move == BLACK {
         -score
     } else {
         score
     }
+}
+
+// Helper for Lazy Eval (Pass 1 of HCE)
+fn evaluate_lazy(state: &GameState) -> i32 {
+    let mut mg = 0;
+    let mut eg = 0;
+    let mut phase = 0;
+
+    let pawn_entry = crate::pawn::evaluate_pawns(state);
+    mg += pawn_entry.score_mg;
+    eg += pawn_entry.score_eg;
+
+    for side in [WHITE, BLACK] {
+        let us_sign = if side == WHITE { 1 } else { -1 };
+
+        for piece_type in 0..6 {
+            let piece_idx = if side == WHITE { piece_type } else { piece_type + 6 };
+            let mut bb = state.bitboards[piece_idx];
+
+            let count = bb.count_bits() as i32;
+            phase += count * PHASE_WEIGHTS[piece_type];
+
+            let base_mg = MG_VALS[piece_type].load(Ordering::Relaxed);
+            let base_eg = EG_VALS[piece_type].load(Ordering::Relaxed);
+
+            while bb.0 != 0 {
+                let sq = bb.get_lsb_index() as usize;
+                bb.pop_bit(sq as u8);
+                mg += (base_mg + get_pst(piece_type, sq, side, true)) * us_sign;
+                eg += (base_eg + get_pst(piece_type, sq, side, false)) * us_sign;
+            }
+        }
+    }
+
+    let phase_clamped = phase.clamp(0, 24);
+    let mut score = (mg * phase_clamped + eg * (24 - phase_clamped)) / 24;
+    let scale = crate::endgame::get_scale_factor(state, score);
+    score = (score * scale) / 128;
+
+    if state.side_to_move == BLACK { -score } else { score }
 }
 
 pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
