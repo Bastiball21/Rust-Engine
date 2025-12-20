@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::arch::x86_64::*;
 
 // Architecture Constants
-pub const LAYER1_SIZE: usize = 256;
+pub const LAYER1_SIZE: usize = 512;
 pub const INPUT_SIZE: usize = 768;
 pub const NUM_BUCKETS: usize = 32; // Matches bullet_lib ChessBuckets (Standard Mirrored)
 const QA: i32 = 255;
@@ -297,11 +297,11 @@ pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
 // --------------------------------------------------------
 
 pub struct Network {
-    // Feature Weights: (768 * 32) * 256
+    // Feature Weights: (768 * 32) * 512
     pub feature_weights: Vec<i16>,
-    // Feature Biases: 256
+    // Feature Biases: 512
     pub feature_biases: Vec<i16>,
-    // Output Weights: 256 * 2 (because 2 accumulators -> 512 total inputs to output neuron)
+    // Output Weights: 512 * 2
     pub output_weights: Vec<i16>,
     pub output_bias: i16,
 }
@@ -309,16 +309,16 @@ pub struct Network {
 pub fn load_network(path: &str) -> io::Result<Network> {
     let mut file = File::open(path)?;
 
-    // Read Feature Weights (l0w): (768 * 32) * 256 * 2 bytes
+    // Read Feature Weights (l0w): (768 * 32) * 512 * 2 bytes
     let total_features = INPUT_SIZE * NUM_BUCKETS;
     let mut feature_weights = vec![0i16; total_features * LAYER1_SIZE];
     read_i16_slice(&mut file, &mut feature_weights)?;
 
-    // Read Feature Biases (l0b): 256 * 2 bytes
+    // Read Feature Biases (l0b): 512 * 2 bytes
     let mut feature_biases = vec![0i16; LAYER1_SIZE];
     read_i16_slice(&mut file, &mut feature_biases)?;
 
-    // Read Output Weights (l1w): (256 * 2) * 2 bytes
+    // Read Output Weights (l1w): (512 * 2) * 2 bytes
     let mut output_weights = vec![0i16; 2 * LAYER1_SIZE];
     read_i16_slice(&mut file, &mut output_weights)?;
 
@@ -374,7 +374,7 @@ mod tests {
 
         // We can't easily test with weights without a file or mocking the Network global,
         // but the struct size is correct.
-        assert_eq!(acc.v.len(), 256);
+        assert_eq!(acc.v.len(), 512);
     }
 
     #[test]
