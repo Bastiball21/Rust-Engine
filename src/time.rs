@@ -18,6 +18,7 @@ pub struct TimeManager {
     pub start_time: Instant,
     pub hard_limit: u128,
     pub soft_limit: u128,
+    pub base_soft_limit: u128, // Store original base to apply multipliers to
 }
 
 impl TimeManager {
@@ -71,7 +72,16 @@ impl TimeManager {
             start_time,
             hard_limit: hard,
             soft_limit: soft,
+            base_soft_limit: soft,
         }
+    }
+
+    pub fn set_stability_factor(&mut self, factor: f64) {
+        // Clamp factor to prevent explosion or zero time
+        let f = factor.clamp(0.5, 4.0);
+        let new_soft = (self.base_soft_limit as f64 * f) as u128;
+        // Ensure we don't exceed hard limit
+        self.soft_limit = new_soft.min(self.hard_limit);
     }
 
     #[inline(always)]

@@ -34,6 +34,10 @@ pub struct SearchData {
     pub counter_moves: [[Option<Move>; 64]; 12],
 
     pub cont_history: Box<ContHistTable>,
+
+    // Correction History: [Piece][Square] -> Error Adjustment
+    // Piece index 0-11 covers both Side and PieceType
+    pub correction_history: [[i16; 64]; 12],
 }
 
 impl SearchData {
@@ -44,6 +48,7 @@ impl SearchData {
             capture_history: Box::new([[[0; 6]; 64]; 12]),
             counter_moves: [[None; 64]; 12],
             cont_history: Box::new([[[0; 64]; 12]; 768]),
+            correction_history: [[0; 64]; 12],
         }
     }
 
@@ -53,6 +58,7 @@ impl SearchData {
         self.capture_history.fill_with(|| [[0; 6]; 64]);
         self.counter_moves = [[None; 64]; 12];
         self.cont_history.fill_with(|| [[0; 64]; 12]);
+        self.correction_history = [[0; 64]; 12];
     }
 }
 
@@ -330,6 +336,27 @@ fn update_continuation_history(
         let c_to = mv.target as usize;
 
         update_history(&mut info.data.cont_history[idx][c_piece][c_to], bonus);
+    }
+}
+
+fn update_correction_history(
+    info: &mut SearchInfo,
+    prev_move: Option<Move>,
+    state: &GameState,
+    diff: i32,
+    depth: u8,
+) {
+    if let Some(mv) = prev_move {
+        let piece = get_piece_type_safe(state, mv.target);
+        let to = mv.target as usize;
+        let entry = &mut info.data.correction_history[piece][to];
+
+        let scaled_diff = diff.clamp(-512, 512);
+        let weight = (depth as i32).min(16);
+
+        // Update formula: Move towards diff
+        let new_val = *entry as i32 + (scaled_diff - *entry as i32) * weight / 64;
+        *entry = new_val.clamp(-16000, 16000) as i16;
     }
 }
 
@@ -619,6 +646,8 @@ pub fn search(
 
     // Time Management Variables
     let _nodes_at_root = 0;
+    let mut best_move_stability = 0;
+    let mut previous_best_move: Option<Move> = None;
 
     for depth in 1..=max_depth {
         info.seldepth = 0;
@@ -670,26 +699,24 @@ pub fn search(
         }
 
         // OPTIMIZATION: Dynamic Time Management & Verification
-        if main_thread && depth > 5 {
-            // Verification Logic:
-            // If we are in the "verification range" (depth 15-32) and the best move is tactical,
-            // or the search is unstable, we extend the soft time limit.
-            if depth >= 15 && depth <= 32 {
-                if let Some(bm) = best_move {
-                    let is_tactical = bm.is_capture
-                        || bm.promotion.is_some()
-                        || is_check(state, state.side_to_move); // Note: state side is us, checks are checks we Give? No.
-                                                                // `best_move` is a move FROM `state`.
-                                                                // `is_capture` and `promotion` are flags in `Move`.
-                                                                // To check if it gives check, we need `moves_gives_check`.
-                    let gives_check = moves_gives_check(state, bm);
-
-                    if is_tactical || gives_check {
-                        // Extend soft limit by 20%
-                        info.time_manager.soft_limit += info.time_manager.soft_limit / 5;
-                    }
-                }
+        if main_thread && depth > 4 {
+            let current_best_move = tt.get_move(state.hash);
+            if current_best_move == previous_best_move {
+                best_move_stability += 1;
+            } else {
+                best_move_stability = 0;
             }
+            previous_best_move = current_best_move;
+
+            let stability_factor = match best_move_stability {
+                0 => 2.50,
+                1 => 1.20,
+                2 => 0.90,
+                3 => 0.80,
+                _ => 0.75,
+            };
+
+            info.time_manager.set_stability_factor(stability_factor);
         }
 
         if main_thread && info.time_manager.check_soft_limit() {
@@ -883,10 +910,17 @@ fn negamax(
         }
     }
 
+    let mut raw_eval = -INFINITY;
     let static_eval = if in_check {
         -INFINITY
     } else {
-        let eval = eval::evaluate(state);
+        raw_eval = eval::evaluate(state);
+        let mut correction = 0;
+        if let Some(pm) = prev_move {
+            let piece = get_piece_type_safe(state, pm.target);
+            correction = info.data.correction_history[piece][pm.target as usize] as i32;
+        }
+        let eval = raw_eval + correction;
         info.static_evals[ply] = eval;
         eval
     };
@@ -992,7 +1026,7 @@ fn negamax(
         && tt_flag == FLAG_EXACT
         && tt_score.abs() < MATE_SCORE
     {
-        let singular_beta = tt_score.saturating_sub(2 * new_depth as i32);
+        let singular_beta = tt_score.saturating_sub(new_depth as i32);
         let reduced_depth = (new_depth - 1) / 2;
 
         let score = negamax(
@@ -1012,6 +1046,9 @@ fn negamax(
 
         if score < singular_beta {
             extension = 1;
+            if !is_pv && score < singular_beta - 16 {
+                extension = 2;
+            }
         } else if singular_beta >= beta {
             return singular_beta;
         }
@@ -1123,11 +1160,17 @@ fn negamax(
                 && !gives_check
                 && !in_check
                 && (ply >= MAX_PLY
-                    || (info.data.killers[ply][0] != Some(mv) && info.data.killers[ply][1] != Some(mv)))
+                    || (info.data.killers[ply][0] != Some(mv)
+                        && info.data.killers[ply][1] != Some(mv)))
             {
                 let d_idx = new_depth.min(63) as usize;
                 let m_idx = moves_searched.min(63) as usize;
-                reduction = LMR_TABLE.get().unwrap()[d_idx][m_idx];
+                let mut lmr_r = LMR_TABLE.get().unwrap()[d_idx][m_idx] as i32;
+
+                let history = info.data.history[mv.source as usize][mv.target as usize];
+                lmr_r -= history / 8192;
+
+                reduction = lmr_r.max(0) as u8;
             }
 
             let d = new_depth.saturating_sub(1 + reduction);
@@ -1260,6 +1303,13 @@ fn negamax(
         } else {
             return 0;
         }
+    }
+
+    // Update Correction History
+    if excluded_move.is_none() && !in_check && raw_eval != -INFINITY && max_score.abs() < MATE_SCORE
+    {
+        let diff = max_score - raw_eval;
+        update_correction_history(info, prev_move, state, diff, new_depth);
     }
 
     let flag = if max_score <= alpha {
