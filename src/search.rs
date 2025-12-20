@@ -2,7 +2,7 @@
 use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::syzygy;
-use crate::movegen::{self, MoveGenerator};
+use crate::movegen::{self, GenType, MoveGenerator};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
 use crate::time::TimeManager;
@@ -68,6 +68,238 @@ impl SearchData {
         self.counter_moves = [[None; 64]; 12];
         self.cont_history.fill_with(|| [[0; 64]; 12]);
         self.correction_history = [[0; 64]; 12];
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MovePickerStage {
+    TtMove,
+    GenerateCaptures,
+    GoodCaptures,
+    Killers,
+    GenerateQuiets,
+    Quiets,
+    BadCaptures,
+    Done,
+}
+
+pub struct MovePicker<'a> {
+    stage: MovePickerStage,
+    tt_move: Option<Move>,
+    killers: [Option<Move>; 2],
+    counter_move: Option<Move>,
+    move_list: [Move; 256],
+    move_scores: [i32; 256],
+    move_count: usize,
+    move_index: usize,
+    bad_captures: [Move; 64],
+    bad_capture_count: usize,
+    tt: &'a TranspositionTable,
+    state: &'a GameState,
+    captures_only: bool,
+}
+
+impl<'a> MovePicker<'a> {
+    pub fn new(
+        data: &SearchData,
+        tt: &'a TranspositionTable,
+        state: &'a GameState,
+        ply: usize,
+        tt_move: Option<Move>,
+        prev_move: Option<Move>,
+        captures_only: bool,
+    ) -> Self {
+        let mut killers = [None; 2];
+        let mut counter_move = None;
+
+        if !captures_only && ply < MAX_PLY {
+            killers = data.killers[ply];
+            if let Some(pm) = prev_move {
+                let p_piece = get_piece_type_safe(state, pm.target);
+                counter_move = data.counter_moves[p_piece][pm.target as usize];
+            }
+        }
+
+        Self {
+            stage: if tt_move.is_some() {
+                MovePickerStage::TtMove
+            } else {
+                MovePickerStage::GenerateCaptures
+            },
+            tt_move,
+            killers,
+            counter_move,
+            move_list: [Move::default(); 256],
+            move_scores: [0; 256],
+            move_count: 0,
+            move_index: 0,
+            bad_captures: [Move::default(); 64],
+            bad_capture_count: 0,
+            tt,
+            state,
+            captures_only,
+        }
+    }
+
+    pub fn next_move(&mut self, data: &SearchData) -> Option<Move> {
+        loop {
+            match self.stage {
+                MovePickerStage::TtMove => {
+                    self.stage = MovePickerStage::GenerateCaptures;
+                    if let Some(mv) = self.tt_move {
+                        if self.tt.is_pseudo_legal(self.state, mv) {
+                            return Some(mv);
+                        }
+                    }
+                }
+                MovePickerStage::GenerateCaptures => {
+                    self.generate_moves(GenType::Captures);
+                    self.score_captures(data);
+                    self.stage = MovePickerStage::GoodCaptures;
+                }
+                MovePickerStage::GoodCaptures => {
+                    if let Some(mv) = self.pick_best_move() {
+                        if Some(mv) != self.tt_move {
+                            let see_val = see(self.state, mv);
+                            if see_val >= 0 {
+                                return Some(mv);
+                            } else {
+                                if self.bad_capture_count < 64 {
+                                    self.bad_captures[self.bad_capture_count] = mv;
+                                    self.bad_capture_count += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        self.stage = if self.captures_only {
+                            MovePickerStage::Done
+                        } else {
+                            MovePickerStage::Killers
+                        };
+                    }
+                }
+                MovePickerStage::Killers => {
+                    self.stage = MovePickerStage::GenerateQuiets;
+                    if let Some(k1) = self.killers[0] {
+                        if Some(k1) != self.tt_move && self.tt.is_pseudo_legal(self.state, k1) && !k1.is_capture {
+                             return Some(k1);
+                        }
+                    }
+                    if let Some(k2) = self.killers[1] {
+                        if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(self.state, k2) && !k2.is_capture {
+                             return Some(k2);
+                        }
+                    }
+                    if let Some(cm) = self.counter_move {
+                         if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(self.state, cm) && !cm.is_capture {
+                             return Some(cm);
+                         }
+                    }
+                }
+                MovePickerStage::GenerateQuiets => {
+                    self.generate_moves(GenType::Quiets);
+                    self.score_quiets(data);
+                    self.stage = MovePickerStage::Quiets;
+                }
+                MovePickerStage::Quiets => {
+                    if let Some(mv) = self.pick_best_move() {
+                        if Some(mv) != self.tt_move
+                           && Some(mv) != self.killers[0]
+                           && Some(mv) != self.killers[1]
+                           && Some(mv) != self.counter_move {
+                            return Some(mv);
+                        }
+                    } else {
+                        self.stage = if self.captures_only {
+                            MovePickerStage::Done
+                        } else {
+                            MovePickerStage::BadCaptures
+                        };
+                    }
+                }
+                MovePickerStage::BadCaptures => {
+                    if self.bad_capture_count > 0 {
+                        let mv = self.bad_captures[0];
+                        for i in 0..self.bad_capture_count - 1 {
+                            self.bad_captures[i] = self.bad_captures[i+1];
+                        }
+                        self.bad_capture_count -= 1;
+                        return Some(mv);
+                    } else {
+                        self.stage = MovePickerStage::Done;
+                    }
+                }
+                MovePickerStage::Done => {
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn generate_moves(&mut self, gen_type: GenType) {
+        let mut generator = MoveGenerator::new();
+        generator.generate_moves_type(self.state, gen_type);
+        self.move_list = generator.list.moves;
+        self.move_count = generator.list.count;
+        self.move_index = 0;
+    }
+
+    fn pick_best_move(&mut self) -> Option<Move> {
+        if self.move_index >= self.move_count {
+            return None;
+        }
+
+        let mut best_score = -INFINITY;
+        let mut best_idx = self.move_index;
+
+        for i in self.move_index..self.move_count {
+            if self.move_scores[i] > best_score {
+                best_score = self.move_scores[i];
+                best_idx = i;
+            }
+        }
+
+        self.move_list.swap(self.move_index, best_idx);
+        self.move_scores.swap(self.move_index, best_idx);
+
+        let mv = self.move_list[self.move_index];
+        self.move_index += 1;
+        Some(mv)
+    }
+
+    fn score_captures(&mut self, data: &SearchData) {
+        for i in 0..self.move_count {
+            let mv = self.move_list[i];
+            let attacker = get_piece_type_safe(self.state, mv.source);
+            let victim = get_victim_type(self.state, mv.target);
+
+            let mvv_lva = [
+                [105, 104, 103, 102, 101, 100],
+                [205, 204, 203, 202, 201, 200],
+                [305, 304, 303, 302, 301, 300],
+                [405, 404, 403, 402, 401, 400],
+                [505, 504, 503, 502, 501, 500],
+                [605, 604, 603, 602, 601, 600],
+            ];
+            let mut score = if victim < 12 {
+                 100000 + mvv_lva[victim % 6][attacker % 6]
+            } else {
+                 100000 + 100
+            };
+
+            if victim < 12 {
+                score += data.capture_history[attacker][mv.target as usize][victim % 6] / 16;
+            }
+            self.move_scores[i] = score;
+        }
+    }
+
+    fn score_quiets(&mut self, data: &SearchData) {
+        for i in 0..self.move_count {
+            let mv = self.move_list[i];
+            let score = data.history[mv.source as usize][mv.target as usize];
+            self.move_scores[i] = score;
+        }
     }
 }
 
@@ -374,83 +606,8 @@ fn update_correction_history(
     }
 }
 
-fn score_move(
-    mv: Move,
-    tt_move: Option<Move>,
-    info: &SearchInfo,
-    ply: usize,
-    state: &GameState,
-    prev_move: Option<Move>,
-) -> i32 {
-    if let Some(tm) = tt_move {
-        if mv == tm {
-            return 200000;
-        }
-    }
-
-    let attacker = get_piece_type_safe(state, mv.source);
-
-    if mv.is_capture {
-        let see_val = see(state, mv);
-        let victim = get_victim_type(state, mv.target);
-
-        let mvv_lva = [
-            [105, 104, 103, 102, 101, 100],
-            [205, 204, 203, 202, 201, 200],
-            [305, 304, 303, 302, 301, 300],
-            [405, 404, 403, 402, 401, 400],
-            [505, 504, 503, 502, 501, 500],
-            [605, 604, 603, 602, 601, 600],
-        ];
-        let mut score = 100000 + mvv_lva[victim % 6][attacker % 6];
-
-        if victim < 12 {
-            score += info.data.capture_history[attacker][mv.target as usize][victim % 6] / 16;
-        }
-
-        return if see_val >= 0 { score } else { 0 }; // Bad captures ranked below history/killers (which are > 0)
-    }
-
-    if mv.promotion.is_some() {
-        return 90000;
-    }
-
-    let mut score = 0;
-    if ply < MAX_PLY {
-        if let Some(k1) = info.data.killers[ply][0] {
-            if mv == k1 {
-                return 80000;
-            }
-        }
-        if let Some(k2) = info.data.killers[ply][1] {
-            if mv == k2 {
-                return 79000;
-            }
-        }
-    }
-
-    if let Some(pm) = prev_move {
-        let p_piece = get_piece_type_safe(state, pm.target);
-        if let Some(cm) = info.data.counter_moves[p_piece][pm.target as usize] {
-            if mv == cm {
-                return 78000;
-            }
-        }
-    }
-
-    score += info.data.history[mv.source as usize][mv.target as usize];
-
-    if let Some(pm) = prev_move {
-        let p_piece = get_piece_type_safe(state, pm.target);
-        let idx = p_piece * 64 + pm.target as usize;
-        score += info.data.cont_history[idx][attacker][mv.target as usize];
-    }
-
-    // REMOVED: Tactical Quiet Move Boosts (Heavy Logic)
-    // We now rely on pure history and killers.
-
-    score.min(70000)
-}
+// REMOVED: score_move
+// Replaced by MovePicker logic
 
 // Optimized: Uses Mailbox Array for O(1) lookup
 #[inline(always)]
@@ -548,43 +705,23 @@ fn quiescence(
         }
     }
 
-    let mut generator = movegen::MoveGenerator::new();
-    generator.generate_moves(state);
-    let mut scores = [0; 256];
-    for i in 0..generator.list.count {
-        scores[i] = score_move(generator.list.moves[i], None, info, ply, state, None);
-    }
+    // Use MovePicker for QSearch (Captures only)
+    // We must pass &info.data here. In QSearch, info is &mut. We can borrow &info.data.
+    // However, update_capture_history later needs &mut info.
+    // This is the same borrow checker issue.
+    // QSearch is recursive.
+    // Solution: MovePicker does NOT hold reference to info.data. We pass it to next_move.
+
+    let mut picker = MovePicker::new(info.data, info.tt, state, ply, None, None, true);
 
     let mut legal_moves_found = 0;
 
-    for i in 0..generator.list.count {
-        let mut best_idx = i;
-        for j in (i + 1)..generator.list.count {
-            if scores[j] > scores[best_idx] {
-                best_idx = j;
-            }
-        }
-        scores.swap(i, best_idx);
-        let mv = generator.list.moves[best_idx];
-        generator.list.moves.swap(i, best_idx);
-
+    while let Some(mv) = picker.next_move(info.data) {
         if !in_check {
             // STRICT Q-Search: Only Captures and Promotions
             if !mv.is_capture && mv.promotion.is_none() {
                 continue;
             }
-            if mv.is_capture {
-                let see_val = see(state, mv);
-
-                // OPTIMIZATION: Prune bad captures in QSearch
-                if see_val < 0 {
-                    continue; // Aggressively prune bad captures
-                }
-            }
-        }
-
-        if !info.tt.is_pseudo_legal(state, mv) {
-            continue;
         }
 
         let next_state = state.make_move(mv);
@@ -1151,20 +1288,7 @@ fn negamax(
         }
     }
 
-    let mut generator = MoveGenerator::new();
-    generator.generate_moves(state);
-    let mut scores = [0; 256];
-
-    for i in 0..generator.list.count {
-        scores[i] = score_move(
-            generator.list.moves[i],
-            tt_move,
-            info,
-            ply,
-            state,
-            prev_move,
-        );
-    }
+    let mut picker = MovePicker::new(info.data, info.tt, state, ply, tt_move, prev_move, false);
 
     let mut max_score = -INFINITY;
     let mut best_move = None;
@@ -1173,23 +1297,13 @@ fn negamax(
 
     path.push(state.hash);
 
-    for i in 0..generator.list.count {
-        let mut best_idx = i;
-        for j in (i + 1)..generator.list.count {
-            if scores[j] > scores[best_idx] {
-                best_idx = j;
-            }
-        }
-        scores.swap(i, best_idx);
-        let mv = generator.list.moves[best_idx];
-        generator.list.moves.swap(i, best_idx);
-
+    while let Some(mv) = picker.next_move(info.data) {
         if Some(mv) == excluded_move {
             continue;
         }
-        if !info.tt.is_pseudo_legal(state, mv) {
-            continue;
-        }
+        // MovePicker ensures pseudo-legality for TT/Killers, and generated moves are pseudo-legal.
+        // But we double check TT move in picker.
+        // Generated moves are pseudo-legal by definition of MoveGenerator.
 
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 

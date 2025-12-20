@@ -72,6 +72,13 @@ impl MoveList {
     }
 }
 
+#[derive(PartialEq)]
+pub enum GenType {
+    All,
+    Captures,
+    Quiets,
+}
+
 pub struct MoveGenerator {
     pub list: MoveList,
 }
@@ -94,7 +101,21 @@ impl MoveGenerator {
     }
 
     #[inline(always)]
-    fn add_promotion_moves(&mut self, source: u8, target: u8, is_capture: bool) {
+    fn add_promotion_moves(&mut self, source: u8, target: u8, is_capture: bool, gen_type: &GenType) {
+        // Promotions are considered captures/tactical if they are Queens.
+        // But usually "All Promotions" are treated as special.
+        // For simplicity:
+        // Captures: generate captures + all promotions (since promotion is tactical)
+        // Quiets: generate only quiet non-promotions.
+        // However, a promotion *can* be quiet (e.g. push to 8th without capture).
+        // Standard practice: Promotions are generated in CAPTURES stage usually.
+        // We will generate ALL promotions if GenType::Captures or GenType::All.
+        // We will NOT generate promotions in GenType::Quiets.
+
+        if *gen_type == GenType::Quiets {
+            return;
+        }
+
         self.add_move(source, target, Some(Q), is_capture);
         self.add_move(source, target, Some(R), is_capture);
         self.add_move(source, target, Some(B), is_capture);
@@ -102,6 +123,10 @@ impl MoveGenerator {
     }
 
     pub fn generate_moves(&mut self, state: &GameState) {
+        self.generate_moves_type(state, GenType::All);
+    }
+
+    pub fn generate_moves_type(&mut self, state: &GameState, gen_type: GenType) {
         let side = state.side_to_move;
         let enemy = 1 - side;
         let occupancy_all = state.occupancies[BOTH];
@@ -110,6 +135,16 @@ impl MoveGenerator {
         // Prevent generating moves that capture the King (Pseudo-Legal safety)
         let enemy_king_bb = state.bitboards[if enemy == WHITE { K } else { k }];
         let occupancy_enemy = state.occupancies[enemy] & !enemy_king_bb;
+
+        // TARGET MASKS
+        // All: !friendly
+        // Captures: enemy
+        // Quiets: !friendly & !enemy (empty)
+        let target_mask = match gen_type {
+            GenType::All => !occupancy_friendly,
+            GenType::Captures => occupancy_enemy,
+            GenType::Quiets => !occupancy_all,
+        };
 
         // PAWNS
         let (pawn_type, start_rank, promo_rank, direction) = if side == WHITE {
@@ -128,13 +163,20 @@ impl MoveGenerator {
             // Quiet pushes
             if !occupancy_all.get_bit(target) {
                 if (target / 8) == promo_rank {
-                    self.add_promotion_moves(src, target, false);
+                    // Promotion (Quiet Push) -> Treated as "Capture" stage usually
+                    if gen_type != GenType::Quiets {
+                        self.add_promotion_moves(src, target, false, &gen_type);
+                    }
                 } else {
-                    self.add_move(src, target, None, false);
+                    if gen_type != GenType::Captures {
+                        self.add_move(src, target, None, false);
+                    }
                     if rank == start_rank {
                         let double = (src as i8 + (16 * direction)) as u8;
                         if !occupancy_all.get_bit(double) {
-                            self.add_move(src, double, None, false);
+                            if gen_type != GenType::Captures {
+                                self.add_move(src, double, None, false);
+                            }
                         }
                     }
                 }
@@ -146,24 +188,36 @@ impl MoveGenerator {
                 let t = (src as i8 + (8 * direction) - 1) as u8;
                 if occupancy_enemy.get_bit(t) {
                     if (t / 8) == promo_rank {
-                        self.add_promotion_moves(src, t, true);
+                        if gen_type != GenType::Quiets {
+                            self.add_promotion_moves(src, t, true, &gen_type);
+                        }
                     } else {
-                        self.add_move(src, t, None, true);
+                        if gen_type != GenType::Quiets {
+                            self.add_move(src, t, None, true);
+                        }
                     }
                 } else if t == state.en_passant {
-                    self.add_move(src, t, None, true);
+                    if gen_type != GenType::Quiets {
+                        self.add_move(src, t, None, true);
+                    }
                 }
             }
             if file < 7 {
                 let t = (src as i8 + (8 * direction) + 1) as u8;
                 if occupancy_enemy.get_bit(t) {
                     if (t / 8) == promo_rank {
-                        self.add_promotion_moves(src, t, true);
+                        if gen_type != GenType::Quiets {
+                            self.add_promotion_moves(src, t, true, &gen_type);
+                        }
                     } else {
-                        self.add_move(src, t, None, true);
+                        if gen_type != GenType::Quiets {
+                            self.add_move(src, t, None, true);
+                        }
                     }
                 } else if t == state.en_passant {
-                    self.add_move(src, t, None, true);
+                    if gen_type != GenType::Quiets {
+                        self.add_move(src, t, None, true);
+                    }
                 }
             }
         }
@@ -174,11 +228,12 @@ impl MoveGenerator {
         while knights.0 != 0 {
             let src = knights.get_lsb_index() as u8;
             knights.pop_bit(src);
-            let mut attacks = get_knight_attacks(src) & !occupancy_friendly;
+            let mut attacks = get_knight_attacks(src) & target_mask;
             while attacks.0 != 0 {
                 let t = attacks.get_lsb_index() as u8;
                 attacks.pop_bit(t);
-                self.add_move(src, t, None, occupancy_enemy.get_bit(t));
+                let is_capture = occupancy_enemy.get_bit(t);
+                self.add_move(src, t, None, is_capture);
             }
         }
 
@@ -189,15 +244,13 @@ impl MoveGenerator {
             let src = bishops.get_lsb_index() as u8;
             bishops.pop_bit(src);
             let mut attacks =
-                bitboard::get_bishop_attacks(src, occupancy_all) & !occupancy_friendly;
+                bitboard::get_bishop_attacks(src, occupancy_all) & target_mask;
             while attacks.0 != 0 {
                 let t = attacks.get_lsb_index() as u8;
                 attacks.pop_bit(t);
-                // Explicitly check for King Capture to avoid illegal generation
-                if state.occupancies[enemy].get_bit(t) && !occupancy_enemy.get_bit(t) {
-                    continue;
-                }
-                self.add_move(src, t, None, occupancy_enemy.get_bit(t));
+                let is_capture = occupancy_enemy.get_bit(t);
+                if is_capture && state.board[t as usize] as usize == K { continue; } // Safety
+                self.add_move(src, t, None, is_capture);
             }
         }
 
@@ -207,14 +260,13 @@ impl MoveGenerator {
         while rooks.0 != 0 {
             let src = rooks.get_lsb_index() as u8;
             rooks.pop_bit(src);
-            let mut attacks = bitboard::get_rook_attacks(src, occupancy_all) & !occupancy_friendly;
+            let mut attacks = bitboard::get_rook_attacks(src, occupancy_all) & target_mask;
             while attacks.0 != 0 {
                 let t = attacks.get_lsb_index() as u8;
                 attacks.pop_bit(t);
-                if state.occupancies[enemy].get_bit(t) && !occupancy_enemy.get_bit(t) {
-                    continue;
-                }
-                self.add_move(src, t, None, occupancy_enemy.get_bit(t));
+                let is_capture = occupancy_enemy.get_bit(t);
+                if is_capture && state.board[t as usize] as usize == K { continue; } // Safety
+                self.add_move(src, t, None, is_capture);
             }
         }
 
@@ -224,14 +276,13 @@ impl MoveGenerator {
         while queens.0 != 0 {
             let src = queens.get_lsb_index() as u8;
             queens.pop_bit(src);
-            let mut attacks = bitboard::get_queen_attacks(src, occupancy_all) & !occupancy_friendly;
+            let mut attacks = bitboard::get_queen_attacks(src, occupancy_all) & target_mask;
             while attacks.0 != 0 {
                 let t = attacks.get_lsb_index() as u8;
                 attacks.pop_bit(t);
-                if state.occupancies[enemy].get_bit(t) && !occupancy_enemy.get_bit(t) {
-                    continue;
-                }
-                self.add_move(src, t, None, occupancy_enemy.get_bit(t));
+                let is_capture = occupancy_enemy.get_bit(t);
+                if is_capture && state.board[t as usize] as usize == K { continue; } // Safety
+                self.add_move(src, t, None, is_capture);
             }
         }
 
@@ -240,18 +291,19 @@ impl MoveGenerator {
         let king = state.bitboards[king_type];
         if king.0 != 0 {
             let src = king.get_lsb_index() as u8;
-            let mut attacks = get_king_attacks(src) & !occupancy_friendly;
+            let mut attacks = get_king_attacks(src) & target_mask;
             while attacks.0 != 0 {
                 let t = attacks.get_lsb_index() as u8;
                 attacks.pop_bit(t);
-                if state.occupancies[enemy].get_bit(t) && !occupancy_enemy.get_bit(t) {
-                    continue;
-                }
-                self.add_move(src, t, None, occupancy_enemy.get_bit(t));
+                let is_capture = occupancy_enemy.get_bit(t);
+                if is_capture && state.board[t as usize] as usize == K { continue; } // Safety
+                self.add_move(src, t, None, is_capture);
             }
 
             // CASTLING (Chess960 Unified)
-            self.generate_castling_moves(state, src, side);
+            if gen_type != GenType::Captures {
+                self.generate_castling_moves(state, src, side);
+            }
         }
     }
 
