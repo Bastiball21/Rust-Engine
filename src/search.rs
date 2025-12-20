@@ -107,7 +107,7 @@ impl<'a> SearchInfo<'a> {
 
     #[inline(always)]
     pub fn check_time(&mut self) {
-        if self.nodes % 2048 == 0 {
+        if self.nodes % 1024 == 0 {
             if self.stop_signal.load(Ordering::Relaxed) {
                 self.stopped = true;
                 return;
@@ -367,7 +367,7 @@ fn score_move(
             score += info.data.capture_history[attacker][mv.target as usize][victim % 6] / 16;
         }
 
-        return if see_val >= 0 { score } else { score - 50000 };
+        return if see_val >= 0 { score } else { 0 }; // Bad captures ranked below history/killers (which are > 0)
     }
 
     if mv.promotion.is_some() {
@@ -490,7 +490,7 @@ fn quiescence(
         return eval::evaluate(state);
     }
     info.nodes += 1;
-    if info.nodes % 2048 == 0 {
+    if info.nodes % 1024 == 0 {
         info.check_time();
     }
     if info.stopped {
@@ -522,7 +522,7 @@ fn quiescence(
         }
     }
 
-    let mut generator = Box::new(movegen::MoveGenerator::new());
+    let mut generator = movegen::MoveGenerator::new();
     generator.generate_moves(state);
     let mut scores = [0; 256];
     for i in 0..generator.list.count {
@@ -728,7 +728,7 @@ pub fn search(
     }
 
     let mut final_move = best_move;
-    let mut generator = Box::new(movegen::MoveGenerator::new());
+    let mut generator = movegen::MoveGenerator::new();
     generator.generate_moves(state);
     let mut legal_moves = Vec::new();
     for i in 0..generator.list.count {
@@ -1008,7 +1008,7 @@ fn negamax(
         }
     }
 
-    let mut generator = Box::new(MoveGenerator::new());
+    let mut generator = MoveGenerator::new();
     generator.generate_moves(state);
     let mut scores = [0; 256];
 
