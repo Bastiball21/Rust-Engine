@@ -462,17 +462,16 @@ pub fn run_datagen(config: DatagenConfig) {
                         }
 
                         if !used_tt_hit {
-                            let tm = TimeManager::new(TimeControl::Infinite, state.side_to_move, 0);
+                            // We use FixedNodes logic from Limits to enforce node limit
+                            let limits = search::Limits::FixedNodes(node_limit);
                             let (s, m) = search::search(
                                 &state,
-                                tm,
+                                limits,
                                 &tt,
                                 Arc::new(AtomicBool::new(false)),
-                                depth_config,
                                 false,
                                 history_vec.clone(),
                                 &mut search_data,
-                                Some(node_limit),
                             );
                             search_score = s;
                             best_move = m;

@@ -25,6 +25,14 @@ type ContHistTable = [[[i32; 64]; 12]; 768];
 // LMR Table wrapped in OnceLock for safe runtime initialization
 static LMR_TABLE: OnceLock<[[u8; 64]; 64]> = OnceLock::new();
 
+#[derive(Clone, Copy)]
+pub enum Limits {
+    Infinite,
+    FixedDepth(u8),
+    FixedNodes(u64),
+    FixedTime(TimeManager),
+}
+
 pub struct SearchData {
     pub killers: [[Option<Move>; 2]; MAX_PLY + 1],
     pub history: [[i32; 64]; 64],
@@ -67,22 +75,20 @@ pub struct SearchInfo<'a> {
     pub static_evals: [i32; MAX_PLY + 1],
     pub nodes: u64,
     pub seldepth: u8,
-    pub time_manager: TimeManager,
+    pub limits: Limits,
     pub stop_signal: Arc<AtomicBool>,
     pub stopped: bool,
     pub tt: &'a TranspositionTable,
     pub main_thread: bool,
-    pub node_limit: Option<u64>,
 }
 
 impl<'a> SearchInfo<'a> {
     pub fn new(
         data: &'a mut SearchData,
-        tm: TimeManager,
+        limits: Limits,
         stop: Arc<AtomicBool>,
         tt: &'a TranspositionTable,
         main: bool,
-        node_limit: Option<u64>,
     ) -> Self {
         LMR_TABLE.get_or_init(|| {
             let mut table = [[0; 64]; 64];
@@ -102,12 +108,11 @@ impl<'a> SearchInfo<'a> {
             static_evals: [0; MAX_PLY + 1],
             nodes: 0,
             seldepth: 0,
-            time_manager: tm,
+            limits,
             stop_signal: stop,
             stopped: false,
             tt,
             main_thread: main,
-            node_limit,
         }
     }
 
@@ -118,16 +123,24 @@ impl<'a> SearchInfo<'a> {
                 self.stopped = true;
                 return;
             }
-            if let Some(limit) = self.node_limit {
-                if self.nodes >= limit {
-                    self.stopped = true;
-                    self.stop_signal.store(true, Ordering::Relaxed);
-                    return;
+
+            match &self.limits {
+                Limits::FixedNodes(limit) => {
+                    if self.nodes >= *limit {
+                        self.stopped = true;
+                        self.stop_signal.store(true, Ordering::Relaxed);
+                    }
                 }
-            }
-            if self.main_thread && self.time_manager.check_hard_limit() {
-                self.stopped = true;
-                self.stop_signal.store(true, Ordering::Relaxed);
+                Limits::FixedTime(tm) => {
+                    if self.main_thread && tm.check_hard_limit() {
+                        self.stopped = true;
+                        self.stop_signal.store(true, Ordering::Relaxed);
+                    }
+                }
+                Limits::FixedDepth(_) | Limits::Infinite => {
+                    // Strictly infinite time for these modes.
+                    // Only manual stop (handled above) can terminate.
+                }
             }
         }
     }
@@ -624,24 +637,31 @@ fn quiescence(
 
 pub fn search(
     state: &GameState,
-    tm: TimeManager,
+    limits: Limits,
     tt: &TranspositionTable,
     stop_signal: Arc<AtomicBool>,
-    max_depth: u8,
     main_thread: bool,
     history: Vec<u64>,
     search_data: &mut SearchData,
-    node_limit: Option<u64>,
 ) -> (i32, Option<Move>) {
     let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
+
+    // Determine max depth
+    let max_depth = match limits {
+        Limits::FixedDepth(d) => d,
+        _ => MAX_PLY as u8,
+    };
+
+    // Store start time for info reporting (independent of limits)
+    let start_time = std::time::Instant::now();
+
     let mut info = Box::new(SearchInfo::new(
         search_data,
-        tm,
+        limits,
         stop_signal,
         tt,
         main_thread,
-        node_limit,
     ));
     let mut path = history;
     let mut last_score = 0;
@@ -701,33 +721,36 @@ pub fn search(
         }
 
         // OPTIMIZATION: Dynamic Time Management & Verification
-        if main_thread && depth > 4 {
-            let current_best_move = tt.get_move(state.hash);
-            if current_best_move == previous_best_move {
-                best_move_stability += 1;
-            } else {
-                best_move_stability = 0;
+        // Only apply soft limits if we are in a Time Controlled search
+        if let Limits::FixedTime(ref mut tm) = info.limits {
+            if main_thread && depth > 4 {
+                let current_best_move = tt.get_move(state.hash);
+                if current_best_move == previous_best_move {
+                    best_move_stability += 1;
+                } else {
+                    best_move_stability = 0;
+                }
+                previous_best_move = current_best_move;
+
+                let stability_factor = match best_move_stability {
+                    0 => 2.50,
+                    1 => 1.20,
+                    2 => 0.90,
+                    3 => 0.80,
+                    _ => 0.75,
+                };
+
+                tm.set_stability_factor(stability_factor);
             }
-            previous_best_move = current_best_move;
 
-            let stability_factor = match best_move_stability {
-                0 => 2.50,
-                1 => 1.20,
-                2 => 0.90,
-                3 => 0.80,
-                _ => 0.75,
-            };
-
-            info.time_manager.set_stability_factor(stability_factor);
-        }
-
-        if main_thread && info.time_manager.check_soft_limit() {
-            info.stopped = true;
-            info.stop_signal.store(true, Ordering::Relaxed);
+            if main_thread && tm.check_soft_limit() {
+                info.stopped = true;
+                info.stop_signal.store(true, Ordering::Relaxed);
+            }
         }
 
         if main_thread {
-            let elapsed = info.time_manager.start_time.elapsed().as_secs_f64();
+            let elapsed = start_time.elapsed().as_secs_f64();
             let nps = if elapsed > 0.0 {
                 (info.nodes as f64 / elapsed) as u64
             } else {
@@ -759,7 +782,7 @@ pub fn search(
                 info.nodes,
                 nps,
                 tt.hashfull(),
-                info.time_manager.start_time.elapsed().as_millis(),
+                start_time.elapsed().as_millis(),
                 pv_line
             );
         }

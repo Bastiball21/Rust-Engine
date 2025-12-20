@@ -39,11 +39,7 @@ pub fn run_mate_suite() {
 
         let state = GameState::parse_fen(fen);
 
-        // FIX: Use Infinite time. This prevents the engine from stopping early (e.g. at Depth 12)
-        // when it thinks it's losing material, forcing it to find the deep mate at Depth 14+.
-        let tm = TimeManager::new(TimeControl::Infinite, state.side_to_move, 0);
-
-        // FIX: Search depth calculation.
+        // FIX: Use FixedDepth (Infinite time).
         // Lasker (M7) requires ~14 ply. Old depth was too shallow.
         // We now use (Mate * 2) + 2 safety buffer.
         let search_depth = if *expected_ply == 0 {
@@ -52,17 +48,17 @@ pub fn run_mate_suite() {
             (expected_ply * 2 + 2) as u8
         };
 
+        let limits = search::Limits::FixedDepth(search_depth);
+
         let mut search_data = search::SearchData::new();
         search::search(
             &state,
-            tm,
+            limits,
             &tt,
             stop.clone(),
-            search_depth,
             true,
             vec![],
             &mut search_data,
-            None,
         );
 
         println!("(Expected: mate {})", expected_ply);
