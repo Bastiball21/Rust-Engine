@@ -529,7 +529,7 @@ fn quiescence(
     }
 
     if ply >= MAX_PLY {
-        return eval::evaluate(state);
+        return eval::evaluate(state, alpha, beta);
     }
     info.nodes += 1;
     if info.nodes % 1024 == 0 {
@@ -542,7 +542,7 @@ fn quiescence(
     let in_check = is_in_check(state);
 
     if !in_check {
-        let stand_pat = eval::evaluate(state);
+        let stand_pat = eval::evaluate(state, alpha, beta);
         if stand_pat >= beta {
             return beta;
         }
@@ -677,8 +677,8 @@ pub fn search(
         let mut beta = INFINITY;
 
         if depth >= 5 && main_thread {
-            alpha = last_score - 50;
-            beta = last_score + 50;
+            alpha = last_score - 100;
+            beta = last_score + 100;
         }
 
         let mut score;
@@ -868,7 +868,7 @@ fn negamax(
     }
 
     if ply >= MAX_PLY {
-        return eval::evaluate(state);
+        return eval::evaluate(state, alpha, beta);
     }
     info.nodes += 1;
     if ply > info.seldepth as usize {
@@ -939,7 +939,7 @@ fn negamax(
     let static_eval = if in_check {
         -INFINITY
     } else {
-        raw_eval = eval::evaluate(state);
+        raw_eval = eval::evaluate(state, alpha, beta);
         let mut correction = 0;
         if let Some(pm) = prev_move {
             let piece = get_piece_type_safe(state, pm.target);
@@ -1080,7 +1080,7 @@ fn negamax(
 
     let mut extension = 0;
     if ply > 0
-        && new_depth >= 8
+        && new_depth >= 10
         && tt_move.is_some()
         && excluded_move.is_none()
         && tt_depth >= new_depth.saturating_sub(3)

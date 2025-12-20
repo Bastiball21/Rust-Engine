@@ -63,7 +63,7 @@ fn main() {
             // threat::analyze is no longer needed for eval::evaluate, but can be useful for debug
             let threat = threat::analyze(&state);
             println!("Threat Info: {:?}", threat);
-            let score = eval::evaluate(&state);
+            let score = eval::evaluate(&state, -32000, 32000);
             println!("Final Score (CP): {}", score);
             if score.abs() > 1000 {
                 println!("WARNING: Score is massive! This causes the 'Mate in 1' bug.");
