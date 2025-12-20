@@ -255,17 +255,8 @@ impl TranspositionTable {
             return false;
         }
 
-        let mut piece_type = 12;
-        let start = if side == WHITE { P } else { p };
-        let end = if side == WHITE { K } else { k };
-
-        for piece in start..=end {
-            if state.bitboards[piece].get_bit(from) {
-                piece_type = piece;
-                break;
-            }
-        }
-        if piece_type == 12 {
+        let piece_type = state.board[from as usize] as usize;
+        if piece_type == 12 || (piece_type / 6) != side {
             return false;
         }
 

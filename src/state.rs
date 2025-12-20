@@ -969,19 +969,22 @@ impl GameState {
              // Restore captured piece
              if mv.is_capture {
                   let captured = info.captured as usize;
-                  let enemy_side = 1 - side;
-                  let cap_sq = if (original_piece == P || original_piece == p) && target == info.en_passant {
-                       // EP Capture
-                       if side == WHITE { target - 8 } else { target + 8 }
-                  } else {
-                       target
-                  };
+                  // Handle ghost captures (capturing empty square) gracefully
+                  if captured != NO_PIECE {
+                      let enemy_side = 1 - side;
+                      let cap_sq = if (original_piece == P || original_piece == p) && target == info.en_passant {
+                           // EP Capture
+                           if side == WHITE { target - 8 } else { target + 8 }
+                      } else {
+                           target
+                      };
 
-                  self.bitboards[captured].set_bit(cap_sq);
-                  self.board[cap_sq as usize] = captured as u8;
-                  self.occupancies[enemy_side].set_bit(cap_sq);
-                  self.occupancies[BOTH].set_bit(cap_sq);
-                  added.push((captured, cap_sq as usize));
+                      self.bitboards[captured].set_bit(cap_sq);
+                      self.board[cap_sq as usize] = captured as u8;
+                      self.occupancies[enemy_side].set_bit(cap_sq);
+                      self.occupancies[BOTH].set_bit(cap_sq);
+                      added.push((captured, cap_sq as usize));
+                  }
              }
         }
 
