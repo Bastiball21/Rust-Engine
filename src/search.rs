@@ -95,7 +95,7 @@ pub struct MovePicker<'a> {
     bad_captures: [Move; 64],
     bad_capture_count: usize,
     tt: &'a TranspositionTable,
-    state: &'a GameState,
+    // state removed to allow mutable borrow in loop
     captures_only: bool,
 }
 
@@ -103,7 +103,7 @@ impl<'a> MovePicker<'a> {
     pub fn new(
         data: &SearchData,
         tt: &'a TranspositionTable,
-        state: &'a GameState,
+        state: &GameState,
         ply: usize,
         tt_move: Option<Move>,
         prev_move: Option<Move>,
@@ -136,31 +136,30 @@ impl<'a> MovePicker<'a> {
             bad_captures: [Move::default(); 64],
             bad_capture_count: 0,
             tt,
-            state,
             captures_only,
         }
     }
 
-    pub fn next_move(&mut self, data: &SearchData) -> Option<Move> {
+    pub fn next_move(&mut self, state: &GameState, data: &SearchData) -> Option<Move> {
         loop {
             match self.stage {
                 MovePickerStage::TtMove => {
                     self.stage = MovePickerStage::GenerateCaptures;
                     if let Some(mv) = self.tt_move {
-                        if self.tt.is_pseudo_legal(self.state, mv) {
+                        if self.tt.is_pseudo_legal(state, mv) {
                             return Some(mv);
                         }
                     }
                 }
                 MovePickerStage::GenerateCaptures => {
-                    self.generate_moves(GenType::Captures);
-                    self.score_captures(data);
+                    self.generate_moves(state, GenType::Captures);
+                    self.score_captures(state, data);
                     self.stage = MovePickerStage::GoodCaptures;
                 }
                 MovePickerStage::GoodCaptures => {
                     if let Some(mv) = self.pick_best_move() {
                         if Some(mv) != self.tt_move {
-                            let see_val = see(self.state, mv);
+                            let see_val = see(state, mv);
                             if see_val >= 0 {
                                 return Some(mv);
                             } else {
@@ -181,23 +180,23 @@ impl<'a> MovePicker<'a> {
                 MovePickerStage::Killers => {
                     self.stage = MovePickerStage::GenerateQuiets;
                     if let Some(k1) = self.killers[0] {
-                        if Some(k1) != self.tt_move && self.tt.is_pseudo_legal(self.state, k1) && !k1.is_capture {
+                        if Some(k1) != self.tt_move && self.tt.is_pseudo_legal(state, k1) && !k1.is_capture {
                              return Some(k1);
                         }
                     }
                     if let Some(k2) = self.killers[1] {
-                        if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(self.state, k2) && !k2.is_capture {
+                        if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(state, k2) && !k2.is_capture {
                              return Some(k2);
                         }
                     }
                     if let Some(cm) = self.counter_move {
-                         if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(self.state, cm) && !cm.is_capture {
+                         if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(state, cm) && !cm.is_capture {
                              return Some(cm);
                          }
                     }
                 }
                 MovePickerStage::GenerateQuiets => {
-                    self.generate_moves(GenType::Quiets);
+                    self.generate_moves(state, GenType::Quiets);
                     self.score_quiets(data);
                     self.stage = MovePickerStage::Quiets;
                 }
@@ -236,9 +235,9 @@ impl<'a> MovePicker<'a> {
         }
     }
 
-    fn generate_moves(&mut self, gen_type: GenType) {
+    fn generate_moves(&mut self, state: &GameState, gen_type: GenType) {
         let mut generator = MoveGenerator::new();
-        generator.generate_moves_type(self.state, gen_type);
+        generator.generate_moves_type(state, gen_type);
         self.move_list = generator.list.moves;
         self.move_count = generator.list.count;
         self.move_index = 0;
@@ -267,11 +266,11 @@ impl<'a> MovePicker<'a> {
         Some(mv)
     }
 
-    fn score_captures(&mut self, data: &SearchData) {
+    fn score_captures(&mut self, state: &GameState, data: &SearchData) {
         for i in 0..self.move_count {
             let mv = self.move_list[i];
-            let attacker = get_piece_type_safe(self.state, mv.source);
-            let victim = get_victim_type(self.state, mv.target);
+            let attacker = get_piece_type_safe(state, mv.source);
+            let victim = get_victim_type(state, mv.target);
 
             let mvv_lva = [
                 [105, 104, 103, 102, 101, 100],
@@ -647,6 +646,7 @@ fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String
                 ponder_move = Some(mv);
             }
             first = false;
+            // Legacy make_move for PV line generation (doesn't need optimization)
             curr_state = curr_state.make_move(mv);
         } else {
             break;
@@ -656,7 +656,7 @@ fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String
 }
 
 fn quiescence(
-    state: &GameState,
+    state: &mut GameState,
     mut alpha: i32,
     beta: i32,
     info: &mut SearchInfo,
@@ -705,18 +705,11 @@ fn quiescence(
         }
     }
 
-    // Use MovePicker for QSearch (Captures only)
-    // We must pass &info.data here. In QSearch, info is &mut. We can borrow &info.data.
-    // However, update_capture_history later needs &mut info.
-    // This is the same borrow checker issue.
-    // QSearch is recursive.
-    // Solution: MovePicker does NOT hold reference to info.data. We pass it to next_move.
-
     let mut picker = MovePicker::new(info.data, info.tt, state, ply, None, None, true);
 
     let mut legal_moves_found = 0;
 
-    while let Some(mv) = picker.next_move(info.data) {
+    while let Some(mv) = picker.next_move(state, info.data) {
         if !in_check {
             // STRICT Q-Search: Only Captures and Promotions
             if !mv.is_capture && mv.promotion.is_none() {
@@ -724,17 +717,27 @@ fn quiescence(
             }
         }
 
-        let next_state = state.make_move(mv);
+        // MAKE-UNMAKE IN-PLACE
+        let unmake_info = state.make_move_inplace(mv);
+
         let our_side = state.side_to_move;
-        let our_king = if our_side == WHITE { K } else { k };
-        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
-        if movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
+        // In updated state, side_to_move is already flipped.
+        // We need to check if the side that JUST MOVED (previous side) is in check.
+        // Previous side is 1 - our_side.
+        let mover = 1 - our_side;
+        let mover_king = if mover == WHITE { K } else { k };
+        let king_sq = state.bitboards[mover_king].get_lsb_index() as u8;
+
+        if movegen::is_square_attacked(state, king_sq, our_side) { // attacked by current side
+            state.unmake_move(mv, unmake_info);
             continue;
         }
 
         legal_moves_found += 1;
 
-        let score = -quiescence(&next_state, -beta, -alpha, info, ply + 1);
+        let score = -quiescence(state, -beta, -alpha, info, ply + 1);
+
+        state.unmake_move(mv, unmake_info);
 
         if info.stopped {
             return 0;
@@ -779,10 +782,6 @@ pub fn search(
         if let Some((tb_move, tb_score)) = syzygy::probe_root(state) {
             println!("info string Syzygy Found: Score {} Move {:?}", tb_score, tb_move);
             // If winning/decisive, just play it.
-            // But we might want to search a bit if we want PV.
-            // For now, if TB returns, we can trust it.
-            // If it's a win, score is high.
-            // Let's print info and return.
             let score_str = if tb_score > MATE_SCORE {
                  format!("mate {}", (MATE_VALUE - tb_score + 1) / 2)
             } else if tb_score < -MATE_SCORE {
@@ -817,6 +816,9 @@ pub fn search(
     let mut best_move_stability = 0;
     let mut previous_best_move: Option<Move> = None;
 
+    // Create a mutable copy of state for the search
+    let mut root_state = *state;
+
     for depth in 1..=max_depth {
         info.seldepth = 0;
         let mut alpha = -INFINITY;
@@ -841,7 +843,7 @@ pub fn search(
             }
 
             score = negamax(
-                state, depth, alpha, beta, &mut info, 0, true, &mut path, None, None, None, false,
+                &mut root_state, depth, alpha, beta, &mut info, 0, true, &mut path, None, None, None, false,
             );
             if info.stopped {
                 break;
@@ -940,7 +942,8 @@ pub fn search(
     let mut legal_moves = Vec::new();
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
-        let next_state = state.make_move(mv);
+        let mut next_state = *state;
+        next_state.make_move_inplace(mv);
         let our_king = if state.side_to_move == WHITE { K } else { k };
         let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
         if !movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
@@ -985,7 +988,7 @@ pub fn search(
 }
 
 fn negamax(
-    state: &GameState,
+    state: &mut GameState,
     depth: u8,
     mut alpha: i32,
     beta: i32,
@@ -1017,28 +1020,11 @@ fn negamax(
         return eval::evaluate(state, alpha, beta);
     }
 
-    // Syzygy Probing in Search (WDL)
-    // Only probe if not at root (root handled separately), and not too deep (efficiency).
-    // Usually probe if ply > 0 and piece count is low.
-    // Optimization: Check piece count < X.
-    // fathom handles piece count check internally usually? No, we should check.
-    // 5-man or 6-man TBs.
-    // Probe if <= 6 pieces (arbitrary limit for performance, assume 6-man TB max)
+    // Syzygy Probing
     if ply > 0 && state.occupancies[BOTH].count_bits() <= 6 && state.castling_rights == 0 {
         if let Some(wdl_score) = syzygy::probe_wdl(state) {
-            // Syzygy says result.
-            // If winning, wdl_score ~ 20000.
-            // If losing, wdl_score ~ -20000.
-            // Draw ~ 0.
-
-            // Bounds check
-            if wdl_score >= beta {
-                return wdl_score; // Beta Cutoff
-            }
-            if wdl_score <= alpha {
-                return wdl_score; // Alpha Cutoff (Fail Low)
-            }
-            // Exact score?
+            if wdl_score >= beta { return wdl_score; }
+            if wdl_score <= alpha { return wdl_score; }
             return wdl_score;
         }
     }
@@ -1054,8 +1040,6 @@ fn negamax(
 
     let in_check = is_check(state, state.side_to_move);
 
-    // IMPROVEMENT: Re-enable Check Extension
-    // Extend the search depth by 1 when in check to find mates and tactical defenses.
     let mut new_depth = depth;
     if in_check {
         new_depth = new_depth.saturating_add(1);
@@ -1065,18 +1049,11 @@ fn negamax(
         return quiescence(state, alpha, beta, info, ply);
     }
 
-    // REMOVED: Expensive Threat Analysis
-    // info.current_threat = Some(threat_info);
-
     // Extensions
     let mut extensions = 0;
-
-    // Tactical Extensions: Pawn to 7th
-    // If the previous move put a pawn on the 7th rank (for White) or 2nd rank (for Black), extend.
     if let Some(pm) = prev_move {
         let p_piece = get_piece_type_safe(state, pm.target);
         let rank = pm.target / 8;
-        // P=0, p=6. Rank 6 is 7th, Rank 1 is 2nd.
         if (p_piece == P && rank == 6) || (p_piece == p && rank == 1) {
             extensions += 1;
         }
@@ -1126,11 +1103,8 @@ fn negamax(
     let improving = ply >= 2 && !in_check && static_eval >= info.static_evals[ply - 2];
 
     // --- AGGRESSIVE RAZORING ---
-    // If static eval is way below alpha, drop directly to QSearch.
     if !is_pv && !in_check && excluded_move.is_none() && new_depth <= 3 {
-        // Margin scales with depth: 450 (d1), 600 (d2), 750 (d3)
         let razor_margin = 300 + (new_depth as i32 * 150);
-
         if static_eval + razor_margin < alpha {
             let v = quiescence(state, alpha, beta, info, ply);
             if v < alpha {
@@ -1139,7 +1113,7 @@ fn negamax(
         }
     }
 
-    // RFP (Reverse Futility Pruning) - TUNED: margin = 60 * depth
+    // RFP
     if !is_pv
         && !in_check
         && excluded_move.is_none()
@@ -1150,7 +1124,6 @@ fn negamax(
     }
 
     // NULL MOVE PRUNING
-    // Removed dependency on tactical_instability
     if new_depth >= 3
         && ply > 0
         && !in_check
@@ -1173,10 +1146,12 @@ fn negamax(
 
         if has_pieces {
             let reduction_depth = 3 + new_depth / 6;
-            let null_state = state.make_null_move();
+            // Make Null Move In Place
+            let unmake_info = state.make_null_move_inplace();
+
             let reduced_depth = new_depth.saturating_sub(reduction_depth as u8);
             let score = -negamax(
-                &null_state,
+                state,
                 reduced_depth,
                 -beta,
                 -beta + 1,
@@ -1187,8 +1162,11 @@ fn negamax(
                 None,
                 None,
                 None,
-                false, // Null move is not a sacrifice
+                false,
             );
+
+            state.unmake_null_move(unmake_info);
+
             if info.stopped {
                 return 0;
             }
@@ -1199,8 +1177,6 @@ fn negamax(
     }
 
     // --- PROBCUT ---
-    // Optimization: If a reduced depth search returns a value significantly above beta,
-    // we can prune this node. (Stockfish / Ethereal Logic)
     if !is_pv
         && new_depth >= 5
         && !in_check
@@ -1297,18 +1273,14 @@ fn negamax(
 
     path.push(state.hash);
 
-    while let Some(mv) = picker.next_move(info.data) {
+    while let Some(mv) = picker.next_move(state, info.data) {
         if Some(mv) == excluded_move {
             continue;
         }
-        // MovePicker ensures pseudo-legality for TT/Killers, and generated moves are pseudo-legal.
-        // But we double check TT move in picker.
-        // Generated moves are pseudo-legal by definition of MoveGenerator.
 
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 
         // 1. FUTILITY PRUNING
-        // Condition: Low depth, not in check, not PV, quiet move
         if new_depth < 5 && !in_check && !is_pv && is_quiet {
             let futility_margin = 150 * new_depth as i32;
             if static_eval + futility_margin <= alpha {
@@ -1323,29 +1295,33 @@ fn negamax(
             }
         }
 
-        let next_state = state.make_move(mv);
+        // MAKE MOVE IN PLACE
+        let unmake_info = state.make_move_inplace(mv);
+
         let our_side = state.side_to_move;
-        let our_king = if our_side == WHITE { K } else { k };
-        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
-        if movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
+        // Side flipped, so 'mover' is opposite of current 'our_side'
+        let mover = 1 - our_side;
+        let mover_king = if mover == WHITE { K } else { k };
+        let king_sq = state.bitboards[mover_king].get_lsb_index() as u8;
+
+        if movegen::is_square_attacked(state, king_sq, our_side) {
+            state.unmake_move(mv, unmake_info);
             continue;
         }
 
-        info.tt.prefetch(next_state.hash);
+        info.tt.prefetch(state.hash);
         moves_searched += 1;
         if is_quiet {
             quiets_checked += 1;
         }
 
         let move_extension = 0;
-        // Removed sacrifice candidate extension
-
         let mut score;
         if moves_searched == 1 {
             let total_extension = (extensions + move_extension + extension).min(1);
             let extended_depth = new_depth.saturating_add(total_extension);
             score = -negamax(
-                &next_state,
+                state,
                 extended_depth - 1,
                 -beta,
                 -alpha,
@@ -1356,15 +1332,13 @@ fn negamax(
                 Some(mv),
                 prev_move,
                 None,
-                false, // Removed sacrifice prediction
+                false,
             );
         } else {
-            // OPTIMIZATION: Use next_state for check detection instead of re-calculating
-            let gives_check = is_in_check(&next_state);
+            // Check detection is now on 'state' which is updated
+            let gives_check = is_in_check(state);
             let mut reduction = 0;
 
-            // Adjusted LMR
-            // Condition: Depth >= 3, Moved > 3, Quiet, Not in check, Not giving check, Not killer
             if new_depth >= 3
                 && moves_searched > 3
                 && is_quiet
@@ -1386,7 +1360,7 @@ fn negamax(
 
             let d = new_depth.saturating_sub(1 + reduction);
             score = -negamax(
-                &next_state,
+                state,
                 d,
                 -alpha - 1,
                 -alpha,
@@ -1402,7 +1376,7 @@ fn negamax(
 
             if score > alpha && reduction > 0 {
                 score = -negamax(
-                    &next_state,
+                    state,
                     new_depth - 1,
                     -alpha - 1,
                     -alpha,
@@ -1421,7 +1395,7 @@ fn negamax(
                 let extended_depth = new_depth.saturating_add(total_extension);
 
                 score = -negamax(
-                    &next_state,
+                    state,
                     extended_depth - 1,
                     -beta,
                     -alpha,
@@ -1436,6 +1410,8 @@ fn negamax(
                 );
             }
         }
+
+        state.unmake_move(mv, unmake_info);
 
         if info.stopped {
             path.pop();
@@ -1479,7 +1455,6 @@ fn negamax(
                 let from = mv.source as usize;
                 let to = mv.target as usize;
                 let bonus = (new_depth as i32) * (new_depth as i32);
-                // Penalize logic: -bonus
                 update_history(&mut info.data.history[from][to], -bonus);
 
                 if let Some(pm) = prev_move {
@@ -1552,6 +1527,11 @@ fn moves_gives_check(state: &GameState, mv: Move) -> bool {
     if gives_check_fast(state, mv) {
         return true;
     }
+    // With make_move_inplace, we would need to clone.
+    // However, this is only used in search heuristics check.
+    // We can just rely on 'gives_check_fast' or clone.
+    // But wait, 'moves_gives_check' calls state.make_move(mv).
+    // Let's use the legacy make_move which clones internally.
     let next_state = state.make_move(mv);
     is_in_check(&next_state)
 }
