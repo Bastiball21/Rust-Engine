@@ -105,7 +105,7 @@ pub fn uci_loop() {
 
                 stop_signal.store(false, Ordering::Relaxed);
 
-                let (tm, depth) = parse_go(game_state.side_to_move, &parts, move_overhead);
+                let limits = parse_go(game_state.side_to_move, &parts, move_overhead);
 
                 for i in 0..num_threads {
                     let state_clone = game_state;
@@ -124,7 +124,7 @@ pub fn uci_loop() {
                     safe_state.refresh_accumulator();
 
                     let stop_clone = stop_signal.clone();
-                    let tm_clone = tm;
+                    let limits_clone = limits.clone();
                     let history_clone = game_history.clone();
                     let is_main = i == 0;
                     let tt_clone = tt.clone(); // Arc clone
@@ -140,14 +140,12 @@ pub fn uci_loop() {
                                 // Pass reference to the TT inside the Arc
                                 search::search(
                                     &safe_state,
-                                    tm_clone,
+                                    limits_clone,
                                     &tt_clone,
                                     stop_clone,
-                                    depth,
                                     is_main,
                                     history_clone,
                                     &mut search_data,
-                                    None,
                                 );
                             })
                             .unwrap(),
@@ -341,8 +339,8 @@ fn square_from_str(s: &str) -> u8 {
     rank * 8 + file
 }
 
-fn parse_go(side: usize, parts: &[&str], overhead: u128) -> (TimeManager, u8) {
-    let mut depth = 64;
+fn parse_go(side: usize, parts: &[&str], overhead: u128) -> search::Limits {
+    let mut depth: Option<u8> = None;
     let mut wtime: Option<u128> = None;
     let mut btime: Option<u128> = None;
     let mut winc: Option<u128> = None;
@@ -350,12 +348,13 @@ fn parse_go(side: usize, parts: &[&str], overhead: u128) -> (TimeManager, u8) {
     let mut movestogo: Option<u32> = None;
     let mut infinite = false;
     let mut movetime: Option<u128> = None;
+    let mut nodes: Option<u64> = None;
 
     let mut i = 1;
     while i < parts.len() {
         match parts[i] {
             "depth" => {
-                depth = parts[i + 1].parse().unwrap_or(64);
+                depth = parts[i + 1].parse().ok();
                 i += 1;
             }
             "wtime" => {
@@ -385,26 +384,41 @@ fn parse_go(side: usize, parts: &[&str], overhead: u128) -> (TimeManager, u8) {
             "infinite" => {
                 infinite = true;
             }
+            "nodes" => {
+                nodes = Some(parts[i + 1].parse().unwrap_or(u64::MAX));
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
     }
 
-    let tc = if infinite {
-        TimeControl::Infinite
-    } else if let Some(mt) = movetime {
-        TimeControl::MoveTime(mt)
-    } else if wtime.is_some() || btime.is_some() {
-        TimeControl::GameTime {
-            wtime: wtime.unwrap_or(0),
-            btime: btime.unwrap_or(0),
-            winc: winc.unwrap_or(0),
-            binc: binc.unwrap_or(0),
-            moves_to_go: movestogo,
-        }
-    } else {
-        TimeControl::Infinite
-    };
+    if infinite {
+        return search::Limits::Infinite;
+    }
 
-    (TimeManager::new(tc, side, overhead), depth)
+    if let Some(n) = nodes {
+        return search::Limits::FixedNodes(n);
+    }
+
+    if movetime.is_some() || wtime.is_some() || btime.is_some() {
+        let tc = if let Some(mt) = movetime {
+            TimeControl::MoveTime(mt)
+        } else {
+            TimeControl::GameTime {
+                wtime: wtime.unwrap_or(0),
+                btime: btime.unwrap_or(0),
+                winc: winc.unwrap_or(0),
+                binc: binc.unwrap_or(0),
+                moves_to_go: movestogo,
+            }
+        };
+        return search::Limits::FixedTime(TimeManager::new(tc, side, overhead));
+    }
+
+    if let Some(d) = depth {
+        return search::Limits::FixedDepth(d);
+    }
+
+    search::Limits::Infinite
 }
