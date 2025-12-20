@@ -139,7 +139,7 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
     let enemy = 1 - side;
     let enemy_king_sq = state.bitboards[if enemy == WHITE { K } else { k }].get_lsb_index() as u8;
 
-    let mut piece = get_piece_type_safe_optimized(state, mv.source, side);
+    let mut piece = get_piece_type_safe(state, mv.source);
     if let Some(p_promo) = mv.promotion {
         piece = if side == WHITE { p_promo } else { p_promo + 6 };
     }
@@ -438,23 +438,25 @@ fn score_move(
     score.min(70000)
 }
 
+// Optimized: Checks side occupancy first to halve the bitboard lookups
 fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
-    for piece in 0..12 {
-        if state.bitboards[piece].get_bit(square) {
-            return piece;
+    // Check White pieces
+    if state.occupancies[WHITE].get_bit(square) {
+        for piece in 0..6 {
+            if state.bitboards[piece].get_bit(square) {
+                return piece;
+            }
         }
     }
-    12
-}
-
-fn get_piece_type_safe_optimized(state: &GameState, square: u8, side: usize) -> usize {
-    let start = if side == WHITE { 0 } else { 6 };
-    let end = if side == WHITE { 5 } else { 11 };
-    for piece in start..=end {
-        if state.bitboards[piece].get_bit(square) {
-            return piece;
+    // Check Black pieces
+    else if state.occupancies[BLACK].get_bit(square) {
+        for piece in 6..12 {
+            if state.bitboards[piece].get_bit(square) {
+                return piece;
+            }
         }
     }
+    // Empty or Invalid
     12
 }
 
@@ -927,8 +929,12 @@ fn negamax(
 
     let improving = ply >= 2 && !in_check && static_eval >= info.static_evals[ply - 2];
 
-    if !is_pv && !in_check && new_depth == 1 && excluded_move.is_none() {
-        let razor_margin = 300;
+    // --- AGGRESSIVE RAZORING ---
+    // If static eval is way below alpha, drop directly to QSearch.
+    if !is_pv && !in_check && excluded_move.is_none() && new_depth <= 3 {
+        // Margin scales with depth: 450 (d1), 600 (d2), 750 (d3)
+        let razor_margin = 300 + (new_depth as i32 * 150);
+
         if static_eval + razor_margin < alpha {
             let v = quiescence(state, alpha, beta, info, ply);
             if v < alpha {
@@ -993,6 +999,38 @@ fn negamax(
             if score >= beta {
                 return beta;
             }
+        }
+    }
+
+    // --- PROBCUT ---
+    // Optimization: If a reduced depth search returns a value significantly above beta,
+    // we can prune this node. (Stockfish / Ethereal Logic)
+    if !is_pv
+        && new_depth >= 5
+        && !in_check
+        && excluded_move.is_none()
+        && beta.abs() < MATE_SCORE
+    {
+        let prob_beta = beta + 200;
+        let prob_depth = new_depth - 4; // Significantly reduced depth
+
+        let prob_score = -negamax(
+            state,
+            prob_depth,
+            -prob_beta,
+            -prob_beta + 1,
+            info,
+            ply + 1,
+            false,
+            path,
+            prev_move,
+            prev_prev_move,
+            None,
+            was_sacrifice,
+        );
+
+        if prob_score >= prob_beta {
+            return prob_score;
         }
     }
 
