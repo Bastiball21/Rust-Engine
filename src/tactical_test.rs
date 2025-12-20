@@ -2,9 +2,9 @@
 #[cfg(test)]
 mod tactical_tests {
     use crate::state::GameState;
-    use crate::threat::{self, ThreatInfo};
-    use crate::state::{WHITE, BLACK};
     use crate::state::N;
+    use crate::state::{BLACK, WHITE};
+    use crate::threat::{self, ThreatInfo};
 
     #[test]
     fn test_dominance_bonus() {
@@ -25,7 +25,11 @@ mod tactical_tests {
         let score = threat::is_dominant_square(&state, e5 as u8, knight_idx, WHITE);
 
         // Should be positive (Rank 5, supported by d4 pawn)
-        assert!(score > 0, "Knight on e5 should get dominance bonus. Score: {}", score);
+        assert!(
+            score > 0,
+            "Knight on e5 should get dominance bonus. Score: {}",
+            score
+        );
     }
 
     #[test]
@@ -55,7 +59,13 @@ mod tactical_tests {
         let impact = threat::analyze_move_threat_impact(&state, mv, &current_threat);
 
         println!("Threat Score: {}", impact.threat_score);
-        assert!(impact.threat_score > 0, "Quiet move creating mate threat should have positive threat score");
-        assert!(impact.is_tactical, "Should be classified as tactical quiet move");
+        assert!(
+            impact.threat_score > 0,
+            "Quiet move creating mate threat should have positive threat score"
+        );
+        assert!(
+            impact.is_tactical,
+            "Should be classified as tactical quiet move"
+        );
     }
 }

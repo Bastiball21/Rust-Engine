@@ -1,8 +1,8 @@
 #![allow(non_upper_case_globals)]
 use crate::bitboard::{self, Bitboard};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
+use std::cmp::{max, min};
 use std::sync::OnceLock;
-use std::cmp::{min, max};
 
 // --- SAFE GLOBAL TABLES ---
 static KNIGHT_TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
@@ -30,13 +30,17 @@ pub fn init_move_tables() {
 
 #[inline(always)]
 pub fn get_knight_attacks(sq: u8) -> Bitboard {
-    if sq >= 64 { return Bitboard(0); } // Safety check
+    if sq >= 64 {
+        return Bitboard(0);
+    } // Safety check
     KNIGHT_TABLE.get().expect("Move tables not initialized")[sq as usize]
 }
 
 #[inline(always)]
 pub fn get_king_attacks(sq: u8) -> Bitboard {
-    if sq >= 64 { return Bitboard(0); } // Safety check
+    if sq >= 64 {
+        return Bitboard(0);
+    } // Safety check
     KING_TABLE.get().expect("Move tables not initialized")[sq as usize]
 }
 
@@ -261,9 +265,17 @@ impl MoveGenerator {
         for side_idx in 0..2 {
             // Check rights mask
             let mask = if side == WHITE {
-                if side_idx == 0 { 1 } else { 2 }
+                if side_idx == 0 {
+                    1
+                } else {
+                    2
+                }
             } else {
-                if side_idx == 0 { 4 } else { 8 }
+                if side_idx == 0 {
+                    4
+                } else {
+                    8
+                }
             };
 
             if (state.castling_rights & mask) != 0 {
@@ -325,7 +337,9 @@ impl MoveGenerator {
                 let end = max(king_sq, k_dst);
 
                 for sq in start..=end {
-                    if sq == king_sq { continue; } // Already checked
+                    if sq == king_sq {
+                        continue;
+                    } // Already checked
                     if is_square_attacked(state, sq, enemy) {
                         safe = false;
                         break;
@@ -341,12 +355,21 @@ impl MoveGenerator {
         }
     }
 
-    fn is_path_clear(&self, state: &GameState, from: u8, to: u8, ignore_k: u8, ignore_r: u8) -> bool {
+    fn is_path_clear(
+        &self,
+        state: &GameState,
+        from: u8,
+        to: u8,
+        ignore_k: u8,
+        ignore_r: u8,
+    ) -> bool {
         let start = min(from, to);
         let end = max(from, to);
 
         for sq in start..=end {
-            if sq == ignore_k || sq == ignore_r { continue; }
+            if sq == ignore_k || sq == ignore_r {
+                continue;
+            }
             if state.occupancies[BOTH].get_bit(sq) {
                 return false;
             }
@@ -448,7 +471,7 @@ pub fn gives_check(state: &GameState, mv: Move) -> bool {
         // If target contains friendly rook, it's castling
         let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
         if friendly_rooks.get_bit(to) {
-             return slow_gives_check(state, mv);
+            return slow_gives_check(state, mv);
         }
         // Legacy distance check for safety
         if (from as i8 - to as i8).abs() == 2 {

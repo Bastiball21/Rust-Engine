@@ -3,6 +3,7 @@
 mod bitboard;
 mod book;
 mod bullet_helper;
+mod chess960; // Helper
 mod datagen;
 mod endgame;
 mod eval;
@@ -13,17 +14,16 @@ mod pawn;
 mod perft;
 mod search;
 mod state;
-mod tests;
 mod tactical_test;
+mod tests;
+#[cfg(test)]
+mod tests_chess960;
 mod threat;
 mod time;
 mod tt;
 mod tuning;
 mod uci;
-mod zobrist;
-mod chess960; // Helper
-#[cfg(test)]
-mod tests_chess960; // Tests
+mod zobrist; // Tests
 
 use std::env;
 use std::thread;

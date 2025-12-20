@@ -1,7 +1,6 @@
-
-use bulletformat::ChessBoard;
 use crate::state::GameState;
 use crate::state::WHITE;
+use bulletformat::ChessBoard;
 
 pub fn convert_to_bullet(state: &GameState, score: i16, result: f32) -> ChessBoard {
     // 1. Bitboards: [White, Black, Pawn, Knight, Bishop, Rook, Queen, King]
@@ -11,8 +10,18 @@ pub fn convert_to_bullet(state: &GameState, score: i16, result: f32) -> ChessBoa
     // State has bitboards[12] -> [P, N, B, R, Q, K, p, n, b, r, q, k]
 
     // Extract .0 from Bitboard wrappers
-    let w = state.bitboards[0].0 | state.bitboards[1].0 | state.bitboards[2].0 | state.bitboards[3].0 | state.bitboards[4].0 | state.bitboards[5].0;
-    let b = state.bitboards[6].0 | state.bitboards[7].0 | state.bitboards[8].0 | state.bitboards[9].0 | state.bitboards[10].0 | state.bitboards[11].0;
+    let w = state.bitboards[0].0
+        | state.bitboards[1].0
+        | state.bitboards[2].0
+        | state.bitboards[3].0
+        | state.bitboards[4].0
+        | state.bitboards[5].0;
+    let b = state.bitboards[6].0
+        | state.bitboards[7].0
+        | state.bitboards[8].0
+        | state.bitboards[9].0
+        | state.bitboards[10].0
+        | state.bitboards[11].0;
 
     bbs[0] = w; // White
     bbs[1] = b; // Black

@@ -1,6 +1,6 @@
 // src/chess960.rs
 use crate::bitboard::Bitboard;
-use crate::state::{GameState, B, K, N, Q, R, b, k, n, q, r, BOTH, WHITE, BLACK, P, p};
+use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 
 pub fn generate_chess960_position(index: u16) -> GameState {
     let mut state = GameState::new();
@@ -41,10 +41,16 @@ pub fn generate_chess960_position(index: u16) -> GameState {
     let kn_code = val % 10;
     // table of knights positions
     let kn_table = [
-        (0, 1), (0, 2), (0, 3), (0, 4),
-        (1, 2), (1, 3), (1, 4),
-        (2, 3), (2, 4),
-        (3, 4)
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (2, 3),
+        (2, 4),
+        (3, 4),
     ];
     let (k1_idx, k2_idx) = kn_table[kn_code as usize];
 

@@ -52,7 +52,12 @@ impl Accumulator {
     }
 
     #[inline(always)]
-    pub fn refresh(&mut self, bitboards: &[crate::bitboard::Bitboard; 12], perspective: usize, king_sq: usize) {
+    pub fn refresh(
+        &mut self,
+        bitboards: &[crate::bitboard::Bitboard; 12],
+        perspective: usize,
+        king_sq: usize,
+    ) {
         if let Some(net) = NETWORK.get() {
             // Start with biases
             self.v.copy_from_slice(&net.feature_biases);
@@ -78,12 +83,18 @@ impl Accumulator {
                 }
             }
         } else {
-             self.magic = 0;
+            self.magic = 0;
         }
     }
 
     #[inline(always)]
-    pub fn update(&mut self, added: &[(usize, usize)], removed: &[(usize, usize)], perspective: usize, king_sq: usize) {
+    pub fn update(
+        &mut self,
+        added: &[(usize, usize)],
+        removed: &[(usize, usize)],
+        perspective: usize,
+        king_sq: usize,
+    ) {
         if let Some(net) = NETWORK.get() {
             let king_bucket = get_king_bucket(perspective, king_sq);
 
@@ -255,7 +266,9 @@ pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
 
             let mut arr = [0i32; 8];
             _mm256_storeu_si256(arr.as_mut_ptr() as *mut __m256i, sum_vec);
-            for x in arr { sum += x; }
+            for x in arr {
+                sum += x;
+            }
         }
 
         #[cfg(not(target_arch = "x86_64"))]
@@ -351,8 +364,13 @@ mod tests {
     #[test]
     fn test_accumulator_logic() {
         // Mock Accumulator
-        let acc = Accumulator { v: [0; LAYER1_SIZE], magic: 0 };
-        for x in acc.v { assert_eq!(x, 0); }
+        let acc = Accumulator {
+            v: [0; LAYER1_SIZE],
+            magic: 0,
+        };
+        for x in acc.v {
+            assert_eq!(x, 0);
+        }
 
         // We can't easily test with weights without a file or mocking the Network global,
         // but the struct size is correct.
