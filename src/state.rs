@@ -58,6 +58,17 @@ pub struct Move {
     pub is_capture: bool,
 }
 
+impl Default for Move {
+    fn default() -> Self {
+        Self {
+            source: 0,
+            target: 0,
+            promotion: None,
+            is_capture: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GameState {
     pub bitboards: [Bitboard; 12],
