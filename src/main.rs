@@ -101,7 +101,12 @@ fn main() {
 
             // Optional Book
             let book_path = if args.len() > 6 {
-                Some(args[6].clone())
+                let s = args[6].clone();
+                if s == "none" || s == "-" {
+                    None
+                } else {
+                    Some(s)
+                }
             } else {
                 None
             };
@@ -112,6 +117,20 @@ fn main() {
                 16
             };
 
+            let seed = if args.len() > 8 {
+                args[8].parse().unwrap_or_else(|_| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64
+                })
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64
+            };
+
             let config = datagen::DatagenConfig {
                 num_games: games,
                 num_threads: threads,
@@ -119,6 +138,7 @@ fn main() {
                 filename,
                 book_path,
                 book_ply,
+                seed,
             };
 
             datagen::run_datagen(config);

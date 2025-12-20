@@ -33,6 +33,7 @@ pub struct DatagenConfig {
     pub filename: String,
     pub book_path: Option<String>,
     pub book_ply: usize,
+    pub seed: u64,
 }
 
 // --- SplitMix64 RNG ---
@@ -163,6 +164,7 @@ pub fn run_datagen(config: DatagenConfig) {
     println!("  Threads:  {}", config.num_threads);
     println!("  Depth:    {}", config.depth);
     println!("  Output:   {}", config.filename);
+    println!("  Seed:     {}", config.seed);
 
     // Load Book
     let book = if let Some(ref path) = config.book_path {
@@ -268,11 +270,9 @@ pub fn run_datagen(config: DatagenConfig) {
             .spawn(move || {
                 let mut tt = TranspositionTable::new(32); // 32MB per thread
                 let mut rng = Rng::new(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64
-                        ^ (t_id as u64).wrapping_mul(0xDEADBEEF),
+                    config
+                        .seed
+                        .wrapping_add((t_id as u64).wrapping_mul(0xDEADBEEF)),
                 );
                 let mut search_data = search::SearchData::new();
 
