@@ -1229,14 +1229,15 @@ fn negamax(
 
     let mut extension = 0;
     if ply > 0
-        && new_depth >= 10
+        && new_depth >= 8
         && tt_move.is_some()
         && excluded_move.is_none()
         && tt_depth >= new_depth.saturating_sub(3)
         && tt_flag == FLAG_EXACT
         && tt_score.abs() < MATE_SCORE
     {
-        let singular_beta = tt_score.saturating_sub(new_depth as i32);
+        let margin = 2 * new_depth as i32;
+        let singular_beta = tt_score.saturating_sub(margin);
         let reduced_depth = (new_depth - 1) / 2;
 
         let score = negamax(
@@ -1256,7 +1257,7 @@ fn negamax(
 
         if score < singular_beta {
             extension = 1;
-            if !is_pv && score < singular_beta - 16 {
+            if !is_pv && score < singular_beta - 30 {
                 extension = 2;
             }
         } else if singular_beta >= beta {
@@ -1284,6 +1285,15 @@ fn negamax(
         if new_depth < 5 && !in_check && !is_pv && is_quiet {
             let futility_margin = 150 * new_depth as i32;
             if static_eval + futility_margin <= alpha {
+                quiets_checked += 1;
+                continue;
+            }
+        }
+
+        // HISTORY PRUNING
+        if new_depth < 8 && !in_check && !is_pv && is_quiet {
+            let history = info.data.history[mv.source as usize][mv.target as usize];
+            if history < -4000 * (new_depth as i32) {
                 quiets_checked += 1;
                 continue;
             }
