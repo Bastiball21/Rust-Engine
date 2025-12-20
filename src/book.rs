@@ -211,7 +211,7 @@ fn parse_san(state: &GameState, san: &str) -> Option<Move> {
     // If piece type is P, first char is file.
     let mut file_constraint: Option<u8> = None;
     let mut rank_constraint: Option<u8> = None;
-    let mut target_sq: u8 = 64;
+    let target_sq: u8;
     let mut promotion: Option<usize> = None;
 
     // Remaining string to parse for disambiguation and target
