@@ -22,6 +22,8 @@ pub const SHIELD_MISSING_PENALTY: i32 = -20;
 pub const SHIELD_OPEN_FILE_PENALTY: i32 = -30;
 pub const SAFE_CHECK_BONUS: i32 = 15;
 
+const LAZY_EVAL_MARGIN: i32 = 600;
+
 // Mobility Weights [Piece][SquareCount] -> (Offset, Weight)
 const MOBILITY_BONUS: [(i32, i32); 4] = [
     (0, 4), // Knight
@@ -76,7 +78,7 @@ impl Trace {
 pub fn init_eval() {}
 
 // --- MAIN EVAL ---
-pub fn evaluate(state: &GameState) -> i32 {
+pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
     if crate::nnue::NETWORK.get().is_some() {
         let score = crate::nnue::evaluate(
             &state.accumulator[state.side_to_move],
@@ -84,7 +86,7 @@ pub fn evaluate(state: &GameState) -> i32 {
         );
         return score;
     }
-    let score = evaluate_hce(state);
+    let score = evaluate_hce(state, alpha, beta);
     if state.side_to_move == BLACK {
         -score
     } else {
@@ -92,7 +94,7 @@ pub fn evaluate(state: &GameState) -> i32 {
     }
 }
 
-pub fn evaluate_hce(state: &GameState) -> i32 {
+pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
     let mut mg = 0;
     let mut eg = 0;
     let mut phase = 0;
@@ -101,6 +103,60 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     let pawn_entry = crate::pawn::evaluate_pawns(state);
     mg += pawn_entry.score_mg;
     eg += pawn_entry.score_eg;
+
+    // ----------------------------------------------------------------------
+    // PASS 1: Cheap Evaluation (Material + PST)
+    // ----------------------------------------------------------------------
+    for side in [WHITE, BLACK] {
+        let us_sign = if side == WHITE { 1 } else { -1 };
+
+        // Iterate Piece Types
+        for piece_type in 0..6 {
+            let piece_idx = if side == WHITE {
+                piece_type
+            } else {
+                piece_type + 6
+            };
+            let mut bb = state.bitboards[piece_idx];
+
+            // Phase
+            let count = bb.count_bits() as i32;
+            phase += count * PHASE_WEIGHTS[piece_type];
+
+            // ⚡ Bolt: Hoist atomic loads
+            let base_mg = MG_VALS[piece_type].load(Ordering::Relaxed);
+            let base_eg = EG_VALS[piece_type].load(Ordering::Relaxed);
+
+            while bb.0 != 0 {
+                let sq = bb.get_lsb_index() as usize;
+                bb.pop_bit(sq as u8);
+
+                // 1. Fixed Material + PST
+                mg += (base_mg + get_pst(piece_type, sq, side, true)) * us_sign;
+                eg += (base_eg + get_pst(piece_type, sq, side, false)) * us_sign;
+            }
+        }
+    }
+
+    // Lazy Check
+    let phase_clamped = phase.clamp(0, 24);
+    let mut score = (mg * phase_clamped + eg * (24 - phase_clamped)) / 24;
+    let scale = crate::endgame::get_scale_factor(state, score);
+    score = (score * scale) / 128;
+
+    // Adjust for side to move (alpha/beta are relative)
+    let score_perspective = if state.side_to_move == BLACK { -score } else { score };
+
+    if score_perspective + LAZY_EVAL_MARGIN <= alpha {
+        return if state.side_to_move == BLACK { -alpha } else { alpha };
+    }
+    if score_perspective - LAZY_EVAL_MARGIN >= beta {
+        return if state.side_to_move == BLACK { -beta } else { beta };
+    }
+
+    // ----------------------------------------------------------------------
+    // PASS 2: Expensive Evaluation (Mobility, Tropism, Threats, King Safety)
+    // ----------------------------------------------------------------------
 
     // Precompute King Info
     let mut king_rings = [Bitboard(0); 2];
@@ -147,21 +203,9 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
             };
             let mut bb = state.bitboards[piece_idx];
 
-            // Phase
-            let count = bb.count_bits() as i32;
-            phase += count * PHASE_WEIGHTS[piece_type];
-
-            // ⚡ Bolt: Hoist atomic loads
-            let base_mg = MG_VALS[piece_type].load(Ordering::Relaxed);
-            let base_eg = EG_VALS[piece_type].load(Ordering::Relaxed);
-
             while bb.0 != 0 {
                 let sq = bb.get_lsb_index() as usize;
                 bb.pop_bit(sq as u8);
-
-                // 1. Fixed Material + PST
-                mg += (base_mg + get_pst(piece_type, sq, us, true)) * us_sign;
-                eg += (base_eg + get_pst(piece_type, sq, us, false)) * us_sign;
 
                 // 2. Attack Generation
                 let attacks = match piece_type {
@@ -331,9 +375,6 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     eg += (coordination_score[WHITE] - coordination_score[BLACK]) / 2;
 
     // Hanging Pieces (Only for side to move, per original logic)
-    // Actually, original logic only applied penalty to side to move.
-    // "if state.side_to_move == WHITE { mg -= threat_penalty }"
-    // We will stick to that.
     let us = state.side_to_move;
     let them = 1 - us;
     let us_sign = if us == WHITE { 1 } else { -1 };
@@ -371,8 +412,9 @@ pub fn evaluate_hce(state: &GameState) -> i32 {
     eg -= (hanging_val / 2) * us_sign;
 
     // Scaling
-    let phase = phase.clamp(0, 24);
-    let mut score = (mg * phase + eg * (24 - phase)) / 24;
+    // phase_clamped uses phase from Pass 1 (which includes all pieces, so it is correct)
+    let phase_clamped = phase.clamp(0, 24);
+    let mut score = (mg * phase_clamped + eg * (24 - phase_clamped)) / 24;
     let scale = crate::endgame::get_scale_factor(state, score);
     score = (score * scale) / 128;
 
@@ -495,7 +537,7 @@ pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
         }
     }
     // Tuning: just return optimized eval, assuming trace is only for fixed params
-    evaluate_hce(state)
+    evaluate_hce(state, -32000, 32000)
 }
 
 #[cfg(test)]
@@ -519,7 +561,7 @@ mod tests {
         let fen = "8/8/8/8/8/8/4r3/4K3 w - - 0 1";
         let state = GameState::parse_fen(fen);
 
-        let score = evaluate(&state);
+        let score = evaluate(&state, -32000, 32000);
         println!("Score: {}", score);
 
         // Without fix, score should be roughly:
@@ -556,7 +598,7 @@ mod tests {
         // Ensure NNUE is NOT used
         assert!(crate::nnue::NETWORK.get().is_none());
 
-        let score = evaluate(&state);
+        let score = evaluate(&state, -32000, 32000);
 
         println!("Score for Black (Winning): {}", score);
 
