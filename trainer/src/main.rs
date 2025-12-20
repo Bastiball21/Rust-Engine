@@ -15,7 +15,7 @@ use std::path::Path;
 
 fn main() {
     // hyperparams to fiddle with
-    let hl_size = 256;
+    let hl_size = 512;
     let initial_lr = 0.001;
     let final_lr = 0.001 * 0.3f32.powi(5);
     let superbatches = 40;
