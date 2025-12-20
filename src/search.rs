@@ -83,7 +83,7 @@ impl<'a> SearchInfo<'a> {
             for d in 0..64 {
                 for m in 0..64 {
                     if d > 2 && m > 2 {
-                        let lmr = 0.75 + (d as f64).ln() * (m as f64).ln() / 2.25;
+                        let lmr = 1.0 + (d as f64).ln() * (m as f64).ln() / 2.5;
                         table[d][m] = lmr as u8;
                     }
                 }
@@ -1059,21 +1059,12 @@ fn negamax(
 
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 
-        // 1. FUTILITY PRUNING for Quiet Moves
-        if !is_pv && !in_check && is_quiet && new_depth < 7 && excluded_move.is_none() {
-            let futility_margin = 120 * new_depth as i32;
-            if static_eval + futility_margin < alpha {
+        // 1. FUTILITY PRUNING
+        // Condition: Low depth, not in check, not PV, quiet move
+        if new_depth < 5 && !in_check && !is_pv && is_quiet {
+            let futility_margin = 150 * new_depth as i32;
+            if static_eval + futility_margin <= alpha {
                 quiets_checked += 1;
-                continue;
-            }
-        }
-
-        // 2. FUTILITY PRUNING for Captures
-        if !is_pv && !in_check && !is_quiet && new_depth < 5 && excluded_move.is_none() {
-            // Captures need a much wider margin
-            let futility_margin = 300 * new_depth as i32;
-            if static_eval + futility_margin < alpha {
-                // Remove logic that checked for sacrifice candidates
                 continue;
             }
         }
@@ -1120,31 +1111,23 @@ fn negamax(
                 false, // Removed sacrifice prediction
             );
         } else {
-            let gives_check = moves_gives_check(state, mv);
+            // OPTIMIZATION: Use next_state for check detection instead of re-calculating
+            let gives_check = is_in_check(&next_state);
             let mut reduction = 0;
 
             // Adjusted LMR
-            if new_depth >= 3 && moves_searched > 1 && is_quiet && !gives_check && !in_check {
-                // SEE Pruning check for LMR: Don't reduce good captures (N/A here, is_quiet)
-                // For quiet moves, SEE is usually 0. If negative, it's bad.
-                // If it's a "winning capture", it's not quiet.
-
+            // Condition: Depth >= 3, Moved > 3, Quiet, Not in check, Not giving check, Not killer
+            if new_depth >= 3
+                && moves_searched > 3
+                && is_quiet
+                && !gives_check
+                && !in_check
+                && (ply >= MAX_PLY
+                    || (info.data.killers[ply][0] != Some(mv) && info.data.killers[ply][1] != Some(mv)))
+            {
                 let d_idx = new_depth.min(63) as usize;
                 let m_idx = moves_searched.min(63) as usize;
                 reduction = LMR_TABLE.get().unwrap()[d_idx][m_idx];
-
-                if improving {
-                    reduction = reduction.saturating_sub(1);
-                }
-
-                if ply < MAX_PLY
-                    && (info.data.killers[ply][0] == Some(mv)
-                        || info.data.killers[ply][1] == Some(mv))
-                {
-                    reduction = reduction.saturating_sub(1);
-                }
-
-                // Removed reduction boost for tactical moves
             }
 
             let d = new_depth.saturating_sub(1 + reduction);
