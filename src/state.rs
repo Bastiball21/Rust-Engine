@@ -782,9 +782,13 @@ impl GameState {
 
                     if captured_piece == NO_PIECE as u8 {
                         panic!(
-                            "CRITICAL: Capture move on empty square! Move: {:?}, FEN: {}",
+                            "CRITICAL: Capture move on empty square! Move: {:?}, FEN: {}, BB[P]: {:x}, BB[p]: {:x}, Target: {}, Source: {}",
                             mv,
-                            self.to_fen()
+                            self.to_fen(),
+                            self.bitboards[P].0,
+                            self.bitboards[p].0,
+                            target,
+                            source
                         );
                     }
 
