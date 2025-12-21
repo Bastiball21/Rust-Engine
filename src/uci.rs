@@ -3,6 +3,7 @@ use crate::search;
 use crate::state::{k, GameState, Move, K};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::TranspositionTable;
+use crate::parameters::SearchParameters;
 use std::io::{self, BufRead};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -27,6 +28,9 @@ pub fn uci_loop() {
     // SAFE: Wrapped in Arc. TranspositionTable handles internal mutability via Atomics.
     // It implements Sync manually.
     let mut tt = Arc::new(TranspositionTable::new(64));
+
+    // Default Parameters
+    let default_params = Arc::new(SearchParameters::default());
 
     let mut game_state =
         GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
@@ -134,6 +138,7 @@ pub fn uci_loop() {
                     let history_clone = game_history.clone();
                     let is_main = i == 0;
                     let tt_clone = tt.clone(); // Arc clone
+                    let params_clone = default_params.clone();
 
                     let builder = thread::Builder::new()
                         .name(format!("search_worker_{}", i))
@@ -152,6 +157,7 @@ pub fn uci_loop() {
                                     is_main,
                                     history_clone,
                                     &mut search_data,
+                                    &params_clone,
                                 );
                             })
                             .unwrap(),
@@ -168,14 +174,24 @@ pub fn uci_loop() {
                 if parts.len() > 4 && parts[1] == "name" {
                     if parts[2] == "Hash" && parts[3] == "value" {
                         if let Ok(mb) = parts[4].parse::<usize>() {
-                            // Reallocate TT safely
-                            // Ensure no threads are running
+                            // Enforce UCI Limit 1-1024
+                            let clamped_mb = mb.clamp(1, 1024);
+
+                            // Only reallocate if different
+                            // Check if current capacity matches roughly
+                            // TT stores capacity. We can't access it easily without probing or storing it.
+                            // But we can just replace it.
+
+                            // To replace safely:
                             stop_signal.store(true, Ordering::Relaxed);
                             for h in search_threads.drain(..) {
                                 h.join().unwrap();
                             }
 
-                            tt = Arc::new(TranspositionTable::new(mb));
+                            // Reallocate if requested size is clamped
+                            // Note: We don't check 'if different' here strictly because we don't track old size easily in this scope without lock.
+                            // But reallocation is fine.
+                            tt = Arc::new(TranspositionTable::new(clamped_mb));
                         }
                     } else if parts[2] == "Threads" && parts[3] == "value" {
                         if let Ok(t) = parts[4].parse::<usize>() {

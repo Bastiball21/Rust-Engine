@@ -25,6 +25,8 @@ mod tuning;
 mod uci;
 mod zobrist; // Tests
 mod syzygy; // Added
+mod parameters;
+mod tuning_spsa;
 
 use std::env;
 use std::thread;
@@ -46,6 +48,10 @@ fn main() {
     if args.len() > 1 {
         if args[1] == "tune" {
             tuning::run_tuning();
+            return;
+        }
+        if args[1] == "tune-search" {
+            tuning_spsa::run_tuning();
             return;
         }
         if args[1] == "test" {
