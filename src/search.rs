@@ -284,7 +284,7 @@ impl<'a> MovePicker<'a> {
                  100000 + 100
             };
 
-            if victim < 12 {
+            if attacker < 12 && victim < 12 {
                 score += data.capture_history[attacker][mv.target() as usize][victim % 6] / 16;
             }
             self.move_scores[i] = score;
@@ -299,7 +299,9 @@ impl<'a> MovePicker<'a> {
             let mut score = data.history[from][to];
             if let Some(c_idx) = self.cont_index {
                 let piece = get_piece_type_safe(state, mv.source());
-                score += data.cont_history[c_idx][piece][to];
+                if piece < 12 {
+                    score += data.cont_history[c_idx][piece][to];
+                }
             }
             self.move_scores[i] = score;
         }

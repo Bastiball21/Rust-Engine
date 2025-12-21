@@ -132,7 +132,8 @@ fn run_match_batch(p1: &SearchParameters, p2: &SearchParameters, games: usize) -
         let p1 = p1_arc.clone();
         let p2 = p2_arc.clone();
 
-        handles.push(thread::spawn(move || {
+        let builder = thread::Builder::new().stack_size(32 * 1024 * 1024);
+        handles.push(builder.spawn(move || {
             let mut wins = 0.0;
             let my_games = games_per_thread;
             for i in 0..my_games {
@@ -154,7 +155,7 @@ fn run_match_batch(p1: &SearchParameters, p2: &SearchParameters, games: usize) -
                 }
             }
             tx.send(wins).unwrap();
-        }));
+        }).unwrap());
     }
 
     let mut total_wins = 0.0;
