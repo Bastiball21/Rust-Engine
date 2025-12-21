@@ -2,7 +2,7 @@
 use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::syzygy;
-use crate::movegen::{self, GenType, MoveGenerator};
+use crate::movegen::{self, MoveGenerator};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
 use crate::time::TimeManager;
@@ -68,237 +68,6 @@ impl SearchData {
         self.counter_moves = [[None; 64]; 12];
         self.cont_history.fill_with(|| [[0; 64]; 12]);
         self.correction_history = [[0; 64]; 12];
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MovePickerStage {
-    TtMove,
-    GenerateCaptures,
-    GoodCaptures,
-    Killers,
-    GenerateQuiets,
-    Quiets,
-    BadCaptures,
-    Done,
-}
-
-pub struct MovePicker<'a> {
-    stage: MovePickerStage,
-    tt_move: Option<Move>,
-    killers: [Option<Move>; 2],
-    counter_move: Option<Move>,
-    move_list: [Move; 256],
-    move_scores: [i32; 256],
-    move_count: usize,
-    move_index: usize,
-    bad_captures: [Move; 64],
-    bad_capture_count: usize,
-    tt: &'a TranspositionTable,
-    // state removed to allow mutable borrow in loop
-    captures_only: bool,
-}
-
-impl<'a> MovePicker<'a> {
-    pub fn new(
-        data: &SearchData,
-        tt: &'a TranspositionTable,
-        state: &GameState,
-        ply: usize,
-        tt_move: Option<Move>,
-        prev_move: Option<Move>,
-        captures_only: bool,
-    ) -> Self {
-        let mut killers = [None; 2];
-        let mut counter_move = None;
-
-        if !captures_only && ply < MAX_PLY {
-            killers = data.killers[ply];
-            if let Some(pm) = prev_move {
-                let p_piece = get_piece_type_safe(state, pm.target);
-                counter_move = data.counter_moves[p_piece][pm.target as usize];
-            }
-        }
-
-        Self {
-            stage: if tt_move.is_some() {
-                MovePickerStage::TtMove
-            } else {
-                MovePickerStage::GenerateCaptures
-            },
-            tt_move,
-            killers,
-            counter_move,
-            move_list: [Move::default(); 256],
-            move_scores: [0; 256],
-            move_count: 0,
-            move_index: 0,
-            bad_captures: [Move::default(); 64],
-            bad_capture_count: 0,
-            tt,
-            captures_only,
-        }
-    }
-
-    pub fn next_move(&mut self, state: &GameState, data: &SearchData) -> Option<Move> {
-        loop {
-            match self.stage {
-                MovePickerStage::TtMove => {
-                    self.stage = MovePickerStage::GenerateCaptures;
-                    if let Some(mv) = self.tt_move {
-                        if self.tt.is_pseudo_legal(state, mv) {
-                            return Some(mv);
-                        }
-                    }
-                }
-                MovePickerStage::GenerateCaptures => {
-                    self.generate_moves(state, GenType::Captures);
-                    self.score_captures(state, data);
-                    self.stage = MovePickerStage::GoodCaptures;
-                }
-                MovePickerStage::GoodCaptures => {
-                    if let Some(mv) = self.pick_best_move() {
-                        if Some(mv) != self.tt_move {
-                            let see_val = see(state, mv);
-                            if see_val >= 0 {
-                                return Some(mv);
-                            } else {
-                                if self.bad_capture_count < 64 {
-                                    self.bad_captures[self.bad_capture_count] = mv;
-                                    self.bad_capture_count += 1;
-                                }
-                            }
-                        }
-                    } else {
-                        self.stage = if self.captures_only {
-                            MovePickerStage::Done
-                        } else {
-                            MovePickerStage::Killers
-                        };
-                    }
-                }
-                MovePickerStage::Killers => {
-                    self.stage = MovePickerStage::GenerateQuiets;
-                    if let Some(k1) = self.killers[0] {
-                        if Some(k1) != self.tt_move && self.tt.is_pseudo_legal(state, k1) && !k1.is_capture {
-                             return Some(k1);
-                        }
-                    }
-                    if let Some(k2) = self.killers[1] {
-                        if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(state, k2) && !k2.is_capture {
-                             return Some(k2);
-                        }
-                    }
-                    if let Some(cm) = self.counter_move {
-                         if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(state, cm) && !cm.is_capture {
-                             return Some(cm);
-                         }
-                    }
-                }
-                MovePickerStage::GenerateQuiets => {
-                    self.generate_moves(state, GenType::Quiets);
-                    self.score_quiets(data);
-                    self.stage = MovePickerStage::Quiets;
-                }
-                MovePickerStage::Quiets => {
-                    if let Some(mv) = self.pick_best_move() {
-                        if Some(mv) != self.tt_move
-                           && Some(mv) != self.killers[0]
-                           && Some(mv) != self.killers[1]
-                           && Some(mv) != self.counter_move {
-                            return Some(mv);
-                        }
-                    } else {
-                        self.stage = if self.captures_only {
-                            MovePickerStage::Done
-                        } else {
-                            MovePickerStage::BadCaptures
-                        };
-                    }
-                }
-                MovePickerStage::BadCaptures => {
-                    if self.bad_capture_count > 0 {
-                        let mv = self.bad_captures[0];
-                        for i in 0..self.bad_capture_count - 1 {
-                            self.bad_captures[i] = self.bad_captures[i+1];
-                        }
-                        self.bad_capture_count -= 1;
-                        return Some(mv);
-                    } else {
-                        self.stage = MovePickerStage::Done;
-                    }
-                }
-                MovePickerStage::Done => {
-                    return None;
-                }
-            }
-        }
-    }
-
-    fn generate_moves(&mut self, state: &GameState, gen_type: GenType) {
-        let mut generator = MoveGenerator::new();
-        generator.generate_moves_type(state, gen_type);
-        self.move_list = generator.list.moves;
-        self.move_count = generator.list.count;
-        self.move_index = 0;
-    }
-
-    fn pick_best_move(&mut self) -> Option<Move> {
-        if self.move_index >= self.move_count {
-            return None;
-        }
-
-        let mut best_score = -INFINITY;
-        let mut best_idx = self.move_index;
-
-        for i in self.move_index..self.move_count {
-            if self.move_scores[i] > best_score {
-                best_score = self.move_scores[i];
-                best_idx = i;
-            }
-        }
-
-        self.move_list.swap(self.move_index, best_idx);
-        self.move_scores.swap(self.move_index, best_idx);
-
-        let mv = self.move_list[self.move_index];
-        self.move_index += 1;
-        Some(mv)
-    }
-
-    fn score_captures(&mut self, state: &GameState, data: &SearchData) {
-        for i in 0..self.move_count {
-            let mv = self.move_list[i];
-            let attacker = get_piece_type_safe(state, mv.source);
-            let victim = get_victim_type(state, mv.target);
-
-            let mvv_lva = [
-                [105, 104, 103, 102, 101, 100],
-                [205, 204, 203, 202, 201, 200],
-                [305, 304, 303, 302, 301, 300],
-                [405, 404, 403, 402, 401, 400],
-                [505, 504, 503, 502, 501, 500],
-                [605, 604, 603, 602, 601, 600],
-            ];
-            let mut score = if victim < 12 {
-                 100000 + mvv_lva[victim % 6][attacker % 6]
-            } else {
-                 100000 + 100
-            };
-
-            if victim < 12 {
-                score += data.capture_history[attacker][mv.target as usize][victim % 6] / 16;
-            }
-            self.move_scores[i] = score;
-        }
-    }
-
-    fn score_quiets(&mut self, data: &SearchData) {
-        for i in 0..self.move_count {
-            let mv = self.move_list[i];
-            let score = data.history[mv.source as usize][mv.target as usize];
-            self.move_scores[i] = score;
-        }
     }
 }
 
@@ -605,23 +374,115 @@ fn update_correction_history(
     }
 }
 
-// REMOVED: score_move
-// Replaced by MovePicker logic
+fn score_move(
+    mv: Move,
+    tt_move: Option<Move>,
+    info: &SearchInfo,
+    ply: usize,
+    state: &GameState,
+    prev_move: Option<Move>,
+) -> i32 {
+    if let Some(tm) = tt_move {
+        if mv == tm {
+            return 200000;
+        }
+    }
 
-// Optimized: Uses Mailbox Array for O(1) lookup
-#[inline(always)]
-fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
-    let piece = state.board[square as usize] as usize;
-    // We treat NO_PIECE as 12 in other logic, assuming NO_PIECE constant matches.
-    // If state::NO_PIECE is 12, this is direct.
-    // Let's ensure we return 12 for empty/invalid.
-    piece
+    let attacker = get_piece_type_safe(state, mv.source);
+
+    if mv.is_capture {
+        let see_val = see(state, mv);
+        let victim = get_victim_type(state, mv.target);
+
+        let mvv_lva = [
+            [105, 104, 103, 102, 101, 100],
+            [205, 204, 203, 202, 201, 200],
+            [305, 304, 303, 302, 301, 300],
+            [405, 404, 403, 402, 401, 400],
+            [505, 504, 503, 502, 501, 500],
+            [605, 604, 603, 602, 601, 600],
+        ];
+        let mut score = 100000 + mvv_lva[victim % 6][attacker % 6];
+
+        if victim < 12 {
+            score += info.data.capture_history[attacker][mv.target as usize][victim % 6] / 16;
+        }
+
+        return if see_val >= 0 { score } else { 0 }; // Bad captures ranked below history/killers (which are > 0)
+    }
+
+    if mv.promotion.is_some() {
+        return 90000;
+    }
+
+    let mut score = 0;
+    if ply < MAX_PLY {
+        if let Some(k1) = info.data.killers[ply][0] {
+            if mv == k1 {
+                return 80000;
+            }
+        }
+        if let Some(k2) = info.data.killers[ply][1] {
+            if mv == k2 {
+                return 79000;
+            }
+        }
+    }
+
+    if let Some(pm) = prev_move {
+        let p_piece = get_piece_type_safe(state, pm.target);
+        if let Some(cm) = info.data.counter_moves[p_piece][pm.target as usize] {
+            if mv == cm {
+                return 78000;
+            }
+        }
+    }
+
+    score += info.data.history[mv.source as usize][mv.target as usize];
+
+    if let Some(pm) = prev_move {
+        let p_piece = get_piece_type_safe(state, pm.target);
+        let idx = p_piece * 64 + pm.target as usize;
+        score += info.data.cont_history[idx][attacker][mv.target as usize];
+    }
+
+    // REMOVED: Tactical Quiet Move Boosts (Heavy Logic)
+    // We now rely on pure history and killers.
+
+    score.min(70000)
 }
 
-// Similar to get_piece_type_safe, just semantic distinction in code
-#[inline(always)]
+// Optimized: Checks side occupancy first to halve the bitboard lookups
+fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
+    // Check White pieces
+    if state.occupancies[WHITE].get_bit(square) {
+        for piece in 0..6 {
+            if state.bitboards[piece].get_bit(square) {
+                return piece;
+            }
+        }
+    }
+    // Check Black pieces
+    else if state.occupancies[BLACK].get_bit(square) {
+        for piece in 6..12 {
+            if state.bitboards[piece].get_bit(square) {
+                return piece;
+            }
+        }
+    }
+    // Empty or Invalid
+    12
+}
+
 fn get_victim_type(state: &GameState, square: u8) -> usize {
-    state.board[square as usize] as usize
+    let start = if state.side_to_move == WHITE { 6 } else { 0 };
+    let end = if state.side_to_move == WHITE { 11 } else { 5 };
+    for piece in start..=end {
+        if state.bitboards[piece].get_bit(square) {
+            return piece;
+        }
+    }
+    12
 }
 
 fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String, Option<Move>) {
@@ -646,7 +507,6 @@ fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String
                 ponder_move = Some(mv);
             }
             first = false;
-            // Legacy make_move for PV line generation (doesn't need optimization)
             curr_state = curr_state.make_move(mv);
         } else {
             break;
@@ -656,7 +516,7 @@ fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String
 }
 
 fn quiescence(
-    state: &mut GameState,
+    state: &GameState,
     mut alpha: i32,
     beta: i32,
     info: &mut SearchInfo,
@@ -705,39 +565,56 @@ fn quiescence(
         }
     }
 
-    let mut picker = MovePicker::new(info.data, info.tt, state, ply, None, None, true);
+    let mut generator = movegen::MoveGenerator::new();
+    generator.generate_moves(state);
+    let mut scores = [0; 256];
+    for i in 0..generator.list.count {
+        scores[i] = score_move(generator.list.moves[i], None, info, ply, state, None);
+    }
 
     let mut legal_moves_found = 0;
 
-    while let Some(mv) = picker.next_move(state, info.data) {
+    for i in 0..generator.list.count {
+        let mut best_idx = i;
+        for j in (i + 1)..generator.list.count {
+            if scores[j] > scores[best_idx] {
+                best_idx = j;
+            }
+        }
+        scores.swap(i, best_idx);
+        let mv = generator.list.moves[best_idx];
+        generator.list.moves.swap(i, best_idx);
+
         if !in_check {
             // STRICT Q-Search: Only Captures and Promotions
             if !mv.is_capture && mv.promotion.is_none() {
                 continue;
             }
+            if mv.is_capture {
+                let see_val = see(state, mv);
+
+                // OPTIMIZATION: Prune bad captures in QSearch
+                if see_val < 0 {
+                    continue; // Aggressively prune bad captures
+                }
+            }
         }
 
-        // MAKE-UNMAKE IN-PLACE
-        let unmake_info = state.make_move_inplace(mv);
+        if !info.tt.is_pseudo_legal(state, mv) {
+            continue;
+        }
 
+        let next_state = state.make_move(mv);
         let our_side = state.side_to_move;
-        // In updated state, side_to_move is already flipped.
-        // We need to check if the side that JUST MOVED (previous side) is in check.
-        // Previous side is 1 - our_side.
-        let mover = 1 - our_side;
-        let mover_king = if mover == WHITE { K } else { k };
-        let king_sq = state.bitboards[mover_king].get_lsb_index() as u8;
-
-        if movegen::is_square_attacked(state, king_sq, our_side) { // attacked by current side
-            state.unmake_move(mv, unmake_info);
+        let our_king = if our_side == WHITE { K } else { k };
+        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
+        if movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
             continue;
         }
 
         legal_moves_found += 1;
 
-        let score = -quiescence(state, -beta, -alpha, info, ply + 1);
-
-        state.unmake_move(mv, unmake_info);
+        let score = -quiescence(&next_state, -beta, -alpha, info, ply + 1);
 
         if info.stopped {
             return 0;
@@ -782,6 +659,10 @@ pub fn search(
         if let Some((tb_move, tb_score)) = syzygy::probe_root(state) {
             println!("info string Syzygy Found: Score {} Move {:?}", tb_score, tb_move);
             // If winning/decisive, just play it.
+            // But we might want to search a bit if we want PV.
+            // For now, if TB returns, we can trust it.
+            // If it's a win, score is high.
+            // Let's print info and return.
             let score_str = if tb_score > MATE_SCORE {
                  format!("mate {}", (MATE_VALUE - tb_score + 1) / 2)
             } else if tb_score < -MATE_SCORE {
@@ -816,9 +697,6 @@ pub fn search(
     let mut best_move_stability = 0;
     let mut previous_best_move: Option<Move> = None;
 
-    // Create a mutable copy of state for the search
-    let mut root_state = *state;
-
     for depth in 1..=max_depth {
         info.seldepth = 0;
         let mut alpha = -INFINITY;
@@ -843,7 +721,7 @@ pub fn search(
             }
 
             score = negamax(
-                &mut root_state, depth, alpha, beta, &mut info, 0, true, &mut path, None, None, None, false,
+                state, depth, alpha, beta, &mut info, 0, true, &mut path, None, None, None, false,
             );
             if info.stopped {
                 break;
@@ -942,8 +820,7 @@ pub fn search(
     let mut legal_moves = Vec::new();
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
-        let mut next_state = *state;
-        next_state.make_move_inplace(mv);
+        let next_state = state.make_move(mv);
         let our_king = if state.side_to_move == WHITE { K } else { k };
         let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
         if !movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
@@ -988,7 +865,7 @@ pub fn search(
 }
 
 fn negamax(
-    state: &mut GameState,
+    state: &GameState,
     depth: u8,
     mut alpha: i32,
     beta: i32,
@@ -1020,11 +897,28 @@ fn negamax(
         return eval::evaluate(state, alpha, beta);
     }
 
-    // Syzygy Probing
+    // Syzygy Probing in Search (WDL)
+    // Only probe if not at root (root handled separately), and not too deep (efficiency).
+    // Usually probe if ply > 0 and piece count is low.
+    // Optimization: Check piece count < X.
+    // fathom handles piece count check internally usually? No, we should check.
+    // 5-man or 6-man TBs.
+    // Probe if <= 6 pieces (arbitrary limit for performance, assume 6-man TB max)
     if ply > 0 && state.occupancies[BOTH].count_bits() <= 6 && state.castling_rights == 0 {
         if let Some(wdl_score) = syzygy::probe_wdl(state) {
-            if wdl_score >= beta { return wdl_score; }
-            if wdl_score <= alpha { return wdl_score; }
+            // Syzygy says result.
+            // If winning, wdl_score ~ 20000.
+            // If losing, wdl_score ~ -20000.
+            // Draw ~ 0.
+
+            // Bounds check
+            if wdl_score >= beta {
+                return wdl_score; // Beta Cutoff
+            }
+            if wdl_score <= alpha {
+                return wdl_score; // Alpha Cutoff (Fail Low)
+            }
+            // Exact score?
             return wdl_score;
         }
     }
@@ -1040,6 +934,8 @@ fn negamax(
 
     let in_check = is_check(state, state.side_to_move);
 
+    // IMPROVEMENT: Re-enable Check Extension
+    // Extend the search depth by 1 when in check to find mates and tactical defenses.
     let mut new_depth = depth;
     if in_check {
         new_depth = new_depth.saturating_add(1);
@@ -1049,11 +945,18 @@ fn negamax(
         return quiescence(state, alpha, beta, info, ply);
     }
 
+    // REMOVED: Expensive Threat Analysis
+    // info.current_threat = Some(threat_info);
+
     // Extensions
     let mut extensions = 0;
+
+    // Tactical Extensions: Pawn to 7th
+    // If the previous move put a pawn on the 7th rank (for White) or 2nd rank (for Black), extend.
     if let Some(pm) = prev_move {
         let p_piece = get_piece_type_safe(state, pm.target);
         let rank = pm.target / 8;
+        // P=0, p=6. Rank 6 is 7th, Rank 1 is 2nd.
         if (p_piece == P && rank == 6) || (p_piece == p && rank == 1) {
             extensions += 1;
         }
@@ -1103,8 +1006,11 @@ fn negamax(
     let improving = ply >= 2 && !in_check && static_eval >= info.static_evals[ply - 2];
 
     // --- AGGRESSIVE RAZORING ---
+    // If static eval is way below alpha, drop directly to QSearch.
     if !is_pv && !in_check && excluded_move.is_none() && new_depth <= 3 {
+        // Margin scales with depth: 450 (d1), 600 (d2), 750 (d3)
         let razor_margin = 300 + (new_depth as i32 * 150);
+
         if static_eval + razor_margin < alpha {
             let v = quiescence(state, alpha, beta, info, ply);
             if v < alpha {
@@ -1113,7 +1019,7 @@ fn negamax(
         }
     }
 
-    // RFP
+    // RFP (Reverse Futility Pruning) - TUNED: margin = 60 * depth
     if !is_pv
         && !in_check
         && excluded_move.is_none()
@@ -1124,6 +1030,7 @@ fn negamax(
     }
 
     // NULL MOVE PRUNING
+    // Removed dependency on tactical_instability
     if new_depth >= 3
         && ply > 0
         && !in_check
@@ -1146,12 +1053,10 @@ fn negamax(
 
         if has_pieces {
             let reduction_depth = 3 + new_depth / 6;
-            // Make Null Move In Place
-            let unmake_info = state.make_null_move_inplace();
-
+            let null_state = state.make_null_move();
             let reduced_depth = new_depth.saturating_sub(reduction_depth as u8);
             let score = -negamax(
-                state,
+                &null_state,
                 reduced_depth,
                 -beta,
                 -beta + 1,
@@ -1162,11 +1067,8 @@ fn negamax(
                 None,
                 None,
                 None,
-                false,
+                false, // Null move is not a sacrifice
             );
-
-            state.unmake_null_move(unmake_info);
-
             if info.stopped {
                 return 0;
             }
@@ -1177,6 +1079,8 @@ fn negamax(
     }
 
     // --- PROBCUT ---
+    // Optimization: If a reduced depth search returns a value significantly above beta,
+    // we can prune this node. (Stockfish / Ethereal Logic)
     if !is_pv
         && new_depth >= 5
         && !in_check
@@ -1229,15 +1133,14 @@ fn negamax(
 
     let mut extension = 0;
     if ply > 0
-        && new_depth >= 8
+        && new_depth >= 10
         && tt_move.is_some()
         && excluded_move.is_none()
         && tt_depth >= new_depth.saturating_sub(3)
         && tt_flag == FLAG_EXACT
         && tt_score.abs() < MATE_SCORE
     {
-        let margin = 2 * new_depth as i32;
-        let singular_beta = tt_score.saturating_sub(margin);
+        let singular_beta = tt_score.saturating_sub(new_depth as i32);
         let reduced_depth = (new_depth - 1) / 2;
 
         let score = negamax(
@@ -1257,7 +1160,7 @@ fn negamax(
 
         if score < singular_beta {
             extension = 1;
-            if !is_pv && score < singular_beta - 30 {
+            if !is_pv && score < singular_beta - 16 {
                 extension = 2;
             }
         } else if singular_beta >= beta {
@@ -1265,7 +1168,20 @@ fn negamax(
         }
     }
 
-    let mut picker = MovePicker::new(info.data, info.tt, state, ply, tt_move, prev_move, false);
+    let mut generator = MoveGenerator::new();
+    generator.generate_moves(state);
+    let mut scores = [0; 256];
+
+    for i in 0..generator.list.count {
+        scores[i] = score_move(
+            generator.list.moves[i],
+            tt_move,
+            info,
+            ply,
+            state,
+            prev_move,
+        );
+    }
 
     let mut max_score = -INFINITY;
     let mut best_move = None;
@@ -1274,26 +1190,31 @@ fn negamax(
 
     path.push(state.hash);
 
-    while let Some(mv) = picker.next_move(state, info.data) {
+    for i in 0..generator.list.count {
+        let mut best_idx = i;
+        for j in (i + 1)..generator.list.count {
+            if scores[j] > scores[best_idx] {
+                best_idx = j;
+            }
+        }
+        scores.swap(i, best_idx);
+        let mv = generator.list.moves[best_idx];
+        generator.list.moves.swap(i, best_idx);
+
         if Some(mv) == excluded_move {
+            continue;
+        }
+        if !info.tt.is_pseudo_legal(state, mv) {
             continue;
         }
 
         let is_quiet = !mv.is_capture && mv.promotion.is_none();
 
         // 1. FUTILITY PRUNING
+        // Condition: Low depth, not in check, not PV, quiet move
         if new_depth < 5 && !in_check && !is_pv && is_quiet {
             let futility_margin = 150 * new_depth as i32;
             if static_eval + futility_margin <= alpha {
-                quiets_checked += 1;
-                continue;
-            }
-        }
-
-        // HISTORY PRUNING
-        if new_depth < 8 && !in_check && !is_pv && is_quiet {
-            let history = info.data.history[mv.source as usize][mv.target as usize];
-            if history < -4000 * (new_depth as i32) {
                 quiets_checked += 1;
                 continue;
             }
@@ -1305,33 +1226,29 @@ fn negamax(
             }
         }
 
-        // MAKE MOVE IN PLACE
-        let unmake_info = state.make_move_inplace(mv);
-
+        let next_state = state.make_move(mv);
         let our_side = state.side_to_move;
-        // Side flipped, so 'mover' is opposite of current 'our_side'
-        let mover = 1 - our_side;
-        let mover_king = if mover == WHITE { K } else { k };
-        let king_sq = state.bitboards[mover_king].get_lsb_index() as u8;
-
-        if movegen::is_square_attacked(state, king_sq, our_side) {
-            state.unmake_move(mv, unmake_info);
+        let our_king = if our_side == WHITE { K } else { k };
+        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
+        if movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
             continue;
         }
 
-        info.tt.prefetch(state.hash);
+        info.tt.prefetch(next_state.hash);
         moves_searched += 1;
         if is_quiet {
             quiets_checked += 1;
         }
 
         let move_extension = 0;
+        // Removed sacrifice candidate extension
+
         let mut score;
         if moves_searched == 1 {
             let total_extension = (extensions + move_extension + extension).min(1);
             let extended_depth = new_depth.saturating_add(total_extension);
             score = -negamax(
-                state,
+                &next_state,
                 extended_depth - 1,
                 -beta,
                 -alpha,
@@ -1342,13 +1259,15 @@ fn negamax(
                 Some(mv),
                 prev_move,
                 None,
-                false,
+                false, // Removed sacrifice prediction
             );
         } else {
-            // Check detection is now on 'state' which is updated
-            let gives_check = is_in_check(state);
+            // OPTIMIZATION: Use next_state for check detection instead of re-calculating
+            let gives_check = is_in_check(&next_state);
             let mut reduction = 0;
 
+            // Adjusted LMR
+            // Condition: Depth >= 3, Moved > 3, Quiet, Not in check, Not giving check, Not killer
             if new_depth >= 3
                 && moves_searched > 3
                 && is_quiet
@@ -1370,7 +1289,7 @@ fn negamax(
 
             let d = new_depth.saturating_sub(1 + reduction);
             score = -negamax(
-                state,
+                &next_state,
                 d,
                 -alpha - 1,
                 -alpha,
@@ -1386,7 +1305,7 @@ fn negamax(
 
             if score > alpha && reduction > 0 {
                 score = -negamax(
-                    state,
+                    &next_state,
                     new_depth - 1,
                     -alpha - 1,
                     -alpha,
@@ -1405,7 +1324,7 @@ fn negamax(
                 let extended_depth = new_depth.saturating_add(total_extension);
 
                 score = -negamax(
-                    state,
+                    &next_state,
                     extended_depth - 1,
                     -beta,
                     -alpha,
@@ -1420,8 +1339,6 @@ fn negamax(
                 );
             }
         }
-
-        state.unmake_move(mv, unmake_info);
 
         if info.stopped {
             path.pop();
@@ -1465,6 +1382,7 @@ fn negamax(
                 let from = mv.source as usize;
                 let to = mv.target as usize;
                 let bonus = (new_depth as i32) * (new_depth as i32);
+                // Penalize logic: -bonus
                 update_history(&mut info.data.history[from][to], -bonus);
 
                 if let Some(pm) = prev_move {
@@ -1537,11 +1455,6 @@ fn moves_gives_check(state: &GameState, mv: Move) -> bool {
     if gives_check_fast(state, mv) {
         return true;
     }
-    // With make_move_inplace, we would need to clone.
-    // However, this is only used in search heuristics check.
-    // We can just rely on 'gives_check_fast' or clone.
-    // But wait, 'moves_gives_check' calls state.make_move(mv).
-    // Let's use the legacy make_move which clones internally.
     let next_state = state.make_move(mv);
     is_in_check(&next_state)
 }
