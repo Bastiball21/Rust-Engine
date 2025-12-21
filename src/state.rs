@@ -610,6 +610,14 @@ impl GameState {
              }
         }
 
+        if piece_type == NO_PIECE {
+            panic!(
+                "CRITICAL: Attempted to move from empty square! Move: {:?}, FEN: {}",
+                mv,
+                self.to_fen()
+            );
+        }
+
         let mut is_castling = false;
 
         // Detect Castling
@@ -755,6 +763,15 @@ impl GameState {
                 } else {
                     // Normal Capture
                     captured_piece = self.board[target as usize];
+
+                    if captured_piece == NO_PIECE as u8 {
+                        panic!(
+                            "CRITICAL: Capture move on empty square! Move: {:?}, FEN: {}",
+                            mv,
+                            self.to_fen()
+                        );
+                    }
+
                     if captured_piece != NO_PIECE as u8 {
                          let cap_p = captured_piece as usize;
                          self.bitboards[cap_p].pop_bit(target);
