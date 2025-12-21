@@ -3,7 +3,7 @@ use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::syzygy;
 use crate::movegen::{self, GenType, MoveGenerator};
-use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
+use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, NO_PIECE, P, Q, R, WHITE};
 use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
 use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
@@ -145,6 +145,20 @@ impl<'a> MovePicker<'a> {
                     self.stage = MovePickerStage::GenerateCaptures;
                     if let Some(mv) = self.tt_move {
                         if self.tt.is_pseudo_legal(state, mv) {
+                            // Hardening: Explicitly reject captures on empty squares unless EP
+                            // This prevents "Capture move on empty square" panics if TT/State desyncs
+                            if mv.is_capture() {
+                                let target_piece = get_piece_type_safe(state, mv.target());
+                                if target_piece == NO_PIECE {
+                                    let piece = get_piece_type_safe(state, mv.source());
+                                    let is_ep = mv.target() == state.en_passant
+                                        && (piece == P || piece == p);
+                                    if !is_ep {
+                                        // Skip this corrupt move
+                                        continue;
+                                    }
+                                }
+                            }
                             return Some(mv);
                         }
                     }
