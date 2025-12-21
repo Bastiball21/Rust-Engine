@@ -421,7 +421,7 @@ pub fn run_datagen(config: DatagenConfig) {
                         let mut is_losing = false;
                         let mut is_winning_or_decided = false;
 
-                        if let Some((score, _, _, _)) = tt.probe_data(state.hash) {
+                        if let Some((score, _, _, _)) = tt.probe_data(state.hash, &state) {
                             if score <= LOSING_SCORE_CP {
                                 is_losing = true;
                             }
@@ -452,7 +452,7 @@ pub fn run_datagen(config: DatagenConfig) {
                         let mut best_move = None;
 
                         if let Some((tt_score, tt_depth, tt_flag, tt_move)) =
-                            tt.probe_data(state.hash)
+                            tt.probe_data(state.hash, &state)
                         {
                             if tt_flag == FLAG_EXACT && tt_depth >= depth_config {
                                 search_score = tt_score;

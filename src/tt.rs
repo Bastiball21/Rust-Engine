@@ -1,7 +1,7 @@
 #![allow(non_upper_case_globals)]
 
 use crate::bitboard;
-use crate::state::{b, k, n, p, q, r, Move, B, K, N, P, Q, R, WHITE};
+use crate::state::{b, k, n, p, q, r, GameState, Move, B, K, N, P, Q, R, WHITE, NO_PIECE};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
@@ -124,7 +124,7 @@ impl TranspositionTable {
                     source: from as u8,
                     target: to as u8,
                     promotion,
-                    is_capture: false,
+                    is_capture: false, // Will be fixed by call sites via fix_move
                 })
             } else {
                 None
@@ -222,7 +222,7 @@ impl TranspositionTable {
         }
     }
 
-    pub fn probe_data(&self, hash: u64) -> Option<(i32, u8, u8, Option<Move>)> {
+    pub fn probe_data(&self, hash: u64, state: &GameState) -> Option<(i32, u8, u8, Option<Move>)> {
         let index = (hash as usize) % self.count;
         unsafe {
             let cluster = &*self.table.add(index);
@@ -233,7 +233,12 @@ impl TranspositionTable {
                 // This guarantees we see the data associated with this key.
                 if entry.key.load(Ordering::Acquire) == hash {
                     let data = entry.data.load(Ordering::Relaxed);
-                    let (score, depth, flag, _, mv) = Self::unpack(data);
+                    let (score, depth, flag, _, mut mv) = Self::unpack(data);
+
+                    if let Some(ref mut m) = mv {
+                        Self::fix_move(m, state);
+                    }
+
                     return Some((score, depth, flag, mv));
                 }
             }
@@ -241,37 +246,75 @@ impl TranspositionTable {
         None
     }
 
-    pub fn get_move(&self, hash: u64) -> Option<Move> {
-        self.probe_data(hash).and_then(|(_, _, _, m)| m)
+    pub fn get_move(&self, hash: u64, state: &GameState) -> Option<Move> {
+        self.probe_data(hash, state).and_then(|(_, _, _, m)| m)
+    }
+
+    fn fix_move(mv: &mut Move, state: &GameState) {
+        let to = mv.target as usize;
+        let captured = state.board[to];
+
+        if captured != NO_PIECE as u8 {
+            mv.is_capture = true;
+        } else if mv.target == state.en_passant {
+            // Check if it's a pawn move
+            let piece = state.board[mv.source as usize];
+            if piece == P as u8 || piece == p as u8 {
+                mv.is_capture = true;
+            } else {
+                mv.is_capture = false;
+            }
+        } else {
+            mv.is_capture = false;
+        }
     }
 
     pub fn is_pseudo_legal(&self, state: &crate::state::GameState, mv: Move) -> bool {
         let from = mv.source;
         let to = mv.target;
         let side = state.side_to_move;
-        let occ = state.occupancies[2]; // BOTH
 
         if from >= 64 || to >= 64 || from == to {
             return false;
         }
 
-        let mut piece_type = 12;
-        let start = if side == WHITE { P } else { p };
-        let end = if side == WHITE { K } else { k };
-
-        for piece in start..=end {
-            if state.bitboards[piece].get_bit(from) {
-                piece_type = piece;
-                break;
-            }
-        }
+        // MAILBOX OPTIMIZATION & STRICT VALIDATION
+        let piece_type = state.board[from as usize] as usize;
         if piece_type == 12 {
             return false;
         }
 
+        // Validate Side ownership
+        // White pieces: 0..5, Black pieces: 6..11
+        if side == WHITE {
+             if piece_type > K { return false; }
+        } else {
+             if piece_type < p || piece_type > k { return false; }
+        }
+
+        let target_piece = state.board[to as usize] as usize;
+
         // Basic capture check (own piece)
-        if state.occupancies[side].get_bit(to) {
-            return false;
+        if target_piece != 12 {
+             if side == WHITE {
+                  if target_piece <= K { return false; }
+             } else {
+                  if target_piece >= p && target_piece <= k { return false; }
+             }
+        }
+
+        // STRICT CAPTURE FLAG VALIDATION
+        let is_occupied = target_piece != 12;
+        let is_ep = to == state.en_passant && (piece_type == P || piece_type == p);
+
+        if mv.is_capture {
+            if !is_occupied && !is_ep {
+                return false; // Ghost Capture
+            }
+        } else {
+            if is_occupied {
+                return false; // State Corruption (Capture as Non-Capture)
+            }
         }
 
         match piece_type {
@@ -287,46 +330,46 @@ impl TranspositionTable {
                 false
             }
             P => {
-                if to == from + 8 && !occ.get_bit(to) {
+                if to == from + 8 && !is_occupied {
                     return true;
                 }
                 if from >= 8
                     && from <= 15
                     && to == from + 16
-                    && !occ.get_bit(from + 8)
-                    && !occ.get_bit(to)
+                    && !state.occupancies[2].get_bit(from + 8)
+                    && !is_occupied
                 {
                     return true;
                 }
                 if (to == from + 7 || to == from + 9)
-                    && (state.occupancies[1].get_bit(to) || to == state.en_passant)
+                    && (is_occupied || to == state.en_passant)
                 {
                     return true;
                 }
                 false
             }
             p => {
-                if to == from.wrapping_sub(8) && !occ.get_bit(to) {
+                if to == from.wrapping_sub(8) && !is_occupied {
                     return true;
                 }
                 if from >= 48
                     && from <= 55
                     && to == from.wrapping_sub(16)
-                    && !occ.get_bit(from.wrapping_sub(8))
-                    && !occ.get_bit(to)
+                    && !state.occupancies[2].get_bit(from.wrapping_sub(8))
+                    && !is_occupied
                 {
                     return true;
                 }
                 if (to == from.wrapping_sub(7) || to == from.wrapping_sub(9))
-                    && (state.occupancies[0].get_bit(to) || to == state.en_passant)
+                    && (is_occupied || to == state.en_passant)
                 {
                     return true;
                 }
                 false
             }
-            R | r => bitboard::get_rook_attacks(from, occ).get_bit(to),
-            B | b => bitboard::get_bishop_attacks(from, occ).get_bit(to),
-            Q | q => bitboard::get_queen_attacks(from, occ).get_bit(to),
+            R | r => bitboard::get_rook_attacks(from, state.occupancies[2]).get_bit(to),
+            B | b => bitboard::get_bishop_attacks(from, state.occupancies[2]).get_bit(to),
+            Q | q => bitboard::get_queen_attacks(from, state.occupancies[2]).get_bit(to),
             _ => false,
         }
     }

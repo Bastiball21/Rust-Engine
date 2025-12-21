@@ -631,7 +631,7 @@ fn get_pv_line(state: &GameState, tt: &TranspositionTable, depth: u8) -> (String
     let mut ponder_move = None;
     let mut first = true;
     for _ in 0..depth {
-        if let Some(mv) = tt.get_move(curr_state.hash) {
+        if let Some(mv) = tt.get_move(curr_state.hash, &curr_state) {
             if !tt.is_pseudo_legal(&curr_state, mv) {
                 break;
             }
@@ -872,7 +872,7 @@ pub fn search(
         // Only apply soft limits if we are in a Time Controlled search
         if let Limits::FixedTime(ref mut tm) = info.limits {
             if main_thread && depth > 4 {
-                let current_best_move = tt.get_move(state.hash);
+                let current_best_move = tt.get_move(state.hash, state);
                 if current_best_move == previous_best_move {
                     best_move_stability += 1;
                 } else {
@@ -913,7 +913,7 @@ pub fn search(
             };
 
             let mut pv_line = String::new();
-            if let Some(mv) = tt.get_move(state.hash) {
+            if let Some(mv) = tt.get_move(state.hash, state) {
                 if info.tt.is_pseudo_legal(state, mv) {
                     best_move = Some(mv);
                     let (line, p_move) = get_pv_line(state, tt, depth);
@@ -1066,7 +1066,7 @@ fn negamax(
 
     let depth_with_ext = new_depth.saturating_add(extensions);
 
-    if let Some((score, d, flag, mv)) = info.tt.probe_data(state.hash) {
+    if let Some((score, d, flag, mv)) = info.tt.probe_data(state.hash, state) {
         tt_score = score;
         tt_depth = d;
         tt_flag = flag;
@@ -1222,7 +1222,7 @@ fn negamax(
             None,
             was_sacrifice,
         );
-        if let Some(mv) = info.tt.get_move(state.hash) {
+        if let Some(mv) = info.tt.get_move(state.hash, state) {
             tt_move = Some(mv);
         }
     }
