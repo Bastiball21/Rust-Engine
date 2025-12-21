@@ -1,14 +1,11 @@
 // src/threat.rs
-use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
+use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::movegen;
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use std::sync::OnceLock;
 
 // --- CONSTANTS & THRESHOLDS ---
-pub const THREAT_EXTENSION_THRESHOLD: i32 = 120;
-pub const THREAT_KING_DANGER_THRESHOLD: i32 = 150;
-pub const THREAT_INSTABILITY_THRESHOLD: i32 = 200;
 pub const SACRIFICE_THREAT_THRESHOLD: i32 = 50;
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -90,13 +87,6 @@ pub fn analyze(state: &GameState) -> ThreatInfo {
     compute_coordination(state, &mut info);
     compute_clustering(state, &mut info);
 
-    // 4. Conditional Expensive Checks (1-ply Probe)
-    // Only run if static threat indicates danger or instability
-    // DISABLED: Too expensive for per-node analysis (causes massive slowdown/hang).
-    // if info.static_threat_score > 50 || info.king_danger_score[state.side_to_move] > 30 {
-    //    compute_forcing_threats(state, &mut info);
-    // }
-
     info
 }
 
@@ -113,8 +103,8 @@ pub fn analyze_move_threat_impact(
     let mut delta = ThreatDeltaScore::default();
 
     // 1. Dominant Square
-    let piece = get_piece_type_safe(state, mv.source);
-    delta.dominance_bonus = is_dominant_square(state, mv.target, piece, state.side_to_move);
+    let piece = get_piece_type_safe(state, mv.source());
+    delta.dominance_bonus = is_dominant_square(state, mv.target(), piece, state.side_to_move);
 
     // 2. Defensive Move
     // If we are currently under threat, does this move help?
@@ -126,7 +116,7 @@ pub fn analyze_move_threat_impact(
 
     // Feature #2: Dynamic Coordination (Battery Formation)
     // If quiet move, does it align with other pieces?
-    if !mv.is_capture {
+    if !mv.is_capture() {
         delta.coordination_bonus = evaluate_coordination_impact(state, mv);
 
         // Feature #3: Pawn Levers
@@ -213,12 +203,12 @@ fn evaluate_defensive_move(state: &GameState, mv: Move, threat: &ThreatInfo) -> 
     // Check if 'from' square was attacked and not sufficiently defended (hanging)
     // ThreatInfo logic for 'hanging_piece_value' aggregates this, but doesn't store per-square.
     // We can check if `from` is in `attacks_by_side[them]`.
-    let is_attacked = threat.attacks_by_side[1 - us].get_bit(mv.source);
+    let is_attacked = threat.attacks_by_side[1 - us].get_bit(mv.source());
     if is_attacked {
         // Simple check: moving away from attack?
         // Ideally we check if 'to' is safe, but that requires re-checking attacks.
         // Assume moving an attacked piece is "defensive".
-        let val = get_piece_value_simple(get_piece_type_safe(state, mv.source));
+        let val = get_piece_value_simple(get_piece_type_safe(state, mv.source()));
         score += val / 4; // Bonus for moving threatened piece
     }
 
@@ -226,7 +216,7 @@ fn evaluate_defensive_move(state: &GameState, mv: Move, threat: &ThreatInfo) -> 
     // If king is in danger, and we move a piece near the king (shielding)
     if threat.king_danger_score[us] > 0 {
         let king_sq = state.bitboards[if us == WHITE { K } else { k }].get_lsb_index() as u8;
-        let dist = (king_sq as i32 - mv.target as i32).abs(); // Crude distance
+        let dist = (king_sq as i32 - mv.target() as i32).abs(); // Crude distance
         if dist < 16 {
             // Nearby
             score += 10;
@@ -244,7 +234,7 @@ fn get_pawn_lever_score(state: &GameState, mv: Move) -> i32 {
 
     // 1. Tension: Does it attack an enemy pawn?
     // Pawn attacks from 'target'
-    let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << mv.target), us);
+    let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << mv.target()), us);
     let enemy_pawns = state.bitboards[if them == WHITE { P } else { p }];
     let attacked_pawns = pawn_attacks & enemy_pawns;
 
@@ -256,13 +246,13 @@ fn get_pawn_lever_score(state: &GameState, mv: Move) -> i32 {
     // If we capture (handled by capture logic), but this is usually quiet push.
     // If we push to a square where we are attacked by a pawn, we invite a capture -> Open file.
     let enemy_pawn_attacks = bitboard::pawn_attacks(enemy_pawns, them);
-    if enemy_pawn_attacks.get_bit(mv.target) {
+    if enemy_pawn_attacks.get_bit(mv.target()) {
         score += 20; // Invitation to exchange
     }
 
     // 3. Squares Controlled (Space)
     // Bonus for advanced ranks (4,5 for White, 3,2 for Black)
-    let rank = mv.target / 8;
+    let rank = mv.target() / 8;
     if us == WHITE {
         if rank >= 3 {
             score += 10;
@@ -284,7 +274,7 @@ fn get_pawn_lever_score(state: &GameState, mv: Move) -> i32 {
 
 // Feature #2: Dynamic Coordination Check
 fn evaluate_coordination_impact(state: &GameState, mv: Move) -> i32 {
-    let piece = get_piece_type_safe(state, mv.source);
+    let piece = get_piece_type_safe(state, mv.source());
     let us = state.side_to_move;
     // Only sliders
     if piece == N || piece == n || piece == K || piece == k || piece == P || piece == p {
@@ -306,26 +296,26 @@ fn evaluate_coordination_impact(state: &GameState, mv: Move) -> i32 {
         3 => {
             // R
             // Check file/rank for other R or Q
-            let attacks = bitboard::get_rook_attacks(mv.target, occ);
+            let attacks = bitboard::get_rook_attacks(mv.target(), occ);
             if (attacks & (friendly_rooks | friendly_queens)).0 != 0 {
                 score += 15;
             }
         }
         2 => {
             // B
-            let attacks = bitboard::get_bishop_attacks(mv.target, occ);
+            let attacks = bitboard::get_bishop_attacks(mv.target(), occ);
             if (attacks & (friendly_bishops | friendly_queens)).0 != 0 {
                 score += 15;
             }
         }
         4 => {
             // Q
-            let r_attacks = bitboard::get_rook_attacks(mv.target, occ);
+            let r_attacks = bitboard::get_rook_attacks(mv.target(), occ);
             if (r_attacks & friendly_rooks).0 != 0 {
                 score += 15;
             }
 
-            let b_attacks = bitboard::get_bishop_attacks(mv.target, occ);
+            let b_attacks = bitboard::get_bishop_attacks(mv.target(), occ);
             if (b_attacks & friendly_bishops).0 != 0 {
                 score += 15;
             }
@@ -340,7 +330,7 @@ fn estimate_threat_creation(state: &GameState, mv: Move) -> i32 {
     let mut score = 0;
     let us = state.side_to_move;
     let them = 1 - us;
-    let piece = get_piece_type_safe(state, mv.source); // This is piece index (0-11)
+    let piece = get_piece_type_safe(state, mv.source()); // This is piece index (0-11)
     let piece_type = piece % 6; // 0-5
 
     // Get attacks from new square
@@ -350,16 +340,16 @@ fn estimate_threat_creation(state: &GameState, mv: Move) -> i32 {
                                        // For slider attacks from 'target', we need to pretend source is empty and target is occupied.
                                        // Update occupancy for ray cast
     let mut new_occ = occ;
-    new_occ.pop_bit(mv.source);
-    new_occ.set_bit(mv.target);
+    new_occ.pop_bit(mv.source());
+    new_occ.set_bit(mv.target());
 
     let attacks = match piece_type {
-        N => movegen::get_knight_attacks(mv.target),
-        B => bitboard::get_bishop_attacks(mv.target, new_occ),
-        R => bitboard::get_rook_attacks(mv.target, new_occ),
-        Q => bitboard::get_queen_attacks(mv.target, new_occ),
-        P => bitboard::pawn_attacks(Bitboard(1 << mv.target), us), // Pawn attacks from new square
-        K => movegen::get_king_attacks(mv.target),
+        N => movegen::get_knight_attacks(mv.target()),
+        B => bitboard::get_bishop_attacks(mv.target(), new_occ),
+        R => bitboard::get_rook_attacks(mv.target(), new_occ),
+        Q => bitboard::get_queen_attacks(mv.target(), new_occ),
+        P => bitboard::pawn_attacks(Bitboard(1 << mv.target()), us), // Pawn attacks from new square
+        K => movegen::get_king_attacks(mv.target()),
         _ => Bitboard(0),
     };
 
@@ -413,16 +403,6 @@ pub fn is_dominant_square(state: &GameState, sq: u8, piece_idx: usize, side: usi
             if relative_rank >= 3 && relative_rank <= 5 {
                 // Supported by pawn?
                 let pawn = if side == WHITE { P } else { p };
-                let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << sq), 1 - side); // Attack FROM sq AS opponent = squares that attack sq? No.
-                                                                                        // We want squares that attack `sq`.
-                                                                                        // Pawns that attack `sq` are `pawn_attacks(sq, them)` relative to us.
-                                                                                        // Correct: Pawn attacks from `sq` by US go forward.
-                                                                                        // We want to know if `sq` is attacked by OUR pawns.
-                                                                                        // `pawn_attacks(Bitboard(1<<sq), them)` gives squares that `sq` would attack if it was `them`.
-                                                                                        // Wait. `pawn_attacks(bb, side)` returns squares attacked BY `bb` of `side`.
-                                                                                        // Squares that attack `sq` with a pawn of `side`:
-                                                                                        // If white pawn on A2 attacks B3. `pawn_attacks(A2, White)` -> B3.
-                                                                                        // We want to know if `sq` is in `pawn_attacks(OurPawns, Us)`.
                 let our_pawns = state.bitboards[pawn];
                 let defended_by_pawn =
                     (bitboard::pawn_attacks(our_pawns, side) & Bitboard(1 << sq)).0 != 0;
@@ -805,7 +785,7 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
         let mv = generator.list.moves[i];
 
         // Filter for Forcing Moves
-        let is_capture = mv.is_capture;
+        let is_capture = mv.is_capture();
         let is_check = movegen::gives_check(&enemy_state, mv);
 
         if !is_capture && !is_check {
@@ -874,7 +854,7 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
                 // Let's just assume we can recapture if available.
 
                 // Use a simplified logic: if we can capture the piece that just moved?
-                if my_mv.target == mv.target {
+                if my_mv.target() == mv.target() {
                     // Recapture!
                     let recovery_state = next_state.make_move(my_mv);
                     // Check legality...

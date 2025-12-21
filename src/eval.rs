@@ -1,26 +1,62 @@
 // src/eval.rs
-use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
+use crate::bitboard::{self, Bitboard};
 use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
-use crate::threat::{self, ThreatInfo};
+#[cfg(feature = "tuning")]
 use std::sync::atomic::{AtomicI32, Ordering};
 
-// --- MACRO FOR ATOMIC ARRAYS ---
+// --- CONDITIONAL TYPE ALIASING ---
+#[cfg(feature = "tuning")]
+type EvalValue = AtomicI32;
+#[cfg(not(feature = "tuning"))]
+type EvalValue = i32;
+
+// --- ACCESS HELPER ---
+#[cfg(feature = "tuning")]
+trait Access {
+    fn val(&self) -> i32;
+}
+
+#[cfg(feature = "tuning")]
+impl Access for AtomicI32 {
+    fn val(&self) -> i32 {
+        self.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(not(feature = "tuning"))]
+trait Access {
+    fn val(&self) -> i32;
+}
+
+#[cfg(not(feature = "tuning"))]
+impl Access for i32 {
+    #[inline(always)]
+    fn val(&self) -> i32 {
+        *self
+    }
+}
+
+// --- MACROS ---
+#[cfg(feature = "tuning")]
 macro_rules! a { ($($x:expr),*) => { [ $(AtomicI32::new($x)),* ] } }
 
-// --- CONFIGURATION (Safe Atomics for Tuning) ---
+#[cfg(not(feature = "tuning"))]
+macro_rules! a { ($($x:expr),*) => { [ $($x),* ] } }
+
+// --- CONFIGURATION ---
 // Material
-#[rustfmt::skip] pub static MG_VALS: [AtomicI32; 6] = a![ 82, 337, 365, 477, 1025, 0 ];
-#[rustfmt::skip] pub static EG_VALS: [AtomicI32; 6] = a![ 94, 281, 297, 512,  936, 0 ];
+#[rustfmt::skip] pub static MG_VALS: [EvalValue; 6] = a![ 82, 337, 365, 477, 1025, 0 ];
+#[rustfmt::skip] pub static EG_VALS: [EvalValue; 6] = a![ 94, 281, 297, 512,  936, 0 ];
 
 // Phase Weights
 pub const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
-pub const TOTAL_PHASE: i32 = 24;
+// pub const TOTAL_PHASE: i32 = 24;
 
 // King Safety Weights
 pub const KING_TROPISM_PENALTY: [i32; 8] = [10, 8, 5, 2, 0, 0, 0, 0];
 pub const SHIELD_MISSING_PENALTY: i32 = -20;
 pub const SHIELD_OPEN_FILE_PENALTY: i32 = -30;
-pub const SAFE_CHECK_BONUS: i32 = 15;
+// pub const SAFE_CHECK_BONUS: i32 = 15;
 
 const LAZY_EVAL_MARGIN: i32 = 600;
 
@@ -32,24 +68,24 @@ const MOBILITY_BONUS: [(i32, i32); 4] = [
     (4, 4), // Queen
 ];
 
-// --- ATOMIC PIECE-SQUARE TABLES (PeSTO) ---
-#[rustfmt::skip] pub static MG_PAWN_TABLE: [AtomicI32; 64] = a![ 0, 0, 0, 0, 0, 0, 0, 0, 98, 134, 61, 95, 68, 126, 34, -11, -6, 7, 26, 31, 65, 56, 25, -20, -14, 13, 6, 21, 23, 12, 17, -23, -27, -2, -5, 12, 17, 6, 10, -25, -26, -4, -4, -10, 3, 3, 33, -12, -35, -1, -20, -23, -15, 24, 38, -22, 0, 0, 0, 0, 0, 0, 0, 0 ];
-#[rustfmt::skip] pub static EG_PAWN_TABLE: [AtomicI32; 64] = a![ 0, 0, 0, 0, 0, 0, 0, 0, 178, 173, 158, 134, 147, 132, 165, 187, 94, 100, 85, 67, 56, 53, 82, 84, 32, 24, 13, 5, -2, 4, 17, 17, 13, 9, -3, -7, -7, -8, 3, -1, 4, 7, -6, 1, 0, -5, -1, -8, 13, 8, 8, 10, 13, 0, 2, -7, 0, 0, 0, 0, 0, 0, 0, 0 ];
+// --- PIECE-SQUARE TABLES (PeSTO) ---
+#[rustfmt::skip] pub static MG_PAWN_TABLE: [EvalValue; 64] = a![ 0, 0, 0, 0, 0, 0, 0, 0, 98, 134, 61, 95, 68, 126, 34, -11, -6, 7, 26, 31, 65, 56, 25, -20, -14, 13, 6, 21, 23, 12, 17, -23, -27, -2, -5, 12, 17, 6, 10, -25, -26, -4, -4, -10, 3, 3, 33, -12, -35, -1, -20, -23, -15, 24, 38, -22, 0, 0, 0, 0, 0, 0, 0, 0 ];
+#[rustfmt::skip] pub static EG_PAWN_TABLE: [EvalValue; 64] = a![ 0, 0, 0, 0, 0, 0, 0, 0, 178, 173, 158, 134, 147, 132, 165, 187, 94, 100, 85, 67, 56, 53, 82, 84, 32, 24, 13, 5, -2, 4, 17, 17, 13, 9, -3, -7, -7, -8, 3, -1, 4, 7, -6, 1, 0, -5, -1, -8, 13, 8, 8, 10, 13, 0, 2, -7, 0, 0, 0, 0, 0, 0, 0, 0 ];
 
-#[rustfmt::skip] pub static MG_KNIGHT_TABLE: [AtomicI32; 64] = a![ -167, -89, -34, -49, 61, -97, -15, -107, -73, -41, 72, 36, 23, 62, 7, -17, -47, 60, 37, 65, 84, 129, 73, 44, -9, 17, 19, 53, 37, 69, 18, 22, -13, 4, 16, 13, 28, 19, 21, -8, -23, -9, 12, 10, 19, 17, 25, -16, -29, -53, -12, -3, -1, 18, -14, -19, -105, -21, -58, -33, -17, -28, -19, -23 ];
-#[rustfmt::skip] pub static EG_KNIGHT_TABLE: [AtomicI32; 64] = a![ -58, -38, -13, -28, -31, -27, -63, -99, -25, -8, -25, -2, -9, -25, -24, -52, -24, -20, 10, 9, -1, -9, -19, -41, -17, 3, 22, 22, 22, 11, 8, -18, -18, -6, 16, 25, 16, 17, 4, -18, -23, -3, -1, 15, 10, -3, -20, -22, -42, -20, -10, -5, -2, -20, -23, -44, -29, -51, -23, -15, -22, -18, -50, -64 ];
+#[rustfmt::skip] pub static MG_KNIGHT_TABLE: [EvalValue; 64] = a![ -167, -89, -34, -49, 61, -97, -15, -107, -73, -41, 72, 36, 23, 62, 7, -17, -47, 60, 37, 65, 84, 129, 73, 44, -9, 17, 19, 53, 37, 69, 18, 22, -13, 4, 16, 13, 28, 19, 21, -8, -23, -9, 12, 10, 19, 17, 25, -16, -29, -53, -12, -3, -1, 18, -14, -19, -105, -21, -58, -33, -17, -28, -19, -23 ];
+#[rustfmt::skip] pub static EG_KNIGHT_TABLE: [EvalValue; 64] = a![ -58, -38, -13, -28, -31, -27, -63, -99, -25, -8, -25, -2, -9, -25, -24, -52, -24, -20, 10, 9, -1, -9, -19, -41, -17, 3, 22, 22, 22, 11, 8, -18, -18, -6, 16, 25, 16, 17, 4, -18, -23, -3, -1, 15, 10, -3, -20, -22, -42, -20, -10, -5, -2, -20, -23, -44, -29, -51, -23, -15, -22, -18, -50, -64 ];
 
-#[rustfmt::skip] pub static MG_BISHOP_TABLE: [AtomicI32; 64] = a![ -29, 4, -82, -37, -25, -42, 7, -8, -26, 16, -18, -13, 30, 59, 18, -47, -16, 37, 43, 40, 35, 50, 37, -2, -4, 5, 19, 50, 37, 37, 7, -2, -6, 13, 13, 26, 34, 12, 10, 4, 0, 15, 15, 15, 14, 27, 18, 10, 4, 15, 16, 0, 7, 21, 33, 1, -33, -3, -14, -21, -13, -12, -39, -21 ];
-#[rustfmt::skip] pub static EG_BISHOP_TABLE: [AtomicI32; 64] = a![ -14, -21, -11, -8, -7, -9, -17, -24, -8, -4, 7, -12, -3, -13, -4, -14, 2, -8, 0, -1, -2, 6, 0, 4, -3, 9, 12, 9, 14, 10, 3, 2, -6, 3, 13, 19, 7, 10, -3, -9, -12, -3, 5, 10, 10, -6, -7, -11, -17, -9, -4, -9, -4, -6, -17, -21, -17, -21, -8, -4, -6, -6, -8, -20 ];
+#[rustfmt::skip] pub static MG_BISHOP_TABLE: [EvalValue; 64] = a![ -29, 4, -82, -37, -25, -42, 7, -8, -26, 16, -18, -13, 30, 59, 18, -47, -16, 37, 43, 40, 35, 50, 37, -2, -4, 5, 19, 50, 37, 37, 7, -2, -6, 13, 13, 26, 34, 12, 10, 4, 0, 15, 15, 15, 14, 27, 18, 10, 4, 15, 16, 0, 7, 21, 33, 1, -33, -3, -14, -21, -13, -12, -39, -21 ];
+#[rustfmt::skip] pub static EG_BISHOP_TABLE: [EvalValue; 64] = a![ -14, -21, -11, -8, -7, -9, -17, -24, -8, -4, 7, -12, -3, -13, -4, -14, 2, -8, 0, -1, -2, 6, 0, 4, -3, 9, 12, 9, 14, 10, 3, 2, -6, 3, 13, 19, 7, 10, -3, -9, -12, -3, 5, 10, 10, -6, -7, -11, -17, -9, -4, -9, -4, -6, -17, -21, -17, -21, -8, -4, -6, -6, -8, -20 ];
 
-#[rustfmt::skip] pub static MG_ROOK_TABLE: [AtomicI32; 64] = a![ 32, 42, 32, 51, 63, 9, 31, 43, 27, 32, 58, 62, 80, 67, 26, 44, -5, 19, 26, 36, 17, 45, 61, 16, -24, -11, 7, 26, 24, 35, -8, -20, -36, -26, -12, -1, 9, -7, 6, -23, -45, -25, -16, -17, 3, 0, -5, -33, -44, -16, -20, -9, -1, 11, -6, -71, -19, -13, 1, 17, 16, 7, -37, -26 ];
-#[rustfmt::skip] pub static EG_ROOK_TABLE: [AtomicI32; 64] = a![ 13, 10, 18, 15, 12, 12, 8, 5, 11, 13, 13, 11, -3, 3, 8, 3, 7, 7, 7, 5, 4, -3, -5, -3, 4, 3, 13, 1, 2, 1, -1, 2, 3, 5, 8, 4, -5, -6, -8, -11, -4, 0, -5, -1, -7, -12, -8, -16, -6, -6, 0, 2, -9, -9, -11, -3, -9, 2, 3, -1, -5, -13, 4, -20 ];
+#[rustfmt::skip] pub static MG_ROOK_TABLE: [EvalValue; 64] = a![ 32, 42, 32, 51, 63, 9, 31, 43, 27, 32, 58, 62, 80, 67, 26, 44, -5, 19, 26, 36, 17, 45, 61, 16, -24, -11, 7, 26, 24, 35, -8, -20, -36, -26, -12, -1, 9, -7, 6, -23, -45, -25, -16, -17, 3, 0, -5, -33, -44, -16, -20, -9, -1, 11, -6, -71, -19, -13, 1, 17, 16, 7, -37, -26 ];
+#[rustfmt::skip] pub static EG_ROOK_TABLE: [EvalValue; 64] = a![ 13, 10, 18, 15, 12, 12, 8, 5, 11, 13, 13, 11, -3, 3, 8, 3, 7, 7, 7, 5, 4, -3, -5, -3, 4, 3, 13, 1, 2, 1, -1, 2, 3, 5, 8, 4, -5, -6, -8, -11, -4, 0, -5, -1, -7, -12, -8, -16, -6, -6, 0, 2, -9, -9, -11, -3, -9, 2, 3, -1, -5, -13, 4, -20 ];
 
-#[rustfmt::skip] pub static MG_QUEEN_TABLE: [AtomicI32; 64] = a![ -28, 0, 29, 12, 59, 44, 43, 45, -24, -39, -5, 1, -16, 57, 28, 54, -13, -17, 7, 8, 29, 56, 47, 57, -27, -27, -16, -16, -1, 17, -2, 1, -9, -26, -9, -10, -2, -4, 3, -3, -14, 2, -11, -2, -5, 2, 14, 5, -35, -8, 11, 2, 8, 15, -3, 1, -1, -18, -9, 10, -15, -25, -31, -50 ];
-#[rustfmt::skip] pub static EG_QUEEN_TABLE: [AtomicI32; 64] = a![ -9, 22, 22, 27, 27, 19, 10, 20, -17, 20, 32, 41, 58, 25, 30, 0, -20, 6, 9, 49, 47, 35, 19, 9, 3, 22, 24, 45, 43, 40, 36, 14, -18, 28, 19, 47, 31, 34, 39, 23, -16, -27, 15, 6, 9, 17, 10, 5, -22, -23, -30, -16, -16, -23, -36, -32, -33, -28, -22, -43, -5, -32, -20, -41 ];
+#[rustfmt::skip] pub static MG_QUEEN_TABLE: [EvalValue; 64] = a![ -28, 0, 29, 12, 59, 44, 43, 45, -24, -39, -5, 1, -16, 57, 28, 54, -13, -17, 7, 8, 29, 56, 47, 57, -27, -27, -16, -16, -1, 17, -2, 1, -9, -26, -9, -10, -2, -4, 3, -3, -14, 2, -11, -2, -5, 2, 14, 5, -35, -8, 11, 2, 8, 15, -3, 1, -1, -18, -9, 10, -15, -25, -31, -50 ];
+#[rustfmt::skip] pub static EG_QUEEN_TABLE: [EvalValue; 64] = a![ -9, 22, 22, 27, 27, 19, 10, 20, -17, 20, 32, 41, 58, 25, 30, 0, -20, 6, 9, 49, 47, 35, 19, 9, 3, 22, 24, 45, 43, 40, 36, 14, -18, 28, 19, 47, 31, 34, 39, 23, -16, -27, 15, 6, 9, 17, 10, 5, -22, -23, -30, -16, -16, -23, -36, -32, -33, -28, -22, -43, -5, -32, -20, -41 ];
 
-#[rustfmt::skip] pub static MG_KING_TABLE: [AtomicI32; 64] = a![ -65, 23, 16, -15, -56, -34, 2, 13, 29, -1, -20, -7, -8, -4, -38, -29, -9, 24, 2, -16, -20, 6, 22, -22, -17, -20, -12, -27, -30, -25, -14, -36, -49, -1, -27, -39, -46, -44, -33, -51, -14, -14, -22, -46, -44, -30, -15, -27, 1, 7, -8, -64, -43, -16, 9, 8, -15, 36, 12, -54, 8, -28, 24, 14 ];
-#[rustfmt::skip] pub static EG_KING_TABLE: [AtomicI32; 64] = a![ -74, -35, -18, -18, -11, 15, 4, -17, -12, 17, 14, 17, 17, 38, 23, 11, 10, 17, 23, 15, 20, 45, 44, 13, -8, 22, 24, 27, 26, 33, 26, 3, -18, -4, 21, 24, 27, 23, 9, -11, -19, -3, 11, 21, 23, 16, 7, -9, -27, -11, 4, 13, 14, 4, -5, -17, -53, -34, -21, -11, -28, -14, -24, -43 ];
+#[rustfmt::skip] pub static MG_KING_TABLE: [EvalValue; 64] = a![ -65, 23, 16, -15, -56, -34, 2, 13, 29, -1, -20, -7, -8, -4, -38, -29, -9, 24, 2, -16, -20, 6, 22, -22, -17, -20, -12, -27, -30, -25, -14, -36, -49, -1, -27, -39, -46, -44, -33, -51, -14, -14, -22, -46, -44, -30, -15, -27, 1, 7, -8, -64, -43, -16, 9, 8, -15, 36, 12, -54, 8, -28, 24, 14 ];
+#[rustfmt::skip] pub static EG_KING_TABLE: [EvalValue; 64] = a![ -74, -35, -18, -18, -11, 15, 4, -17, -12, 17, 14, 17, 17, 38, 23, 11, 10, 17, 23, 15, 20, 45, 44, 13, -8, 22, 24, 27, 26, 33, 26, 3, -18, -4, 21, 24, 27, 23, 9, -11, -19, -3, 11, 21, 23, 16, 7, -9, -27, -11, 4, 13, 14, 4, -5, -17, -53, -34, -21, -11, -28, -14, -24, -43 ];
 
 // --- STRUCTS (REQUIRED for Tuning) ---
 pub struct Trace {
@@ -79,10 +115,7 @@ pub fn init_eval() {}
 
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
-    // Lazy Eval Gating for NNUE
     let lazy_score = evaluate_lazy(state);
-
-    // Margin for Lazy Eval (Conservative)
     let margin = LAZY_EVAL_MARGIN;
 
     if lazy_score + margin <= alpha {
@@ -100,8 +133,6 @@ pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
         return score;
     }
 
-    // Fallback to HCE if no network
-    // Note: evaluate_hce returns ABSOLUTE score
     let score = evaluate_hce(state, alpha, beta);
     if state.side_to_move == BLACK {
         -score
@@ -130,8 +161,8 @@ fn evaluate_lazy(state: &GameState) -> i32 {
             let count = bb.count_bits() as i32;
             phase += count * PHASE_WEIGHTS[piece_type];
 
-            let base_mg = MG_VALS[piece_type].load(Ordering::Relaxed);
-            let base_eg = EG_VALS[piece_type].load(Ordering::Relaxed);
+            let base_mg = MG_VALS[piece_type].val();
+            let base_eg = EG_VALS[piece_type].val();
 
             while bb.0 != 0 {
                 let sq = bb.get_lsb_index() as usize;
@@ -155,18 +186,13 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
     let mut eg = 0;
     let mut phase = 0;
 
-    // Pawn Structure (No Hash)
     let pawn_entry = crate::pawn::evaluate_pawns(state);
     mg += pawn_entry.score_mg;
     eg += pawn_entry.score_eg;
 
-    // ----------------------------------------------------------------------
-    // PASS 1: Cheap Evaluation (Material + PST)
-    // ----------------------------------------------------------------------
     for side in [WHITE, BLACK] {
         let us_sign = if side == WHITE { 1 } else { -1 };
 
-        // Iterate Piece Types
         for piece_type in 0..6 {
             let piece_idx = if side == WHITE {
                 piece_type
@@ -175,32 +201,27 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
             };
             let mut bb = state.bitboards[piece_idx];
 
-            // Phase
             let count = bb.count_bits() as i32;
             phase += count * PHASE_WEIGHTS[piece_type];
 
-            // ⚡ Bolt: Hoist atomic loads
-            let base_mg = MG_VALS[piece_type].load(Ordering::Relaxed);
-            let base_eg = EG_VALS[piece_type].load(Ordering::Relaxed);
+            let base_mg = MG_VALS[piece_type].val();
+            let base_eg = EG_VALS[piece_type].val();
 
             while bb.0 != 0 {
                 let sq = bb.get_lsb_index() as usize;
                 bb.pop_bit(sq as u8);
 
-                // 1. Fixed Material + PST
                 mg += (base_mg + get_pst(piece_type, sq, side, true)) * us_sign;
                 eg += (base_eg + get_pst(piece_type, sq, side, false)) * us_sign;
             }
         }
     }
 
-    // Lazy Check
     let phase_clamped = phase.clamp(0, 24);
     let mut score = (mg * phase_clamped + eg * (24 - phase_clamped)) / 24;
     let scale = crate::endgame::get_scale_factor(state, score);
     score = (score * scale) / 128;
 
-    // Adjust for side to move (alpha/beta are relative)
     let score_perspective = if state.side_to_move == BLACK { -score } else { score };
 
     if score_perspective + LAZY_EVAL_MARGIN <= alpha {
@@ -210,11 +231,7 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         return if state.side_to_move == BLACK { -beta } else { beta };
     }
 
-    // ----------------------------------------------------------------------
-    // PASS 2: Expensive Evaluation (Mobility, Tropism, Threats, King Safety)
-    // ----------------------------------------------------------------------
-
-    // Precompute King Info
+    // PASS 2: Expensive
     let mut king_rings = [Bitboard(0); 2];
     let mut king_sqs = [0usize; 2];
     for side in [WHITE, BLACK] {
@@ -229,14 +246,13 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
     }
 
     let mut attacks_by_side = [Bitboard(0); 2];
-    let mut king_attack_weight = [0; 2]; // Accumulated danger score
-    let mut king_attack_count = [0; 2]; // Count of attackers on ring
-    let mut ring_attack_counts = [[0u8; 64]; 2]; // [Side][Square]
+    let mut king_attack_weight = [0; 2];
+    let mut king_attack_count = [0; 2];
+    let mut ring_attack_counts = [[0u8; 64]; 2];
 
     let mut coordination_score = [0; 2];
     let occ = state.occupancies[BOTH];
 
-    // Main Loop over both sides
     for side in [WHITE, BLACK] {
         let us = side;
         let them = 1 - side;
@@ -244,13 +260,11 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
 
         let king_ring_them = king_rings[them];
 
-        // ⚡ Bolt: Hoist invariant bitboard lookups
         let us_occupancies = state.occupancies[us];
         let my_rooks = state.bitboards[if us == WHITE { R } else { r }];
         let my_bishops = state.bitboards[if us == WHITE { B } else { b }];
         let my_queens = state.bitboards[if us == WHITE { Q } else { q }];
 
-        // Iterate Piece Types
         for piece_type in 0..6 {
             let piece_idx = if us == WHITE {
                 piece_type
@@ -263,7 +277,6 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
                 let sq = bb.get_lsb_index() as usize;
                 bb.pop_bit(sq as u8);
 
-                // 2. Attack Generation
                 let attacks = match piece_type {
                     N => crate::movegen::get_knight_attacks(sq as u8),
                     B => bitboard::get_bishop_attacks(sq as u8, occ),
@@ -276,7 +289,6 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
 
                 attacks_by_side[us] = attacks_by_side[us] | attacks;
 
-                // 3. Mobility
                 if piece_type != P && piece_type != K {
                     let mob_cnt = (attacks & !us_occupancies).count_bits() as i32;
                     let mob_idx = match piece_type {
@@ -292,17 +304,12 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
                     eg += s * us_sign;
                 }
 
-                // 4. Dominance (N, B, R)
                 if piece_type == N || piece_type == B || piece_type == R {
                     let s = crate::threat::is_dominant_square(state, sq as u8, piece_type, us);
                     mg += s * us_sign;
                     eg += s * us_sign;
                 }
 
-                // 5. King Tropism (Penalty for being close to Enemy King)
-                // Note: Original code accumulated negative penalty into 'mg'.
-                // Close -> Bad for Enemy King -> Good for Us.
-                // We add PENALTY to US score (because penalty is positive value).
                 if piece_type != K && piece_type != P {
                     let k_file = king_sqs[them] % 8;
                     let k_rank = king_sqs[them] / 8;
@@ -314,7 +321,6 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
                     eg += (pen / 2) * us_sign;
                 }
 
-                // 6. King Ring Attacks
                 if piece_type != K {
                     let att_on_ring = attacks & king_ring_them;
                     if att_on_ring.0 != 0 {
@@ -338,7 +344,6 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
                     }
                 }
 
-                // 7. Coordination
                 if piece_type == R || piece_type == B || piece_type == Q {
                     if piece_type == R {
                         if (attacks & (my_rooks | my_queens)).0 != 0 {
@@ -361,12 +366,10 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         }
     }
 
-    // Post-Loop: King Safety & Threats
     for side in [WHITE, BLACK] {
         let us_sign = if side == WHITE { 1 } else { -1 };
         let k_sq = king_sqs[side];
 
-        // Shield
         let mut shield_pen = 0;
         let k_rank = k_sq / 8;
         if (side == WHITE && k_rank < 3) || (side == BLACK && k_rank > 4) {
@@ -388,25 +391,21 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         }
         mg += shield_pen * us_sign;
 
-        // Storm
         if pawn_entry.pawn_attacks[1 - side].get_bit(k_sq as u8) {
             mg -= 50 * us_sign;
         }
 
-        // Danger & Clustering
         let mut danger = king_attack_weight[side];
         if king_attack_count[side] >= 2 {
             danger += king_attack_count[side] * 10;
         }
 
-        // Undefended Ring Squares
         let ring = king_rings[side];
         let undefended = ring & !attacks_by_side[side];
         let attacked = ring & attacks_by_side[1 - side];
         let danger_zone = undefended & attacked;
         danger += (danger_zone.count_bits() as i32) * 10;
 
-        // Clustering Penalty
         let mut cluster_pen = 0;
         let mut r_iter = ring;
         while r_iter.0 != 0 {
@@ -418,7 +417,6 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
             }
         }
 
-        // Apply penalties
         if danger > 50 {
             mg -= danger * us_sign;
         }
@@ -426,11 +424,9 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         eg -= (cluster_pen / 2) * us_sign;
     }
 
-    // Coordination
     mg += coordination_score[WHITE] - coordination_score[BLACK];
     eg += (coordination_score[WHITE] - coordination_score[BLACK]) / 2;
 
-    // Hanging Pieces (Only for side to move, per original logic)
     let us = state.side_to_move;
     let them = 1 - us;
     let us_sign = if us == WHITE { 1 } else { -1 };
@@ -453,7 +449,6 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         if !defended {
             hanging_val += val;
         } else {
-            // Defended but attacked by pawn?
             let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << sq), us);
             if (pawn_attacks & state.bitboards[if them == WHITE { P } else { p }]).0 != 0 {
                 if val > 100 {
@@ -463,12 +458,9 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         }
     }
 
-    // Apply hanging penalty to side to move
     mg -= hanging_val * us_sign;
     eg -= (hanging_val / 2) * us_sign;
 
-    // Scaling
-    // phase_clamped uses phase from Pass 1 (which includes all pieces, so it is correct)
     let phase_clamped = phase.clamp(0, 24);
     let mut score = (mg * phase_clamped + eg * (24 - phase_clamped)) / 24;
     let scale = crate::endgame::get_scale_factor(state, score);
@@ -486,15 +478,15 @@ fn evaluate_fixed(state: &GameState) -> (i32, i32) {
         while bb.0 != 0 {
             let sq = bb.get_lsb_index() as usize;
             bb.pop_bit(sq as u8);
-            mg += MG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, WHITE, true);
-            eg += EG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, WHITE, false);
+            mg += MG_VALS[piece].val() + get_pst(piece, sq, WHITE, true);
+            eg += EG_VALS[piece].val() + get_pst(piece, sq, WHITE, false);
         }
         let mut bb = state.bitboards[piece + 6];
         while bb.0 != 0 {
             let sq = bb.get_lsb_index() as usize;
             bb.pop_bit(sq as u8);
-            mg -= MG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, BLACK, true);
-            eg -= EG_VALS[piece].load(Ordering::Relaxed) + get_pst(piece, sq, BLACK, false);
+            mg -= MG_VALS[piece].val() + get_pst(piece, sq, BLACK, true);
+            eg -= EG_VALS[piece].val() + get_pst(piece, sq, BLACK, false);
         }
     }
     (mg, eg)
@@ -505,44 +497,44 @@ fn get_pst(piece: usize, sq: usize, side: usize, is_mg: bool) -> i32 {
     match piece {
         P => {
             if is_mg {
-                MG_PAWN_TABLE[index].load(Ordering::Relaxed)
+                MG_PAWN_TABLE[index].val()
             } else {
-                EG_PAWN_TABLE[index].load(Ordering::Relaxed)
+                EG_PAWN_TABLE[index].val()
             }
         }
         N => {
             if is_mg {
-                MG_KNIGHT_TABLE[index].load(Ordering::Relaxed)
+                MG_KNIGHT_TABLE[index].val()
             } else {
-                EG_KNIGHT_TABLE[index].load(Ordering::Relaxed)
+                EG_KNIGHT_TABLE[index].val()
             }
         }
         B => {
             if is_mg {
-                MG_BISHOP_TABLE[index].load(Ordering::Relaxed)
+                MG_BISHOP_TABLE[index].val()
             } else {
-                EG_BISHOP_TABLE[index].load(Ordering::Relaxed)
+                EG_BISHOP_TABLE[index].val()
             }
         }
         R => {
             if is_mg {
-                MG_ROOK_TABLE[index].load(Ordering::Relaxed)
+                MG_ROOK_TABLE[index].val()
             } else {
-                EG_ROOK_TABLE[index].load(Ordering::Relaxed)
+                EG_ROOK_TABLE[index].val()
             }
         }
         Q => {
             if is_mg {
-                MG_QUEEN_TABLE[index].load(Ordering::Relaxed)
+                MG_QUEEN_TABLE[index].val()
             } else {
-                EG_QUEEN_TABLE[index].load(Ordering::Relaxed)
+                EG_QUEEN_TABLE[index].val()
             }
         }
         K => {
             if is_mg {
-                MG_KING_TABLE[index].load(Ordering::Relaxed)
+                MG_KING_TABLE[index].val()
             } else {
-                EG_KING_TABLE[index].load(Ordering::Relaxed)
+                EG_KING_TABLE[index].val()
             }
         }
         _ => 0,

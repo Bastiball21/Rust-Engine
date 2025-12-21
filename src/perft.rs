@@ -120,8 +120,8 @@ pub fn perft_divide(state: &GameState, depth: u8) {
             let count = perft(&next_state, depth - 1);
             println!(
                 "{}{}: {}",
-                crate::search::square_to_coord(mv.source),
-                crate::search::square_to_coord(mv.target),
+                crate::search::square_to_coord(mv.source()),
+                crate::search::square_to_coord(mv.target()),
                 count
             );
             total += count;

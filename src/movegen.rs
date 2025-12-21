@@ -53,12 +53,7 @@ pub struct MoveList {
 impl MoveList {
     pub fn new() -> Self {
         Self {
-            moves: [Move {
-                source: 0,
-                target: 0,
-                promotion: None,
-                is_capture: false,
-            }; 256],
+            moves: [Move::default(); 256],
             count: 0,
         }
     }
@@ -92,26 +87,16 @@ impl MoveGenerator {
 
     #[inline(always)]
     fn add_move(&mut self, source: u8, target: u8, promotion: Option<usize>, is_capture: bool) {
-        self.list.push(Move {
+        self.list.push(Move::new(
             source,
             target,
             promotion,
             is_capture,
-        });
+        ));
     }
 
     #[inline(always)]
     fn add_promotion_moves(&mut self, source: u8, target: u8, is_capture: bool, gen_type: &GenType) {
-        // Promotions are considered captures/tactical if they are Queens.
-        // But usually "All Promotions" are treated as special.
-        // For simplicity:
-        // Captures: generate captures + all promotions (since promotion is tactical)
-        // Quiets: generate only quiet non-promotions.
-        // However, a promotion *can* be quiet (e.g. push to 8th without capture).
-        // Standard practice: Promotions are generated in CAPTURES stage usually.
-        // We will generate ALL promotions if GenType::Captures or GenType::All.
-        // We will NOT generate promotions in GenType::Quiets.
-
         if *gen_type == GenType::Quiets {
             return;
         }
@@ -137,9 +122,6 @@ impl MoveGenerator {
         let occupancy_enemy = state.occupancies[enemy] & !enemy_king_bb;
 
         // TARGET MASKS
-        // All: !friendly
-        // Captures: enemy
-        // Quiets: !friendly & !enemy (empty)
         let target_mask = match gen_type {
             GenType::All => !occupancy_friendly,
             GenType::Captures => occupancy_enemy,
@@ -163,7 +145,6 @@ impl MoveGenerator {
             // Quiet pushes
             if !occupancy_all.get_bit(target) {
                 if (target / 8) == promo_rank {
-                    // Promotion (Quiet Push) -> Treated as "Capture" stage usually
                     if gen_type != GenType::Quiets {
                         self.add_promotion_moves(src, target, false, &gen_type);
                     }
@@ -307,44 +288,26 @@ impl MoveGenerator {
         }
     }
 
-    // New helper method for castling
     #[inline(always)]
     fn generate_castling_moves(&mut self, state: &GameState, king_sq: u8, side: usize) {
         let enemy = 1 - side;
         let rank_base = if side == WHITE { 0 } else { 56 };
 
-        // Check both sides: 0 = Kingside, 1 = Queenside
         for side_idx in 0..2 {
-            // Check rights mask
             let mask = if side == WHITE {
-                if side_idx == 0 {
-                    1
-                } else {
-                    2
-                }
+                if side_idx == 0 { 1 } else { 2 }
             } else {
-                if side_idx == 0 {
-                    4
-                } else {
-                    8
-                }
+                if side_idx == 0 { 4 } else { 8 }
             };
 
             if (state.castling_rights & mask) != 0 {
                 let file = state.castling_rook_files[side][side_idx];
                 let rook_sq = rank_base + file;
 
-                // Verify rook is actually there (it should be if rights are set, but let's be safe)
-                // Note: bitboards[R/r] check
                 let rook_type = if side == WHITE { R } else { r };
                 if !state.bitboards[rook_type].get_bit(rook_sq) {
                     continue;
                 }
-
-                // Determine destinations
-                // Standard convention:
-                // Kingside (side 0): King -> g-file (6/62), Rook -> f-file (5/61)
-                // Queenside (side 1): King -> c-file (2/58), Rook -> d-file (3/59)
 
                 let (k_dst_file, r_dst_file) = if side_idx == 0 {
                     (6, 5) // g, f
@@ -355,11 +318,6 @@ impl MoveGenerator {
                 let k_dst = rank_base + k_dst_file;
                 let r_dst = rank_base + r_dst_file;
 
-                // 1. Path Obstruction Check
-                // "All squares between the king's initial and final squares (including the final square),
-                // and all squares between the rook's initial and final squares (including the final square),
-                // must be vacant except for the king and rook."
-
                 if !self.is_path_clear(state, king_sq, k_dst, king_sq, rook_sq) {
                     continue;
                 }
@@ -367,22 +325,9 @@ impl MoveGenerator {
                     continue;
                 }
 
-                // 2. King Safety Check
-                // King must not be in check at start.
-                // King must not pass through check.
-                // King must not end in check.
-
                 if is_square_attacked(state, king_sq, enemy) {
                     continue;
                 }
-
-                // Check path for King
-                // Logic: Iterate from adjacent square to dest.
-                // However, King moves one by one. In 960, the "leap" is conceptual.
-                // But safety rules apply to the squares the king crosses *if it were moving normally*.
-                // Standard Chess: King moves e1-f1-g1. Checks e1, f1, g1.
-                // 960: King path from Start to End. All squares on interval must be safe.
-                // Note: If start == end, no squares to check besides start (already checked).
 
                 let mut safe = true;
                 let start = min(king_sq, k_dst);
@@ -391,7 +336,7 @@ impl MoveGenerator {
                 for sq in start..=end {
                     if sq == king_sq {
                         continue;
-                    } // Already checked
+                    }
                     if is_square_attacked(state, sq, enemy) {
                         safe = false;
                         break;
@@ -399,8 +344,6 @@ impl MoveGenerator {
                 }
 
                 if safe {
-                    // Valid Castling Move
-                    // Target is the Rook's square.
                     self.add_move(king_sq, rook_sq, None, false);
                 }
             }
@@ -435,6 +378,7 @@ pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -
         return false;
     }
 
+    // 1. Pawns (Cheapest: Bit Shifts)
     if attacker_side == WHITE {
         if square > 8 {
             if (square % 8) > 0 && state.bitboards[P].get_bit(square - 9) {
@@ -455,6 +399,7 @@ pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -
         }
     }
 
+    // 2. Knights (Cheap: Array Lookup)
     let knights = if attacker_side == WHITE {
         state.bitboards[N]
     } else {
@@ -464,25 +409,9 @@ pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -
         return true;
     }
 
-    let king = if attacker_side == WHITE {
-        state.bitboards[K]
-    } else {
-        state.bitboards[k]
-    };
-    if (get_king_attacks(square) & king).0 != 0 {
-        return true;
-    }
-
     let occupancy = state.occupancies[BOTH];
-    let rooks = if attacker_side == WHITE {
-        state.bitboards[R] | state.bitboards[Q]
-    } else {
-        state.bitboards[r] | state.bitboards[q]
-    };
-    if (bitboard::get_rook_attacks(square, occupancy) & rooks).0 != 0 {
-        return true;
-    }
 
+    // 3. Bishops/Queens (Diagonal)
     let bishops = if attacker_side == WHITE {
         state.bitboards[B] | state.bitboards[Q]
     } else {
@@ -492,50 +421,59 @@ pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -
         return true;
     }
 
+    // 4. Rooks/Queens (Orthogonal)
+    let rooks = if attacker_side == WHITE {
+        state.bitboards[R] | state.bitboards[Q]
+    } else {
+        state.bitboards[r] | state.bitboards[q]
+    };
+    if (bitboard::get_rook_attacks(square, occupancy) & rooks).0 != 0 {
+        return true;
+    }
+
+    // 5. King (Rare)
+    let king = if attacker_side == WHITE {
+        state.bitboards[K]
+    } else {
+        state.bitboards[k]
+    };
+    if (get_king_attacks(square) & king).0 != 0 {
+        return true;
+    }
+
     false
 }
 
-// PATCH #2 & #3: Fixed Variable Name and Fast Check Detection
 pub fn gives_check(state: &GameState, mv: Move) -> bool {
     let side = state.side_to_move;
     let enemy = 1 - side;
     let enemy_king = state.bitboards[if enemy == WHITE { K } else { k }].get_lsb_index() as u8;
 
-    let from = mv.source;
-    let to = mv.target;
+    let from = mv.source();
+    let to = mv.target();
 
-    // 0. Locate Piece Type (Expensive lookups minimized)
-    // MAILBOX OPTIMIZATION: Use board array
     let piece = state.board[from as usize] as usize;
 
-    // Castling and promotions are rare; fallback to safe slow check to prevent bugs
-    // Chess960 Castling: Check if target is own rook
     if piece == K || piece == k {
-        // If target contains friendly rook, it's castling
         let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
         if friendly_rooks.get_bit(to) {
             return slow_gives_check(state, mv);
         }
-        // Legacy distance check for safety
         if (from as i8 - to as i8).abs() == 2 {
             return slow_gives_check(state, mv);
         }
     }
 
-    if mv.promotion.is_some() {
+    if mv.promotion().is_some() {
         return slow_gives_check(state, mv);
     }
     if (piece == P || piece == p) && to == state.en_passant {
         return slow_gives_check(state, mv);
     }
 
-    // 1. Direct Check
-    // "Imagine" the board: 'from' is empty, 'to' has 'piece'.
-    // We only need to check if 'piece' at 'to' attacks 'enemy_king'.
     let occ = (state.occupancies[BOTH].0 & !(1u64 << from)) | (1u64 << to);
     let occ_bb = Bitboard(occ);
 
-    // Check attacks from 'to'
     let attacks = match piece {
         N | n => get_knight_attacks(to),
         B | b => bitboard::get_bishop_attacks(to, occ_bb),
@@ -551,12 +489,6 @@ pub fn gives_check(state: &GameState, mv: Move) -> bool {
         return true;
     }
 
-    // 2. Discovered Check
-    // Only possible if 'from' was blocking a line from a friendly slider to the king.
-    // Check if 'from' is on a ray between friendly slider and enemy king.
-
-    // Optimization: If 'from' is not aligned with king, no discovery.
-    // FIX: Added 'bitboard::' prefix here
     if (bitboard::get_queen_attacks(from, Bitboard(0)) & Bitboard(1u64 << enemy_king)).0 == 0 {
         return false;
     }
@@ -572,7 +504,6 @@ pub fn gives_check(state: &GameState, mv: Move) -> bool {
         state.bitboards[b] | state.bitboards[q]
     };
 
-    // See if a slider attacks the king through the hole left by 'from'
     if (bitboard::get_rook_attacks(enemy_king, occ_bb) & friendly_rooks).0 != 0 {
         return true;
     }

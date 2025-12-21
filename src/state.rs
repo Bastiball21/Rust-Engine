@@ -50,22 +50,78 @@ impl UpdateList {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Move {
-    pub source: u8,
-    pub target: u8,
-    pub promotion: Option<usize>,
-    pub is_capture: bool,
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Move(u16);
+
+impl Move {
+    pub fn new(source: u8, target: u8, promotion: Option<usize>, is_capture: bool) -> Self {
+        let mut d: u16 = 0;
+        d |= (source as u16) & 0x3F;
+        d |= ((target as u16) & 0x3F) << 6;
+        let p_val = match promotion {
+            None => 0,
+            Some(1) | Some(7) => 1, // N/n
+            Some(2) | Some(8) => 2, // B/b
+            Some(3) | Some(9) => 3, // R/r
+            Some(4) | Some(10) => 4, // Q/q
+            _ => 0,
+        };
+        d |= (p_val << 12) & 0x7000;
+        if is_capture {
+            d |= 0x8000;
+        }
+        Move(d)
+    }
+
+    #[inline(always)]
+    pub fn source(&self) -> u8 {
+        (self.0 & 0x3F) as u8
+    }
+
+    #[inline(always)]
+    pub fn target(&self) -> u8 {
+        ((self.0 >> 6) & 0x3F) as u8
+    }
+
+    #[inline(always)]
+    pub fn promotion(&self) -> Option<usize> {
+        let val = (self.0 >> 12) & 0x7;
+        match val {
+            1 => Some(1),
+            2 => Some(2),
+            3 => Some(3),
+            4 => Some(4),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_capture(&self) -> bool {
+        (self.0 & 0x8000) != 0
+    }
+
+    #[inline(always)]
+    pub fn is_null(&self) -> bool {
+        self.0 == 0
+    }
 }
 
 impl Default for Move {
     fn default() -> Self {
-        Self {
-            source: 0,
-            target: 0,
-            promotion: None,
-            is_capture: false,
-        }
+        Move(0)
+    }
+}
+
+impl std::fmt::Debug for Move {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Move {{ source: {}, target: {}, promotion: {:?}, is_capture: {} }}",
+            self.source(),
+            self.target(),
+            self.promotion(),
+            self.is_capture()
+        )
     }
 }
 
@@ -535,14 +591,19 @@ impl GameState {
         self.halfmove_clock += 1;
 
         // MAILBOX OPTIMIZATION: Get piece from board array instead of loop
-        let mut piece_type = self.board[mv.source as usize] as usize;
+        let source = mv.source();
+        let target = mv.target();
+        let promotion = mv.promotion();
+        let is_capture = mv.is_capture();
+
+        let mut piece_type = self.board[source as usize] as usize;
 
         if piece_type == NO_PIECE {
             // Should not happen in legal search
              let start_range = if side == WHITE { P } else { p };
              let end_range = if side == WHITE { K } else { k };
              for pp in start_range..=end_range {
-                 if self.bitboards[pp].get_bit(mv.source) {
+                 if self.bitboards[pp].get_bit(source) {
                      piece_type = pp;
                      break;
                  }
@@ -553,7 +614,7 @@ impl GameState {
 
         // Detect Castling
         if piece_type == K || piece_type == k {
-            let target_piece = self.board[mv.target as usize] as usize;
+            let target_piece = self.board[target as usize] as usize;
             let rook_type = if side == WHITE { R } else { r };
             if target_piece == rook_type {
                  is_castling = true;
@@ -571,33 +632,33 @@ impl GameState {
             captured_piece = NO_PIECE as u8; // Castling "captures" own rook but we handle restore manually
 
             // 1. Remove King from Source
-            self.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
-            self.bitboards[piece_type].pop_bit(mv.source);
-            self.board[mv.source as usize] = NO_PIECE as u8;
-            removed.push((piece_type, mv.source as usize));
+            self.hash ^= zobrist::piece_key(piece_type, source as usize);
+            self.bitboards[piece_type].pop_bit(source);
+            self.board[source as usize] = NO_PIECE as u8;
+            removed.push((piece_type, source as usize));
 
             // Occupancy Update
-            self.occupancies[side].pop_bit(mv.source);
-            self.occupancies[BOTH].pop_bit(mv.source);
+            self.occupancies[side].pop_bit(source);
+            self.occupancies[BOTH].pop_bit(source);
 
             // 2. Remove Rook from Target (Rook's source)
             let rook_type = if side == WHITE { R } else { r };
-            self.hash ^= zobrist::piece_key(rook_type, mv.target as usize);
-            self.bitboards[rook_type].pop_bit(mv.target);
-            self.board[mv.target as usize] = NO_PIECE as u8;
-            removed.push((rook_type, mv.target as usize));
+            self.hash ^= zobrist::piece_key(rook_type, target as usize);
+            self.bitboards[rook_type].pop_bit(target);
+            self.board[target as usize] = NO_PIECE as u8;
+            removed.push((rook_type, target as usize));
 
-            self.occupancies[side].pop_bit(mv.target);
-            self.occupancies[BOTH].pop_bit(mv.target);
+            self.occupancies[side].pop_bit(target);
+            self.occupancies[BOTH].pop_bit(target);
 
             // 3. Determine Destinations
             let rank_base = if side == WHITE { 0 } else { 56 };
             let king_file_dst;
             let rook_file_dst;
 
-            if mv.target > mv.source {
+            if target > source {
                 // Kingside
-                if (mv.target % 8) > (mv.source % 8) {
+                if (target % 8) > (source % 8) {
                     king_file_dst = 6; // g-file
                     rook_file_dst = 5; // f-file
                 } else {
@@ -605,7 +666,7 @@ impl GameState {
                     rook_file_dst = 3; // d-file
                 }
             } else {
-                if (mv.target % 8) > (mv.source % 8) {
+                if (target % 8) > (source % 8) {
                     king_file_dst = 6;
                     rook_file_dst = 5;
                 } else {
@@ -639,44 +700,44 @@ impl GameState {
             // NORMAL MOVE LOGIC
 
             // 1. Remove moving piece from source
-            removed.push((piece_type, mv.source as usize));
+            removed.push((piece_type, source as usize));
 
-            if piece_type == P || piece_type == p || mv.is_capture {
+            if piece_type == P || piece_type == p || is_capture {
                 self.halfmove_clock = 0;
             }
 
-            self.hash ^= zobrist::piece_key(piece_type, mv.source as usize);
-            self.bitboards[piece_type].pop_bit(mv.source);
-            self.board[mv.source as usize] = NO_PIECE as u8;
+            self.hash ^= zobrist::piece_key(piece_type, source as usize);
+            self.bitboards[piece_type].pop_bit(source);
+            self.board[source as usize] = NO_PIECE as u8;
 
-            self.occupancies[side].pop_bit(mv.source);
-            self.occupancies[BOTH].pop_bit(mv.source);
+            self.occupancies[side].pop_bit(source);
+            self.occupancies[BOTH].pop_bit(source);
 
             // 2. Add moving piece (or promo) to target
-            let actual_piece = if let Some(promo) = mv.promotion {
+            let actual_piece = if let Some(promo) = promotion {
                 let p_idx = if side == WHITE { promo } else { promo + 6 };
                 p_idx
             } else {
                 piece_type
             };
 
-            if mv.promotion.is_some() {
-                self.bitboards[actual_piece].set_bit(mv.target);
-                self.hash ^= zobrist::piece_key(actual_piece, mv.target as usize);
+            if promotion.is_some() {
+                self.bitboards[actual_piece].set_bit(target);
+                self.hash ^= zobrist::piece_key(actual_piece, target as usize);
             } else {
-                self.bitboards[piece_type].set_bit(mv.target);
-                self.hash ^= zobrist::piece_key(piece_type, mv.target as usize);
+                self.bitboards[piece_type].set_bit(target);
+                self.hash ^= zobrist::piece_key(piece_type, target as usize);
             }
 
             // Capture Logic
-            if mv.is_capture {
+            if is_capture {
                 let enemy_side = 1 - side;
-                if (piece_type == P || piece_type == p) && mv.target == old_en_passant {
+                if (piece_type == P || piece_type == p) && target == old_en_passant {
                     // En Passant
                     let cap_sq = if side == WHITE {
-                        mv.target - 8
+                        target - 8
                     } else {
-                        mv.target + 8
+                        target + 8
                     };
                     let enemy_pawn = if side == WHITE { p } else { P };
                     captured_piece = enemy_pawn as u8;
@@ -690,39 +751,39 @@ impl GameState {
                     self.occupancies[BOTH].pop_bit(cap_sq);
 
                     // Target was empty for EP
-                    self.board[mv.target as usize] = actual_piece as u8;
+                    self.board[target as usize] = actual_piece as u8;
                 } else {
                     // Normal Capture
-                    captured_piece = self.board[mv.target as usize];
+                    captured_piece = self.board[target as usize];
                     if captured_piece != NO_PIECE as u8 {
                          let cap_p = captured_piece as usize;
-                         self.bitboards[cap_p].pop_bit(mv.target);
-                         self.hash ^= zobrist::piece_key(cap_p, mv.target as usize);
-                         removed.push((cap_p, mv.target as usize));
+                         self.bitboards[cap_p].pop_bit(target);
+                         self.hash ^= zobrist::piece_key(cap_p, target as usize);
+                         removed.push((cap_p, target as usize));
                          // Note: board update for captured piece is implicit (overwritten below)
                     }
-                    self.occupancies[enemy_side].pop_bit(mv.target);
-                    self.board[mv.target as usize] = actual_piece as u8;
+                    self.occupancies[enemy_side].pop_bit(target);
+                    self.board[target as usize] = actual_piece as u8;
                 }
             } else {
                 captured_piece = NO_PIECE as u8;
-                self.board[mv.target as usize] = actual_piece as u8;
+                self.board[target as usize] = actual_piece as u8;
             }
 
-            added.push((actual_piece, mv.target as usize));
+            added.push((actual_piece, target as usize));
 
             // Occupancy Add
-            self.occupancies[side].set_bit(mv.target);
-            self.occupancies[BOTH].set_bit(mv.target);
+            self.occupancies[side].set_bit(target);
+            self.occupancies[BOTH].set_bit(target);
 
             // Set new EP
              if piece_type == P || piece_type == p {
-                let diff = (mv.target as i8 - mv.source as i8).abs();
+                let diff = (target as i8 - source as i8).abs();
                 if diff == 16 {
                     let ep_sq = if side == WHITE {
-                        mv.target - 8
+                        target - 8
                     } else {
-                        mv.target + 8
+                        target + 8
                     };
                     self.en_passant = ep_sq;
                     self.hash ^= zobrist::en_passant_key((ep_sq % 8) as u8);
@@ -772,8 +833,8 @@ impl GameState {
             }
         };
 
-        check_rook_rights(mv.source, &mut self.castling_rights, self.castling_rook_files);
-        check_rook_rights(mv.target, &mut self.castling_rights, self.castling_rook_files);
+        check_rook_rights(source, &mut self.castling_rights, self.castling_rook_files);
+        check_rook_rights(target, &mut self.castling_rights, self.castling_rook_files);
 
         // Re-add rights keys
         self.hash ^= zobrist::castling_key(self.castling_rights);
@@ -810,9 +871,9 @@ impl GameState {
 
         // We know old positions? We can infer or check if piece_type == K/k.
         let (old_k_sq_w, old_k_sq_b) = if piece_type == K {
-             (mv.source as usize, new_k_sq_black)
+             (source as usize, new_k_sq_black)
         } else if piece_type == k {
-             (new_k_sq_white, mv.source as usize)
+             (new_k_sq_white, source as usize)
         } else {
              (new_k_sq_white, new_k_sq_black)
         };
@@ -875,6 +936,11 @@ impl GameState {
         let mut added = UpdateList::new();
         let mut removed = UpdateList::new();
 
+        let source = mv.source();
+        let target = mv.target();
+        let promotion = mv.promotion();
+        let is_capture = mv.is_capture();
+
         if info.is_castling {
              // Castling Unmake
              // Make Logic: K from src->k_dst, R from tgt->r_dst.
@@ -884,8 +950,8 @@ impl GameState {
              let king_file_dst;
              let rook_file_dst;
 
-             if mv.target > mv.source {
-                 if (mv.target % 8) > (mv.source % 8) {
+             if target > source {
+                 if (target % 8) > (source % 8) {
                      king_file_dst = 6;
                      rook_file_dst = 5;
                  } else {
@@ -893,7 +959,7 @@ impl GameState {
                      rook_file_dst = 3;
                  }
              } else {
-                 if (mv.target % 8) > (mv.source % 8) {
+                 if (target % 8) > (source % 8) {
                      king_file_dst = 6;
                      rook_file_dst = 5;
                  } else {
@@ -922,22 +988,20 @@ impl GameState {
              removed.push((r_piece, r_dst as usize));
 
              // Add back to sources
-             self.bitboards[k_piece].set_bit(mv.source);
-             self.board[mv.source as usize] = k_piece as u8;
-             self.occupancies[side].set_bit(mv.source);
-             self.occupancies[BOTH].set_bit(mv.source);
-             added.push((k_piece, mv.source as usize));
+             self.bitboards[k_piece].set_bit(source);
+             self.board[source as usize] = k_piece as u8;
+             self.occupancies[side].set_bit(source);
+             self.occupancies[BOTH].set_bit(source);
+             added.push((k_piece, source as usize));
 
-             self.bitboards[r_piece].set_bit(mv.target);
-             self.board[mv.target as usize] = r_piece as u8;
-             self.occupancies[side].set_bit(mv.target);
-             self.occupancies[BOTH].set_bit(mv.target);
-             added.push((r_piece, mv.target as usize));
+             self.bitboards[r_piece].set_bit(target);
+             self.board[target as usize] = r_piece as u8;
+             self.occupancies[side].set_bit(target);
+             self.occupancies[BOTH].set_bit(target);
+             added.push((r_piece, target as usize));
 
         } else {
              // Normal Unmake
-             let target = mv.target;
-             let source = mv.source;
 
              // What is at target?
              // If promotion, it's the promoted piece.
@@ -954,7 +1018,7 @@ impl GameState {
              // Place back at source
              // If promotion, we placed PromotedPiece. We remove it (done above).
              // We need to place Pawn at source.
-             let original_piece = if mv.promotion.is_some() {
+             let original_piece = if promotion.is_some() {
                   if side == WHITE { P } else { p }
              } else {
                   moved_piece
@@ -967,7 +1031,7 @@ impl GameState {
              added.push((original_piece, source as usize));
 
              // Restore captured piece
-             if mv.is_capture {
+             if is_capture {
                   let captured = info.captured as usize;
                   let enemy_side = 1 - side;
                   let cap_sq = if (original_piece == P || original_piece == p) && target == info.en_passant {

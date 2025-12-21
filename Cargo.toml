@@ -14,6 +14,7 @@ pyrrhic-rs = "0.2.0"
 [features]
 default = ["bmi2"]
 bmi2 = []
+tuning = []
 
 [profile.release]
 opt-level = 3

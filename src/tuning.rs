@@ -3,6 +3,7 @@ use crate::eval::{self, Trace};
 use crate::state::GameState;
 use std::fs::File;
 use std::io::{self, BufRead, Write};
+#[cfg(feature = "tuning")]
 use std::sync::atomic::Ordering;
 
 const K_FACTOR: f64 = 1.13;
@@ -28,6 +29,13 @@ struct Parameter {
     ptype: ParamType,
 }
 
+// Stub function when tuning is not enabled to satisfy linker if called
+#[cfg(not(feature = "tuning"))]
+pub fn run_tuning() {
+    println!("Tuning not enabled. Build with --features tuning");
+}
+
+#[cfg(feature = "tuning")]
 pub fn run_tuning() {
     println!("--- AETHER TUNER ---");
     let mut params = init_parameters();
@@ -131,6 +139,7 @@ pub fn run_tuning() {
     }
 }
 
+#[cfg(feature = "tuning")]
 fn init_parameters() -> Vec<Parameter> {
     let mut params = Vec::new();
     // Use Relaxed loading from Atomics
@@ -146,6 +155,21 @@ fn init_parameters() -> Vec<Parameter> {
             ptype: ParamType::MaterialEG(i),
         });
     }
+
+    // Helper using generic types to avoid specifying exact atomic type, relying on inference or explicit cast at call site?
+    // Actually, eval::* tables are strictly defined.
+    // The previous error was: expected `&[AtomicI32; 64]`, found `&[i32; 64]`.
+    // This is because I imported eval::*, and MG_PAWN_TABLE is conditionally defined.
+    // When tuning is ENABLED, MG_PAWN_TABLE is [AtomicI32; 64].
+    // The previous check failed because `cargo check` ran WITHOUT features enabled?
+    // Ah, `cargo check` by default uses default features. I didn't enable `tuning` by default.
+    // So `eval.rs` defined `i32` arrays.
+    // But `tuning.rs` code (which I removed cfg guards from initially or had partial guards) tried to use `AtomicI32` specific logic?
+    // Wait, the error `no method named store found for type i32` confirms that `eval::*` were `i32` arrays.
+    // And `init_parameters` (and `save_parameters`) were trying to call `.store` or pass them to closures expecting `AtomicI32`.
+    // So the fix is to wrap the entire body of `init_parameters` and `save_parameters` (and `run_tuning` logic) in `#[cfg(feature = "tuning")]`.
+    // Or make them generic?
+    // Since tuning is a specific mode, conditional compilation is cleaner.
 
     let mut add_table = |mg_table: &[std::sync::atomic::AtomicI32; 64],
                          eg_table: &[std::sync::atomic::AtomicI32; 64],
@@ -173,6 +197,7 @@ fn init_parameters() -> Vec<Parameter> {
     params
 }
 
+#[cfg(feature = "tuning")]
 fn load_entries(path: &str) -> Vec<TunerEntry> {
     let mut entries = Vec::new();
     if let Ok(file) = File::open(path) {
@@ -202,6 +227,7 @@ fn load_entries(path: &str) -> Vec<TunerEntry> {
     entries
 }
 
+#[cfg(feature = "tuning")]
 fn save_parameters(params: &[Parameter]) {
     for p in params {
         let int_val = p.val as i32;
@@ -229,8 +255,6 @@ fn save_parameters(params: &[Parameter]) {
         }
     }
 
-    // Printing is tricky with atomics, we need to load them first.
-    // For simplicity, we just dump generic info.
     let mut file = File::create("tuned_params.txt").unwrap();
     writeln!(file, "Tuned Values Saved.").unwrap();
 }

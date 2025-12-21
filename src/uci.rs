@@ -245,9 +245,9 @@ fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
                 history.push(state.hash);
 
                 // Reset history on capture or pawn move (50-move rule reset)
-                if mv.is_capture
-                    || (state.bitboards[crate::state::P].get_bit(mv.target)
-                        || state.bitboards[crate::state::p].get_bit(mv.target))
+                if mv.is_capture()
+                    || (state.bitboards[crate::state::P].get_bit(mv.target())
+                        || state.bitboards[crate::state::p].get_bit(mv.target()))
                 {
                     history.clear();
                     history.push(state.hash);
@@ -294,10 +294,12 @@ pub fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
     // First pass: Try exact match
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
-        if mv.source == src && mv.target == tgt {
-            if let Some(p) = mv.promotion {
+        if mv.source() == src && mv.target() == tgt {
+            if let Some(p) = mv.promotion() {
                 if let Some(user_p) = promo {
-                    return Some(mv);
+                    if p == user_p {
+                        return Some(mv);
+                    }
                 }
             } else {
                 if promo.is_none() {
@@ -330,7 +332,7 @@ pub fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
                 // Check if King->Rook move exists in generator
                 for i in 0..generator.list.count {
                     let mv = generator.list.moves[i];
-                    if mv.source == src && mv.target == expected_rook_sq {
+                    if mv.source() == src && mv.target() == expected_rook_sq {
                         return Some(mv);
                     }
                 }
