@@ -572,7 +572,7 @@ impl GameState {
 
     pub fn make_move_inplace(&mut self, mv: Move) -> UnmakeInfo {
         let side = self.side_to_move;
-        let captured_piece;
+        let mut captured_piece;
         let old_hash = self.hash;
         let old_en_passant = self.en_passant;
         let old_castling_rights = self.castling_rights;
@@ -763,6 +763,22 @@ impl GameState {
                 } else {
                     // Normal Capture
                     captured_piece = self.board[target as usize];
+
+                    if captured_piece == NO_PIECE as u8 {
+                        // Fallback to bitboards if board[] is desynchronized (empty)
+                        let enemy_start = if side == WHITE { p } else { P };
+                        let enemy_end = if side == WHITE { k } else { K };
+                        for pp in enemy_start..=enemy_end {
+                            if self.bitboards[pp].get_bit(target) {
+                                captured_piece = pp as u8;
+                                eprintln!(
+                                    "WARNING: Board desync detected at {}. Recovered via bitboards. Move: {:?}",
+                                    target, mv
+                                );
+                                break;
+                            }
+                        }
+                    }
 
                     if captured_piece == NO_PIECE as u8 {
                         panic!(
