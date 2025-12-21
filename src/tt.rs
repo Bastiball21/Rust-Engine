@@ -297,6 +297,11 @@ impl TranspositionTable {
             return false;
         }
 
+        // Verify with Bitboards (Hardening against Board Desync)
+        if !state.bitboards[piece_type].get_bit(from) {
+            return false;
+        }
+
         // Validate Side ownership
         // White pieces: 0..5, Black pieces: 6..11
         if side == WHITE {
@@ -318,6 +323,12 @@ impl TranspositionTable {
 
         // STRICT CAPTURE FLAG VALIDATION
         let is_occupied = target_piece != 12;
+
+        // Verify Victim with Bitboards (Hardening)
+        if is_occupied && !state.bitboards[target_piece].get_bit(to) {
+            return false; // Ghost Victim
+        }
+
         let is_ep = to == state.en_passant && (piece_type == P || piece_type == p);
 
         if mv.is_capture() {
