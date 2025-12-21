@@ -7,6 +7,7 @@ use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q
 use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
 use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
+use crate::parameters::SearchParameters;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -15,16 +16,8 @@ const INFINITY: i32 = 32000;
 const MATE_VALUE: i32 = 31000;
 const MATE_SCORE: i32 = 30000;
 
-// Reduced LMP Table
-const LMP_TABLE: [usize; 16] = [
-    0, 2, 4, 7, 10, 15, 20, 28, 38, 50, 65, 80, 100, 120, 150, 200,
-];
-
 // Continuation History
 type ContHistTable = [[[i32; 64]; 12]; 768];
-
-// LMR Table wrapped in OnceLock for safe runtime initialization
-static LMR_TABLE: OnceLock<[[u8; 64]; 64]> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 pub enum Limits {
@@ -323,6 +316,7 @@ pub struct SearchInfo<'a> {
     pub stopped: bool,
     pub tt: &'a TranspositionTable,
     pub main_thread: bool,
+    pub params: &'a SearchParameters,
 }
 
 impl<'a> SearchInfo<'a> {
@@ -332,20 +326,8 @@ impl<'a> SearchInfo<'a> {
         stop: Arc<AtomicBool>,
         tt: &'a TranspositionTable,
         main: bool,
+        params: &'a SearchParameters,
     ) -> Self {
-        LMR_TABLE.get_or_init(|| {
-            let mut table = [[0; 64]; 64];
-            for d in 0..64 {
-                for m in 0..64 {
-                    if d > 2 && m > 2 {
-                        let lmr = 1.0 + (d as f64).ln() * (m as f64).ln() / 2.5;
-                        table[d][m] = lmr as u8;
-                    }
-                }
-            }
-            table
-        });
-
         Self {
             data,
             static_evals: [0; MAX_PLY + 1],
@@ -356,6 +338,7 @@ impl<'a> SearchInfo<'a> {
             stopped: false,
             tt,
             main_thread: main,
+            params,
         }
     }
 
@@ -795,6 +778,7 @@ pub fn search(
     main_thread: bool,
     history: Vec<u64>,
     search_data: &mut SearchData,
+    params: &SearchParameters,
 ) -> (i32, Option<Move>) {
     let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
@@ -835,6 +819,7 @@ pub fn search(
         stop_signal,
         tt,
         main_thread,
+        params,
     ));
     let mut path = history;
     let mut last_score = 0;
@@ -1033,37 +1018,9 @@ fn negamax(
         return 0;
     }
     // OPTIMIZED REPETITION CHECK
-    // Only check up to halfmove_clock, skip every other (color flipped)
-    // path contains hashes. We check backwards.
-    // path len = current ply usually.
-    // The hashes in 'path' are for previous positions.
-    // If state.halfmove_clock is small, we only check that many back.
     if ply > 0 {
         let start_idx = path.len().saturating_sub(state.halfmove_clock as usize);
-        // We only check indices where side to move matches current (i.e. every 2nd)
-        // rev() iterates backwards. step_by(2) skips.
-        // We check from end of path downwards.
-        // BUG FIX: Ensure we start checking from path.len() - 2 (previous position with same side to move)
-        // Previous loop: (start_idx..path.len()).rev().step_by(2)
-        // If len=10, rev -> 9, 8, ...
-        // step_by(2) -> 9, 7, 5... (indices 9 is last element, previous ply)
-        // Index 9 is OPPONENT to move. We want SAME side.
-        // So we need to start at len - 2.
-
-        let path_len = path.len();
-        // Range should effectively cover indices [len-2, len-4, ...] >= start_idx
-        // `path_len.saturating_sub(1)` gives index len-1. We want range up to len-1 excluded? No, `..` is exclusive.
-        // `..path_len` -> 0 to path_len-1.
-        // `rev()` -> path_len-1, path_len-2...
-        // `step_by(2)` -> path_len-1, path_len-3... (WRONG PARITY)
-
-        // We want range that ENDS at path_len-1 (exclusive), so the last element considered is path_len-2.
-        // So we want `start_idx .. path_len - 1`?
-        // If len=10. Range 0..9. `rev` -> 8, 7, 6... `step_by` -> 8, 6, 4... (CORRECT PARITY)
-
-        let end_idx = path_len.saturating_sub(1);
-
-        // Check only relevant portion
+        let end_idx = path.len().saturating_sub(1);
         for i in (start_idx..end_idx).rev().step_by(2) {
              if path[i] == state.hash {
                  return 0;
@@ -1167,7 +1124,7 @@ fn negamax(
 
     // --- AGGRESSIVE RAZORING ---
     if !is_pv && !in_check && excluded_move.is_none() && new_depth <= 3 {
-        let razor_margin = 300 + (new_depth as i32 * 150);
+        let razor_margin = info.params.razoring_base + (new_depth as i32 * info.params.razoring_multiplier);
         if static_eval + razor_margin < alpha {
             let v = quiescence(state, alpha, beta, info, ply);
             if v < alpha {
@@ -1181,7 +1138,7 @@ fn negamax(
         && !in_check
         && excluded_move.is_none()
         && new_depth < 7
-        && static_eval - (60 * new_depth as i32) >= beta
+        && static_eval - (info.params.rfp_margin * new_depth as i32) >= beta
     {
         return static_eval;
     }
@@ -1208,7 +1165,7 @@ fn negamax(
             != 0;
 
         if has_pieces {
-            let reduction_depth = 3 + new_depth / 6;
+            let reduction_depth = info.params.nmp_base + new_depth as i32 / info.params.nmp_divisor;
             // Make Null Move In Place
             let unmake_info = state.make_null_move_inplace();
 
@@ -1363,7 +1320,7 @@ fn negamax(
         }
 
         if !is_pv && !in_check && new_depth <= 8 && is_quiet {
-            if quiets_checked >= LMP_TABLE[new_depth as usize] {
+            if quiets_checked >= info.params.lmp_table[new_depth as usize] {
                 continue;
             }
         }
@@ -1423,7 +1380,7 @@ fn negamax(
             {
                 let d_idx = new_depth.min(63) as usize;
                 let m_idx = moves_searched.min(63) as usize;
-                let mut lmr_r = LMR_TABLE.get().unwrap()[d_idx][m_idx] as i32;
+                let mut lmr_r = info.params.lmr_table[d_idx][m_idx] as i32;
 
                 let history = info.data.history[mv.source() as usize][mv.target() as usize];
                 lmr_r -= history / 8192;

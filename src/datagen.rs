@@ -5,6 +5,7 @@ use crate::search;
 use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, K, N, P, Q, R, WHITE};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::{TranspositionTable, FLAG_EXACT};
+use crate::parameters::SearchParameters;
 use bulletformat::BulletFormat;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -256,11 +257,14 @@ pub fn run_datagen(config: DatagenConfig) {
     let games_per_thread = config.num_games / config.num_threads;
     let remainder = config.num_games % config.num_threads;
 
+    let default_params = SearchParameters::default();
+
     for t_id in 0..config.num_threads {
         let tx = tx.clone();
         let my_games = games_per_thread + if t_id < remainder { 1 } else { 0 };
         let depth_config = config.depth;
         let book_arc = book.clone();
+        let params_clone = default_params.clone(); // Pass default params to datagen
 
         let builder = thread::Builder::new()
             .name(format!("datagen_worker_{}", t_id))
@@ -472,6 +476,7 @@ pub fn run_datagen(config: DatagenConfig) {
                                 false,
                                 history_vec.clone(),
                                 &mut search_data,
+                                &params_clone,
                             );
                             search_score = s;
                             best_move = m;
