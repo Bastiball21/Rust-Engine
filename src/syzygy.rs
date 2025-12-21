@@ -151,49 +151,30 @@ pub fn probe_root(state: &GameState) -> Option<(crate::state::Move, i32)> {
                  },
                  DtzProbeValue::Failed => return None,
                  DtzProbeValue::DtzResult(root_dtz) => {
-                      // Map dtz result to Move
-                      let mut mv = crate::state::Move {
-                          source: root_dtz.from_square,
-                          target: root_dtz.to_square,
-                          promotion: match root_dtz.promotion {
-                              Piece::Queen => Some(4), // Aether Queen = 4
-                              Piece::Rook => Some(3),  // Aether Rook = 3
-                              Piece::Bishop => Some(2), // Aether Bishop = 2
-                              Piece::Knight => Some(1), // Aether Knight = 1
-                              _ => None,
-                          },
-                          is_capture: false // Caller needs to verify or we can deduce?
-                          // Actually Move struct in Aether has capture flag.
-                          // But for root move reporting, Search usually re-generates or verifies.
-                          // However, we should try to be accurate.
-                          // But we don't have easy access to capture info here without bitboards.
-                          // Aether's make_move uses is_capture to handle piece removal.
-                          // We can check if target square is occupied.
+                      let from = root_dtz.from_square;
+                      let to = root_dtz.to_square;
+                      let promotion = match root_dtz.promotion {
+                          Piece::Queen => Some(4), // Aether Queen = 4
+                          Piece::Rook => Some(3),  // Aether Rook = 3
+                          Piece::Bishop => Some(2), // Aether Bishop = 2
+                          Piece::Knight => Some(1), // Aether Knight = 1
+                          _ => None,
                       };
 
-                      // Check capture
-                      let target_bit = 1u64 << mv.target;
+                      let mut is_capture = false;
+                      let target_bit = 1u64 << to;
                       if (state.occupancies[crate::state::BOTH].0 & target_bit) != 0 {
-                          mv.is_capture = true;
-                      } else if state.en_passant == mv.target && (get_piece_type_safe(state, mv.source) == 0 || get_piece_type_safe(state, mv.source) == 6) {
-                          // En Passant capture logic would be here, but simpler:
-                          // If it's EP, pyrrhic sets ep flag in DtzResult?
-                          if root_dtz.ep {
-                              mv.is_capture = true;
-                          }
+                          is_capture = true;
+                      } else if root_dtz.ep {
+                          is_capture = true;
                       }
 
-                      // Calculate score from DTZ
-                      // root_dtz.dtz is distance to zeroing (ply count).
-                      // Need to map to Mate Score if winning.
-                      // Syzygy WDL:
-                      // Win: +ve score
-                      // Loss: -ve score
+                      let mv = crate::state::Move::new(from, to, promotion, is_capture);
 
-                      // Using WDL from result:
+                      // Calculate score from DTZ
                       use pyrrhic_rs::WdlProbeResult;
                       let score = match root_dtz.wdl {
-                          WdlProbeResult::Win => TB_WIN_SCORE, // Distance not incorporated in score here?
+                          WdlProbeResult::Win => TB_WIN_SCORE,
                           WdlProbeResult::Loss => -TB_WIN_SCORE,
                           _ => 0,
                       };

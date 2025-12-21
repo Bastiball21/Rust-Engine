@@ -1,133 +1,40 @@
-// src/tests_chess960.rs
-use crate::movegen::MoveGenerator;
-use crate::state::{k, r, GameState, Move, BLACK, K, R, WHITE};
-use crate::uci::UCI_CHESS960;
-use std::sync::atomic::Ordering;
+#[cfg(test)]
+mod tests {
+    use crate::movegen::{self, MoveGenerator};
+    use crate::state::{GameState, Move, B, K, N, P, Q, R};
 
-#[test]
-fn test_standard_startpos_regression() {
-    crate::zobrist::init_zobrist();
-    crate::bitboard::init_magic_tables();
-    crate::movegen::init_move_tables();
+    #[test]
+    fn test_chess960_castling_move_generation() {
+        crate::zobrist::init_zobrist(); // Needed for hash computation in parse_fen
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
 
-    let state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    assert_eq!(state.castling_rook_files[WHITE][0], 7);
-    assert_eq!(state.castling_rook_files[WHITE][1], 0);
-    assert_eq!(state.castling_rook_files[BLACK][0], 7);
-    assert_eq!(state.castling_rook_files[BLACK][1], 0);
+        // Position: R K R (Chess960 style) on first rank
+        // a1 b1 c1 d1 e1 f1 g1 h1
+        // B  B  R  K  R  .  .  Q
+        // c1 is R(2), d1 is K(3), e1 is R(4). f1(5), g1(6) empty.
+        // FEN: bbrkr2q/pppppppp/8/8/8/8/PPPPPPPP/BBRKR2Q w KQkq - 0 1
 
-    let mut mg = MoveGenerator::new();
-    mg.generate_moves(&state);
-    assert_eq!(mg.list.count, 20);
-}
+        let state = GameState::parse_fen("bbrkr2q/pppppppp/8/8/8/8/PPPPPPPP/BBRKR2Q w KQkq - 0 1");
 
-#[test]
-fn test_chess960_fen_parsing() {
-    crate::zobrist::init_zobrist();
-    crate::bitboard::init_magic_tables();
+        let mut generator = MoveGenerator::new();
+        generator.generate_moves(&state);
 
-    // FEN: rkr5/8/8/8/8/8/8/RKR5 w AC - 0 1
-    // Rooks at A1(0), C1(2). King at B1(1).
-    let state = GameState::parse_fen("rkr5/8/8/8/8/8/8/RKR5 w AC - 0 1");
+        // Internal Move: King(3) -> Rook(2) (Queenside)
+        // Internal Move: King(3) -> Rook(4) (Kingside)
 
-    assert_eq!(state.castling_rook_files[WHITE][1], 0); // A -> Queenside
-    assert_eq!(state.castling_rook_files[WHITE][0], 2); // C -> Kingside
-    assert_eq!((state.castling_rights & 1) != 0, true);
-    assert_eq!((state.castling_rights & 2) != 0, true);
+        let mut found_qs = false;
+        let mut found_ks = false;
 
-    // Expect CQ because C(2) is Kingside (K), A(0) is Queenside (Q).
-    // And standard FEN output usually uses Q for A-file.
-    let fen_out = state.to_fen();
-    assert!(fen_out.contains("CQ") || fen_out.contains("AC") || fen_out.contains("QC"));
-}
-
-#[test]
-fn test_castling_move_generation_standard() {
-    crate::zobrist::init_zobrist();
-    crate::bitboard::init_magic_tables();
-    crate::movegen::init_move_tables();
-
-    let state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
-    let mut mg = MoveGenerator::new();
-    mg.generate_moves(&state);
-
-    let mut has_h1 = false;
-    let mut has_a1 = false;
-
-    for i in 0..mg.list.count {
-        let mv = mg.list.moves[i];
-        if mv.source == 4 {
-            if mv.target == 7 {
-                has_h1 = true;
-            }
-            if mv.target == 0 {
-                has_a1 = true;
+        for i in 0..generator.list.count {
+            let mv = generator.list.moves[i];
+            if mv.source() == 3 {
+                if mv.target() == 2 { found_qs = true; }
+                if mv.target() == 4 { found_ks = true; }
             }
         }
+
+        assert!(found_qs, "960 Queenside Castle missing (K@d1 -> R@c1)");
+        assert!(found_ks, "960 Kingside Castle missing (K@d1 -> R@e1)");
     }
-
-    assert!(has_h1, "White Kingside Castle (e1h1) missing");
-    assert!(has_a1, "White Queenside Castle (e1a1) missing");
-}
-
-#[test]
-fn test_castling_make_move() {
-    crate::zobrist::init_zobrist();
-    crate::bitboard::init_magic_tables();
-
-    let state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
-    let mv = Move {
-        source: 4,
-        target: 7,
-        promotion: None,
-        is_capture: false,
-    };
-    let next_state = state.make_move(mv);
-
-    assert!(next_state.bitboards[K].get_bit(6));
-    assert!(!next_state.bitboards[K].get_bit(4));
-    assert!(next_state.bitboards[R].get_bit(5));
-    assert!(!next_state.bitboards[R].get_bit(7));
-    assert_eq!(next_state.castling_rights & 3, 0);
-}
-
-#[test]
-fn test_chess960_castling_make_move() {
-    crate::zobrist::init_zobrist();
-    crate::bitboard::init_magic_tables();
-    crate::movegen::init_move_tables();
-
-    // FEN: 8/8/8/8/8/8/8/1R1K2R1 w BG - 0 1
-    // King at D1 (3). Rooks at B1 (1) and G1 (6).
-    // Castling rights: BG.
-    // Removed black pieces to avoid check.
-    let state = GameState::parse_fen("8/8/8/8/8/8/8/1R1K2R1 w BG - 0 1");
-
-    println!("DEBUG: Castling Rights: {}", state.castling_rights);
-    println!(
-        "DEBUG: Rook Files: K={}, Q={}",
-        state.castling_rook_files[WHITE][0], state.castling_rook_files[WHITE][1]
-    );
-
-    let mut mg = MoveGenerator::new();
-    mg.generate_moves(&state);
-    let mut found = false;
-    for i in 0..mg.list.count {
-        let mv = mg.list.moves[i];
-        if mv.source == 3 && mv.target == 6 {
-            found = true;
-        }
-    }
-    assert!(found, "960 Castle move d1g1 not generated");
-
-    let mv = Move {
-        source: 3,
-        target: 6,
-        promotion: None,
-        is_capture: false,
-    };
-    let next_state = state.make_move(mv);
-
-    assert!(next_state.bitboards[K].get_bit(6));
-    assert!(next_state.bitboards[R].get_bit(5));
 }

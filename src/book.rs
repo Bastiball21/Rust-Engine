@@ -291,30 +291,30 @@ fn parse_san(state: &GameState, san: &str) -> Option<Move> {
         let m = generator.list.moves[i];
 
         // 1. Match Target
-        if m.target != target_sq {
+        if m.target() != target_sq {
             continue;
         }
 
         // 2. Match Piece Type (Moving Piece)
-        let moved_piece = get_piece_at(state, m.source)?;
+        let moved_piece = get_piece_at(state, m.source())?;
         let moved_type = moved_piece % 6;
         if moved_type != piece_type {
             continue;
         }
 
         // 3. Match Promotion
-        if m.promotion != promotion {
+        if m.promotion() != promotion {
             continue;
         }
 
         // 4. Match Constraints
         if let Some(f) = file_constraint {
-            if (m.source % 8) != f {
+            if (m.source() % 8) != f {
                 continue;
             }
         }
         if let Some(rnk) = rank_constraint {
-            if (m.source / 8) != rnk {
+            if (m.source() / 8) != rnk {
                 continue;
             }
         }
@@ -377,11 +377,11 @@ fn find_castling_move(state: &GameState, kingside: bool) -> Option<Move> {
 
     for i in 0..generator.list.count {
         let m = generator.list.moves[i];
-        if m.source == k_start {
+        if m.source() == k_start {
             // Is it castling?
             // In this engine, castling is KxR.
             // Check if target is a friendly rook?
-            let captured = get_piece_at(state, m.target);
+            let captured = get_piece_at(state, m.target());
             if let Some(p) = captured {
                 // p is friendly rook?
                 // White R=3, Black r=9.
@@ -398,8 +398,8 @@ fn find_castling_move(state: &GameState, kingside: bool) -> Option<Move> {
                     // Kingside Rook usually on H (7). Queenside on A (0).
                     // Or 960 positions.
 
-                    let r_file = m.target % 8;
-                    let k_file = m.source % 8;
+                    let r_file = m.target() % 8;
+                    let k_file = m.source() % 8;
 
                     let is_ks = r_file > k_file;
 

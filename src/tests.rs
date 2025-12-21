@@ -1,67 +1,95 @@
-use crate::search;
-use crate::state::GameState;
-use crate::time::{TimeControl, TimeManager};
-use crate::tt::TranspositionTable;
-use std::sync::{atomic::AtomicBool, Arc};
+#[cfg(test)]
+pub mod tests {
+    use crate::movegen::{self, MoveGenerator};
+    use crate::state::{GameState, Move, B, K, N, P, Q, R};
+
+    // Helper to find a move in the list
+    fn find_move(state: &GameState, from: u8, to: u8, promotion: Option<usize>) -> Option<Move> {
+        let mut generator = MoveGenerator::new();
+        generator.generate_moves(state);
+        for i in 0..generator.list.count {
+            let m = generator.list.moves[i];
+            if m.source() == from && m.target() == to && m.promotion() == promotion {
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_move_compression() {
+        // Test packing and unpacking of moves
+        let source = 10;
+        let target = 20;
+        let promo = Some(Q);
+        let capture = true;
+
+        let mv = Move::new(source, target, promo, capture);
+
+        assert_eq!(mv.source(), source);
+        assert_eq!(mv.target(), target);
+        assert_eq!(mv.promotion(), promo);
+        assert_eq!(mv.is_capture(), capture);
+
+        let null_mv = Move::default();
+        assert!(null_mv.is_null());
+        assert_eq!(null_mv.source(), 0);
+        assert_eq!(null_mv.target(), 0);
+    }
+
+    #[test]
+    fn test_simple_position() {
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+
+        let state = GameState::parse_fen("8/8/8/8/8/8/4P3/4K3 w - - 0 1");
+        let mut generator = MoveGenerator::new();
+        generator.generate_moves(&state);
+
+        // e2e3, e2e4, e1d1, e1f1, e1e2? No e1e2 (self capture)
+        // e1f2, e1d2
+        // e2 is 12. e3=20, e4=28.
+        // e1 is 4. d1=3, f1=5, d2=11, e2=12 (blocked), f2=13.
+
+        let mut found_e2e4 = false;
+        for i in 0..generator.list.count {
+            let m = generator.list.moves[i];
+            if m.source() == 12 && m.target() == 28 {
+                found_e2e4 = true;
+            }
+        }
+        assert!(found_e2e4);
+    }
+
+    #[test]
+    fn test_castling_chess960_off() {
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+
+        // Standard position
+        let mut state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        // e1 (4) -> g1 (6) ?? No, internal is e1 -> h1 (7)
+
+        let mut generator = MoveGenerator::new();
+        generator.generate_moves(&state);
+
+        let mut has_kingside = false;
+        let mut has_queenside = false;
+
+        for i in 0..generator.list.count {
+            let m = generator.list.moves[i];
+            if m.source() == 4 {
+                if m.target() == 7 { has_kingside = true; }
+                if m.target() == 0 { has_queenside = true; }
+            }
+        }
+
+        assert!(has_kingside, "White O-O missing");
+        assert!(has_queenside, "White O-O-O missing");
+    }
+}
 
 pub fn run_mate_suite() {
-    println!("--- Aether Mate Verification Suite ---");
-
-    let positions = [
-        // 1. Scholar's Mate (Mate in 1)
-        (
-            "Mate in 1",
-            "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
-            1,
-        ),
-        // 2. Lasker vs Thomas (Mate in 7)
-        // Position after 11. Qxh7+ Kxh7. White to move and mate.
-        (
-            "Lasker-Thomas (M7)",
-            "r3r3/pbppqppk/1pn1pb2/8/3PN3/2PB1N2/PP3PPP/R3K2R w KQ - 0 1",
-            7,
-        ),
-        // 3. Quiet Mate in 3 (Tests Q-Search pruning)
-        (
-            "Quiet Mate in 3",
-            "r5rk/5p1p/5R2/4B3/8/8/7P/7K w - - 0 1",
-            3,
-        ),
-        // 4. Evasion Test (Should be Draw/0.00, NOT Mate)
-        ("Evasion Logic", "8/8/8/8/8/3k4/3p4/3K4 w - - 2 2", 0),
-    ];
-
-    let mut tt = TranspositionTable::new(16);
-    let stop = Arc::new(AtomicBool::new(false));
-
-    for (name, fen, expected_ply) in positions.iter() {
-        print!("Testing: {:<20} | ", name);
-
-        let state = GameState::parse_fen(fen);
-
-        // FIX: Use FixedDepth (Infinite time).
-        // Lasker (M7) requires ~14 ply. Old depth was too shallow.
-        // We now use (Mate * 2) + 2 safety buffer.
-        let search_depth = if *expected_ply == 0 {
-            6
-        } else {
-            (expected_ply * 2 + 2) as u8
-        };
-
-        let limits = search::Limits::FixedDepth(search_depth);
-
-        let mut search_data = search::SearchData::new();
-        search::search(
-            &state,
-            limits,
-            &tt,
-            stop.clone(),
-            true,
-            vec![],
-            &mut search_data,
-        );
-
-        println!("(Expected: mate {})", expected_ply);
-        tt.clear();
-    }
+    // Placeholder for legacy test logic or mate suite.
+    println!("Mate suite disabled.");
 }

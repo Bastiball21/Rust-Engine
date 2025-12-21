@@ -116,7 +116,7 @@ impl<'a> MovePicker<'a> {
             killers = data.killers[ply];
             if let Some(pm) = prev_move {
                 let p_piece = get_moved_piece(state, pm);
-                counter_move = data.counter_moves[p_piece][pm.target as usize];
+                counter_move = data.counter_moves[p_piece][pm.target() as usize];
             }
         }
 
@@ -180,17 +180,17 @@ impl<'a> MovePicker<'a> {
                 MovePickerStage::Killers => {
                     self.stage = MovePickerStage::GenerateQuiets;
                     if let Some(k1) = self.killers[0] {
-                        if Some(k1) != self.tt_move && self.tt.is_pseudo_legal(state, k1) && !k1.is_capture {
+                        if Some(k1) != self.tt_move && self.tt.is_pseudo_legal(state, k1) && !k1.is_capture() {
                              return Some(k1);
                         }
                     }
                     if let Some(k2) = self.killers[1] {
-                        if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(state, k2) && !k2.is_capture {
+                        if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(state, k2) && !k2.is_capture() {
                              return Some(k2);
                         }
                     }
                     if let Some(cm) = self.counter_move {
-                         if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(state, cm) && !cm.is_capture {
+                         if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(state, cm) && !cm.is_capture() {
                              return Some(cm);
                          }
                     }
@@ -269,8 +269,8 @@ impl<'a> MovePicker<'a> {
     fn score_captures(&mut self, state: &GameState, data: &SearchData) {
         for i in 0..self.move_count {
             let mv = self.move_list[i];
-            let attacker = get_piece_type_safe(state, mv.source);
-            let victim = get_victim_type(state, mv.target);
+            let attacker = get_piece_type_safe(state, mv.source());
+            let victim = get_victim_type(state, mv.target());
 
             let mvv_lva = [
                 [105, 104, 103, 102, 101, 100],
@@ -287,7 +287,7 @@ impl<'a> MovePicker<'a> {
             };
 
             if victim < 12 {
-                score += data.capture_history[attacker][mv.target as usize][victim % 6] / 16;
+                score += data.capture_history[attacker][mv.target() as usize][victim % 6] / 16;
             }
             self.move_scores[i] = score;
         }
@@ -296,7 +296,7 @@ impl<'a> MovePicker<'a> {
     fn score_quiets(&mut self, data: &SearchData) {
         for i in 0..self.move_count {
             let mv = self.move_list[i];
-            let score = data.history[mv.source as usize][mv.target as usize];
+            let score = data.history[mv.source() as usize][mv.target() as usize];
             self.move_scores[i] = score;
         }
     }
@@ -384,8 +384,8 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
     let enemy = 1 - side;
     let enemy_king_sq = state.bitboards[if enemy == WHITE { K } else { k }].get_lsb_index() as u8;
 
-    let mut piece = get_piece_type_safe(state, mv.source);
-    if let Some(p_promo) = mv.promotion {
+    let mut piece = get_piece_type_safe(state, mv.source());
+    if let Some(p_promo) = mv.promotion() {
         piece = if side == WHITE { p_promo } else { p_promo + 6 };
     }
 
@@ -395,23 +395,23 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
     if piece == K || piece == k {
         // If target has friendly rook, castling
         let friendly_rooks = state.bitboards[if side == WHITE { R } else { r }];
-        if friendly_rooks.get_bit(mv.target) {
+        if friendly_rooks.get_bit(mv.target()) {
             // It's castling. Fallback to slow check.
             return false;
         }
     }
 
     let attacks = match piece {
-        1 | 7 => crate::movegen::get_knight_attacks(mv.target),
-        0 => bitboard::pawn_attacks(Bitboard(1 << mv.target), WHITE),
-        6 => bitboard::pawn_attacks(Bitboard(1 << mv.target), BLACK),
+        1 | 7 => crate::movegen::get_knight_attacks(mv.target()),
+        0 => bitboard::pawn_attacks(Bitboard(1 << mv.target()), WHITE),
+        6 => bitboard::pawn_attacks(Bitboard(1 << mv.target()), BLACK),
         _ => {
             let occ = state.occupancies[crate::state::BOTH];
-            let occ_adjusted = (occ.0 & !(1u64 << mv.source)) | (1u64 << mv.target);
+            let occ_adjusted = (occ.0 & !(1u64 << mv.source())) | (1u64 << mv.target());
             match piece {
-                2 | 8 => bitboard::get_bishop_attacks(mv.target, Bitboard(occ_adjusted)),
-                3 | 9 => bitboard::get_rook_attacks(mv.target, Bitboard(occ_adjusted)),
-                4 | 10 => bitboard::get_queen_attacks(mv.target, Bitboard(occ_adjusted)),
+                2 | 8 => bitboard::get_bishop_attacks(mv.target(), Bitboard(occ_adjusted)),
+                3 | 9 => bitboard::get_rook_attacks(mv.target(), Bitboard(occ_adjusted)),
+                4 | 10 => bitboard::get_queen_attacks(mv.target(), Bitboard(occ_adjusted)),
                 _ => Bitboard(0),
             }
         }
@@ -421,7 +421,7 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
         return true;
     }
 
-    let occ_no_source = Bitboard(state.occupancies[crate::state::BOTH].0 & !(1u64 << mv.source));
+    let occ_no_source = Bitboard(state.occupancies[crate::state::BOTH].0 & !(1u64 << mv.source()));
     let bishops = state.bitboards[if side == WHITE { B } else { b }]
         | state.bitboards[if side == WHITE { Q } else { q }];
     let rooks = state.bitboards[if side == WHITE { R } else { r }]
@@ -442,8 +442,8 @@ fn see(state: &GameState, mv: Move) -> i32 {
     let mut gain = [0; 32];
     let mut d = 0;
 
-    let from = mv.source;
-    let to = mv.target;
+    let from = mv.source();
+    let to = mv.target();
     let mut piece = get_piece_type_safe(state, from);
     let victim = get_piece_type_safe(state, to);
 
@@ -454,7 +454,7 @@ fn see(state: &GameState, mv: Move) -> i32 {
     d += 1;
 
     let mut occ = state.occupancies[crate::state::BOTH];
-    if mv.is_capture && victim == 12 {
+    if mv.is_capture() && victim == 12 {
         gain[0] = 100;
         let ep_sq = if state.side_to_move == WHITE {
             to - 8
@@ -553,14 +553,14 @@ fn update_history(entry: &mut i32, bonus: i32) {
 }
 
 fn update_capture_history(info: &mut SearchInfo, mv: Move, state: &GameState, bonus: i32) {
-    if !mv.is_capture {
+    if !mv.is_capture() {
         return;
     }
-    let attacker = get_piece_type_safe(state, mv.source);
-    let victim = get_victim_type(state, mv.target);
+    let attacker = get_piece_type_safe(state, mv.source());
+    let victim = get_victim_type(state, mv.target());
 
     if victim < 12 {
-        let entry = &mut info.data.capture_history[attacker][mv.target as usize][victim % 6];
+        let entry = &mut info.data.capture_history[attacker][mv.target() as usize][victim % 6];
         *entry += bonus - (*entry * bonus.abs()) / 1024;
     }
 }
@@ -574,11 +574,11 @@ fn update_continuation_history(
 ) {
     if let Some(pm) = prev_move {
         let p_piece = get_moved_piece(state, pm);
-        let p_to = pm.target as usize;
+        let p_to = pm.target() as usize;
         let idx = p_piece * 64 + p_to;
 
-        let c_piece = get_piece_type_safe(state, mv.source);
-        let c_to = mv.target as usize;
+        let c_piece = get_piece_type_safe(state, mv.source());
+        let c_to = mv.target() as usize;
 
         update_history(&mut info.data.cont_history[idx][c_piece][c_to], bonus);
     }
@@ -593,7 +593,7 @@ fn update_correction_history(
 ) {
     if let Some(mv) = prev_move {
         let piece = get_moved_piece(state, mv);
-        let to = mv.target as usize;
+        let to = mv.target() as usize;
         let entry = &mut info.data.correction_history[piece][to];
 
         let scaled_diff = diff.clamp(-512, 512);
@@ -620,7 +620,7 @@ fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
 
 #[inline(always)]
 fn get_moved_piece(state: &GameState, mv: Move) -> usize {
-    let piece = get_piece_type_safe(state, mv.target);
+    let piece = get_piece_type_safe(state, mv.target());
     if piece != 12 {
         piece
     } else {
@@ -729,7 +729,7 @@ fn quiescence(
     while let Some(mv) = picker.next_move(state, info.data) {
         if !in_check {
             // STRICT Q-Search: Only Captures and Promotions
-            if !mv.is_capture && mv.promotion.is_none() {
+            if !mv.is_capture() && mv.promotion().is_none() {
                 continue;
             }
         }
@@ -971,7 +971,7 @@ pub fn search(
     if let Some(bm) = final_move {
         let mut found = false;
         for &lm in &legal_moves {
-            if bm.source == lm.source && bm.target == lm.target && bm.promotion == lm.promotion {
+            if bm.source() == lm.source() && bm.target() == lm.target() && bm.promotion() == lm.promotion() {
                 found = true;
                 final_move = Some(lm);
                 break;
@@ -1021,8 +1021,43 @@ fn negamax(
     if state.halfmove_clock >= 100 {
         return 0;
     }
-    if ply > 0 && path.iter().any(|&h| h == state.hash) {
-        return 0;
+    // OPTIMIZED REPETITION CHECK
+    // Only check up to halfmove_clock, skip every other (color flipped)
+    // path contains hashes. We check backwards.
+    // path len = current ply usually.
+    // The hashes in 'path' are for previous positions.
+    // If state.halfmove_clock is small, we only check that many back.
+    if ply > 0 {
+        let start_idx = path.len().saturating_sub(state.halfmove_clock as usize);
+        // We only check indices where side to move matches current (i.e. every 2nd)
+        // rev() iterates backwards. step_by(2) skips.
+        // We check from end of path downwards.
+        // BUG FIX: Ensure we start checking from path.len() - 2 (previous position with same side to move)
+        // Previous loop: (start_idx..path.len()).rev().step_by(2)
+        // If len=10, rev -> 9, 8, ...
+        // step_by(2) -> 9, 7, 5... (indices 9 is last element, previous ply)
+        // Index 9 is OPPONENT to move. We want SAME side.
+        // So we need to start at len - 2.
+
+        let path_len = path.len();
+        // Range should effectively cover indices [len-2, len-4, ...] >= start_idx
+        // `path_len.saturating_sub(1)` gives index len-1. We want range up to len-1 excluded? No, `..` is exclusive.
+        // `..path_len` -> 0 to path_len-1.
+        // `rev()` -> path_len-1, path_len-2...
+        // `step_by(2)` -> path_len-1, path_len-3... (WRONG PARITY)
+
+        // We want range that ENDS at path_len-1 (exclusive), so the last element considered is path_len-2.
+        // So we want `start_idx .. path_len - 1`?
+        // If len=10. Range 0..9. `rev` -> 8, 7, 6... `step_by` -> 8, 6, 4... (CORRECT PARITY)
+
+        let end_idx = path_len.saturating_sub(1);
+
+        // Check only relevant portion
+        for i in (start_idx..end_idx).rev().step_by(2) {
+             if path[i] == state.hash {
+                 return 0;
+             }
+        }
     }
 
     let mate_value = MATE_VALUE - (ply as i32);
@@ -1069,8 +1104,8 @@ fn negamax(
     // Extensions
     let mut extensions = 0;
     if let Some(pm) = prev_move {
-        let p_piece = get_piece_type_safe(state, pm.target);
-        let rank = pm.target / 8;
+        let p_piece = get_piece_type_safe(state, pm.target());
+        let rank = pm.target() / 8;
         if (p_piece == P && rank == 6) || (p_piece == p && rank == 1) {
             extensions += 1;
         }
@@ -1110,7 +1145,7 @@ fn negamax(
         let mut correction = 0;
         if let Some(pm) = prev_move {
             let piece = get_moved_piece(state, pm);
-            correction = info.data.correction_history[piece][pm.target as usize] as i32;
+            correction = info.data.correction_history[piece][pm.target() as usize] as i32;
         }
         let eval = raw_eval + correction;
         info.static_evals[ply] = eval;
@@ -1296,7 +1331,7 @@ fn negamax(
             continue;
         }
 
-        let is_quiet = !mv.is_capture && mv.promotion.is_none();
+        let is_quiet = !mv.is_capture() && mv.promotion().is_none();
 
         // 1. FUTILITY PRUNING
         if new_depth < 5 && !in_check && !is_pv && is_quiet {
@@ -1309,7 +1344,7 @@ fn negamax(
 
         // HISTORY PRUNING
         if new_depth < 8 && !in_check && !is_pv && is_quiet {
-            let history = info.data.history[mv.source as usize][mv.target as usize];
+            let history = info.data.history[mv.source() as usize][mv.target() as usize];
             if history < -4000 * (new_depth as i32) {
                 quiets_checked += 1;
                 continue;
@@ -1379,7 +1414,7 @@ fn negamax(
                 let m_idx = moves_searched.min(63) as usize;
                 let mut lmr_r = LMR_TABLE.get().unwrap()[d_idx][m_idx] as i32;
 
-                let history = info.data.history[mv.source as usize][mv.target as usize];
+                let history = info.data.history[mv.source() as usize][mv.target() as usize];
                 lmr_r -= history / 8192;
 
                 reduction = lmr_r.max(0) as u8;
@@ -1451,21 +1486,21 @@ fn negamax(
             if score > alpha {
                 alpha = score;
                 if is_quiet {
-                    let from = mv.source as usize;
-                    let to = mv.target as usize;
+                    let from = mv.source() as usize;
+                    let to = mv.target() as usize;
                     let bonus = (new_depth as i32) * (new_depth as i32);
 
                     update_history(&mut info.data.history[from][to], bonus);
 
                     if let Some(pm) = prev_move {
                         let p_piece = get_moved_piece(state, pm);
-                        let p_to = pm.target as usize;
+                        let p_to = pm.target() as usize;
                         let idx = p_piece * 64 + p_to;
-                        let c_piece = get_piece_type_safe(state, mv.source);
-                        let c_to = mv.target as usize;
+                        let c_piece = get_piece_type_safe(state, mv.source());
+                        let c_to = mv.target() as usize;
                         update_history(&mut info.data.cont_history[idx][c_piece][c_to], bonus);
 
-                        info.data.counter_moves[p_piece][pm.target as usize] = Some(mv);
+                        info.data.counter_moves[p_piece][pm.target() as usize] = Some(mv);
                     }
                 } else {
                     update_capture_history(
@@ -1479,17 +1514,17 @@ fn negamax(
         } else {
             // HISTORY PENALTY
             if is_quiet {
-                let from = mv.source as usize;
-                let to = mv.target as usize;
+                let from = mv.source() as usize;
+                let to = mv.target() as usize;
                 let bonus = (new_depth as i32) * (new_depth as i32);
                 update_history(&mut info.data.history[from][to], -bonus);
 
                 if let Some(pm) = prev_move {
                     let p_piece = get_moved_piece(state, pm);
-                    let p_to = pm.target as usize;
+                    let p_to = pm.target() as usize;
                     let idx = p_piece * 64 + p_to;
-                    let c_piece = get_piece_type_safe(state, mv.source);
-                    let c_to = mv.target as usize;
+                    let c_piece = get_piece_type_safe(state, mv.source());
+                    let c_to = mv.target() as usize;
                     update_history(&mut info.data.cont_history[idx][c_piece][c_to], -bonus);
                 }
             }
@@ -1571,8 +1606,8 @@ pub fn square_to_coord(s: u8) -> String {
 
 pub fn format_move_uci(mv: Move, state: &GameState) -> String {
     let chess960 = crate::uci::UCI_CHESS960.load(Ordering::Relaxed);
-    let from = mv.source;
-    let mut to = mv.target;
+    let from = mv.source();
+    let mut to = mv.target();
 
     // Check for castling
     // Logic: Internal is King -> Rook.
@@ -1607,7 +1642,7 @@ pub fn format_move_uci(mv: Move, state: &GameState) -> String {
 
     let mut s = format!("{}{}", square_to_coord(from), square_to_coord(to));
 
-    if let Some(promo) = mv.promotion {
+    if let Some(promo) = mv.promotion() {
         let char = match promo {
             4 | 10 => 'q',
             3 | 9 => 'r',

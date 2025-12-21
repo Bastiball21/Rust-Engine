@@ -79,14 +79,14 @@ impl TranspositionTable {
     // Pack: Move(16) | Score(16) | Depth(8) | Flag(8) | Age(8) = 56 bits
     fn pack(score: i32, depth: u8, flag: u8, age: u8, mv: Option<Move>) -> u64 {
         let move_u16 = if let Some(m) = mv {
-            let promo_bits = match m.promotion {
+            let promo_bits = match m.promotion() {
                 Some(Q) | Some(q) => 1,
                 Some(R) | Some(r) => 2,
                 Some(B) | Some(b) => 3,
                 Some(N) | Some(n) => 4,
                 _ => 0,
             };
-            ((m.source as u16) << 6) | (m.target as u16) | (promo_bits << 12)
+            ((m.source() as u16) << 6) | (m.target() as u16) | (promo_bits << 12)
         } else {
             0
         };
@@ -120,12 +120,12 @@ impl TranspositionTable {
                 _ => None,
             };
             if from != to {
-                Some(Move {
-                    source: from as u8,
-                    target: to as u8,
+                Some(Move::new(
+                    from as u8,
+                    to as u8,
                     promotion,
-                    is_capture: false, // Will be fixed by call sites via fix_move
-                })
+                    false, // Will be fixed by call sites via fix_move
+                ))
             } else {
                 None
             }
@@ -250,28 +250,41 @@ impl TranspositionTable {
         self.probe_data(hash, state).and_then(|(_, _, _, m)| m)
     }
 
+    // Since `Move` is now Copy/Clone/Immutable mostly (we use `Move(u16)`),
+    // and `is_capture` is packed, we can't easily mutate it in place unless we recreate it.
+    // Wait, `mv` in `fix_move` is `&mut Move`. I need to handle that.
+    // The previous `Move` struct had pub fields. The new one is opaque.
+    // I can't set `mv.is_capture = true`.
+    // I need to add a method to `Move` or recreate it.
+    // Since `Move` is just a u16, I can recreate it.
+    // But `fix_move` takes `&mut Move`.
+    // I should probably add a `set_capture` method to `Move` or similar, OR change `fix_move` to return a new `Move`.
+    // Let's modify `Move` in `src/state.rs` to allow mutation or reconstruction?
+    // Actually, I can just update the underlying u16 if I knew the layout.
+    // But it's cleaner to just replace the value. `*mv = Move::new(...)`.
+
     fn fix_move(mv: &mut Move, state: &GameState) {
-        let to = mv.target as usize;
+        let to = mv.target() as usize;
         let captured = state.board[to];
+        let mut is_capture = false;
 
         if captured != NO_PIECE as u8 {
-            mv.is_capture = true;
-        } else if mv.target == state.en_passant {
+            is_capture = true;
+        } else if mv.target() == state.en_passant {
             // Check if it's a pawn move
-            let piece = state.board[mv.source as usize];
+            let piece = state.board[mv.source() as usize];
             if piece == P as u8 || piece == p as u8 {
-                mv.is_capture = true;
-            } else {
-                mv.is_capture = false;
+                is_capture = true;
             }
-        } else {
-            mv.is_capture = false;
         }
+
+        // Reconstruct move with correct capture flag
+        *mv = Move::new(mv.source(), mv.target(), mv.promotion(), is_capture);
     }
 
     pub fn is_pseudo_legal(&self, state: &crate::state::GameState, mv: Move) -> bool {
-        let from = mv.source;
-        let to = mv.target;
+        let from = mv.source();
+        let to = mv.target();
         let side = state.side_to_move;
 
         if from >= 64 || to >= 64 || from == to {
@@ -307,7 +320,7 @@ impl TranspositionTable {
         let is_occupied = target_piece != 12;
         let is_ep = to == state.en_passant && (piece_type == P || piece_type == p);
 
-        if mv.is_capture {
+        if mv.is_capture() {
             if !is_occupied && !is_ep {
                 return false; // Ghost Capture
             }
