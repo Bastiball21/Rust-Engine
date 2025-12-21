@@ -97,6 +97,7 @@ pub struct MovePicker<'a> {
     tt: &'a TranspositionTable,
     // state removed to allow mutable borrow in loop
     captures_only: bool,
+    cont_index: Option<usize>,
 }
 
 impl<'a> MovePicker<'a> {
@@ -111,12 +112,15 @@ impl<'a> MovePicker<'a> {
     ) -> Self {
         let mut killers = [None; 2];
         let mut counter_move = None;
+        let mut cont_index = None;
 
         if !captures_only && ply < MAX_PLY {
             killers = data.killers[ply];
             if let Some(pm) = prev_move {
                 let p_piece = get_moved_piece(state, pm);
-                counter_move = data.counter_moves[p_piece][pm.target() as usize];
+                let p_to = pm.target() as usize;
+                counter_move = data.counter_moves[p_piece][p_to];
+                cont_index = Some(p_piece * 64 + p_to);
             }
         }
 
@@ -137,6 +141,7 @@ impl<'a> MovePicker<'a> {
             bad_capture_count: 0,
             tt,
             captures_only,
+            cont_index,
         }
     }
 
@@ -197,7 +202,7 @@ impl<'a> MovePicker<'a> {
                 }
                 MovePickerStage::GenerateQuiets => {
                     self.generate_moves(state, GenType::Quiets);
-                    self.score_quiets(data);
+                    self.score_quiets(state, data);
                     self.stage = MovePickerStage::Quiets;
                 }
                 MovePickerStage::Quiets => {
@@ -293,10 +298,16 @@ impl<'a> MovePicker<'a> {
         }
     }
 
-    fn score_quiets(&mut self, data: &SearchData) {
+    fn score_quiets(&mut self, state: &GameState, data: &SearchData) {
         for i in 0..self.move_count {
             let mv = self.move_list[i];
-            let score = data.history[mv.source() as usize][mv.target() as usize];
+            let from = mv.source() as usize;
+            let to = mv.target() as usize;
+            let mut score = data.history[from][to];
+            if let Some(c_idx) = self.cont_index {
+                let piece = get_piece_type_safe(state, mv.source());
+                score += data.cont_history[c_idx][piece][to];
+            }
             self.move_scores[i] = score;
         }
     }
