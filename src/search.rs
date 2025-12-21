@@ -115,7 +115,7 @@ impl<'a> MovePicker<'a> {
         if !captures_only && ply < MAX_PLY {
             killers = data.killers[ply];
             if let Some(pm) = prev_move {
-                let p_piece = get_piece_type_safe(state, pm.target);
+                let p_piece = get_moved_piece(state, pm);
                 counter_move = data.counter_moves[p_piece][pm.target as usize];
             }
         }
@@ -573,7 +573,7 @@ fn update_continuation_history(
     bonus: i32,
 ) {
     if let Some(pm) = prev_move {
-        let p_piece = get_piece_type_safe(state, pm.target);
+        let p_piece = get_moved_piece(state, pm);
         let p_to = pm.target as usize;
         let idx = p_piece * 64 + p_to;
 
@@ -592,7 +592,7 @@ fn update_correction_history(
     depth: u8,
 ) {
     if let Some(mv) = prev_move {
-        let piece = get_piece_type_safe(state, mv.target);
+        let piece = get_moved_piece(state, mv);
         let to = mv.target as usize;
         let entry = &mut info.data.correction_history[piece][to];
 
@@ -616,6 +616,23 @@ fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
     // If state::NO_PIECE is 12, this is direct.
     // Let's ensure we return 12 for empty/invalid.
     piece
+}
+
+#[inline(always)]
+fn get_moved_piece(state: &GameState, mv: Move) -> usize {
+    let piece = get_piece_type_safe(state, mv.target);
+    if piece != 12 {
+        piece
+    } else {
+        // If empty, it must be a castling move where the king moved to the rook square (internal representation)
+        // and the update logic moved both away.
+        // The side that moved is the OPPONENT of state.side_to_move
+        if state.side_to_move == BLACK {
+            K // White moved
+        } else {
+            k // Black moved
+        }
+    }
 }
 
 // Similar to get_piece_type_safe, just semantic distinction in code
@@ -1092,7 +1109,7 @@ fn negamax(
         raw_eval = eval::evaluate(state, alpha, beta);
         let mut correction = 0;
         if let Some(pm) = prev_move {
-            let piece = get_piece_type_safe(state, pm.target);
+            let piece = get_moved_piece(state, pm);
             correction = info.data.correction_history[piece][pm.target as usize] as i32;
         }
         let eval = raw_eval + correction;
@@ -1441,7 +1458,7 @@ fn negamax(
                     update_history(&mut info.data.history[from][to], bonus);
 
                     if let Some(pm) = prev_move {
-                        let p_piece = get_piece_type_safe(state, pm.target);
+                        let p_piece = get_moved_piece(state, pm);
                         let p_to = pm.target as usize;
                         let idx = p_piece * 64 + p_to;
                         let c_piece = get_piece_type_safe(state, mv.source);
@@ -1468,7 +1485,7 @@ fn negamax(
                 update_history(&mut info.data.history[from][to], -bonus);
 
                 if let Some(pm) = prev_move {
-                    let p_piece = get_piece_type_safe(state, pm.target);
+                    let p_piece = get_moved_piece(state, pm);
                     let p_to = pm.target as usize;
                     let idx = p_piece * 64 + p_to;
                     let c_piece = get_piece_type_safe(state, mv.source);
