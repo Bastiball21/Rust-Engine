@@ -25,8 +25,6 @@ pub fn uci_loop() {
     let mut buffer = String::new();
 
     // Default 64MB Hash
-    // SAFE: Wrapped in Arc. TranspositionTable handles internal mutability via Atomics.
-    // It implements Sync manually.
     let mut tt = Arc::new(TranspositionTable::new(64));
 
     // Default Parameters
@@ -40,46 +38,24 @@ pub fn uci_loop() {
     let mut num_threads = 1;
     let mut move_overhead = 10;
 
-    // Initialize NNUE by default
-    // We look for "nn-aether.nnue" or "nn.bin" by default, or the user can specify.
-    // Let's try to load "nn-aether.nnue" silently.
     if std::path::Path::new("nn-aether.nnue").exists() {
         crate::nnue::init_nnue("nn-aether.nnue");
-        // CRITICAL FIX: The initial game_state was created BEFORE NNUE was loaded.
-        // It has empty accumulators (all zeros).
-        // We MUST refresh it now that the network is loaded.
         game_state.refresh_accumulator();
     }
 
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
-
-    // Global Node Counter (aggregated across all threads)
-    // Passed to threads as reference to allow updating.
-    // However, threads need 'static lifetime. So Arc is needed.
-    // Wait, the threads take ownership of their arguments.
-    // The previous implementation of search took arguments by value or reference.
-    // search::search signature was modified to take Option<&AtomicU64>.
-    // That lifetime must be valid for the thread duration.
-    // So we need Arc<AtomicU64>.
-    // But search::search takes &AtomicU64.
-    // We can pass &Arc, but threads need 'static.
-    // We need to change search::search to take Arc<AtomicU64> or Option<Arc<AtomicU64>>?
-    // Or just pass reference if we use scoped threads?
-    // We use std::thread::spawn, so we need Arc.
-    // But search::search takes `global_nodes: Option<&AtomicU64>`.
-    // I need to change search::search signature in search.rs to take Option<Arc<AtomicU64>> or just &AtomicU64 where 'a is sufficient?
-    // With `move ||` closure, we move the Arc into the closure. Then we pass a reference to the Arc's content to `search`.
-    // Correct.
-
     let global_nodes = Arc::new(AtomicU64::new(0));
 
     loop {
         buffer.clear();
         match stdin.lock().read_line(&mut buffer) {
-            Ok(0) => break,
+            Ok(0) => break, // EOF
             Ok(_) => {}
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("Error reading stdin: {}", e);
+                break;
+            }
         }
 
         let cmd = buffer.trim();
@@ -89,6 +65,9 @@ pub fn uci_loop() {
 
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let command = parts[0];
+
+        // Basic logging
+        log::debug!("UCI Input: {}", cmd);
 
         match command {
             "uci" => {
@@ -104,17 +83,9 @@ pub fn uci_loop() {
             }
             "isready" => println!("readyok"),
             "ucinewgame" => {
-                // To clear, we can just reallocate or use a clear method.
-                // Since tt is shared via Arc, we can't easily replace it if threads are holding it.
-                // But threads are joined before we get here.
-                // Best way: Use clear() method with interior mutability
-                // However, our `tt` variable is local.
-                // Note: TranspositionTable::clear() requires &mut self.
-                // Arc::get_mut works only if we are the only owner.
                 if let Some(tt_mut) = Arc::get_mut(&mut tt) {
                     tt_mut.clear();
                 } else {
-                    // Fallback: If for some reason Arc is shared (unlikely here), create new one.
                     tt = Arc::new(TranspositionTable::new(64));
                 }
 
@@ -137,30 +108,19 @@ pub fn uci_loop() {
 
                 let limits = parse_go(game_state.side_to_move, &parts, move_overhead);
 
-                // Reset global nodes for new search
                 global_nodes.store(0, Ordering::Relaxed);
 
+                log::info!("Starting search with {} threads", num_threads);
+
                 for i in 0..num_threads {
-                    let state_clone = game_state;
-
-                    // CRITICAL: Ensure the root state has a fresh accumulator.
-                    // This sets dirty=false and calculates the initial accumulator from scratch.
-                    // Subsequent incremental updates will keep it valid.
-                    // state_clone.refresh_accumulator();
-
-                    // Extra Safety: Since we copy state_clone, check if it's potentially stale relative to network.
-                    // If network is loaded, force refresh just to be absolutely safe against race conditions?
-                    // But refresh is expensive (relatively).
-                    // However, for the ROOT node, it's negligible (microseconds).
-                    // This fixes any edge case where state was updated while network was loading.
-                    let mut safe_state = state_clone;
+                    let mut safe_state = game_state;
                     safe_state.refresh_accumulator();
 
                     let stop_clone = stop_signal.clone();
                     let limits_clone = limits.clone();
                     let history_clone = game_history.clone();
                     let is_main = i == 0;
-                    let tt_clone = tt.clone(); // Arc clone
+                    let tt_clone = tt.clone();
                     let params_clone = default_params.clone();
                     let global_nodes_clone = global_nodes.clone();
 
@@ -168,25 +128,27 @@ pub fn uci_loop() {
                         .name(format!("search_worker_{}", i))
                         .stack_size(8 * 1024 * 1024);
 
-                    search_threads.push(
-                        builder
-                            .spawn(move || {
-                                let mut search_data = search::SearchData::new();
-                                // Pass reference to the TT inside the Arc
-                                search::search(
-                                    &safe_state,
-                                    limits_clone,
-                                    &tt_clone,
-                                    stop_clone,
-                                    is_main,
-                                    history_clone,
-                                    &mut search_data,
-                                    &params_clone,
-                                    Some(&global_nodes_clone),
-                                );
-                            })
-                            .unwrap(),
-                    );
+                    let handle = builder
+                        .spawn(move || {
+                            let mut search_data = search::SearchData::new();
+                            search::search(
+                                &safe_state,
+                                limits_clone,
+                                &tt_clone,
+                                stop_clone,
+                                is_main,
+                                history_clone,
+                                &mut search_data,
+                                &params_clone,
+                                Some(&global_nodes_clone),
+                            );
+                        });
+
+                    if let Ok(h) = handle {
+                        search_threads.push(h);
+                    } else {
+                        eprintln!("Failed to spawn search thread {}", i);
+                    }
                 }
             }
             "stop" => {
@@ -196,47 +158,46 @@ pub fn uci_loop() {
                 }
             }
             "setoption" => {
-                if parts.len() > 4 && parts[1] == "name" {
-                    if parts[2] == "Hash" && parts[3] == "value" {
-                        if let Ok(mb) = parts[4].parse::<usize>() {
-                            // Enforce UCI Limit 1-1024
-                            let clamped_mb = mb.clamp(1, 1024);
+                if parts.len() >= 5 && parts[1] == "name" {
+                    let mut value_idx = 0;
+                    for i in 2..parts.len() {
+                        if parts[i] == "value" {
+                            value_idx = i;
+                            break;
+                        }
+                    }
 
-                            // Only reallocate if different
-                            // Check if current capacity matches roughly
-                            // TT stores capacity. We can't access it easily without probing or storing it.
-                            // But we can just replace it.
+                    if value_idx > 2 {
+                        let name_parts = &parts[2..value_idx];
+                        let name = name_parts.join(" ");
+                        let value = parts.get(value_idx + 1).unwrap_or(&"");
 
-                            // To replace safely:
-                            stop_signal.store(true, Ordering::Relaxed);
-                            for h in search_threads.drain(..) {
-                                h.join().unwrap();
+                        if name.eq_ignore_ascii_case("Hash") {
+                            if let Ok(mb) = value.parse::<usize>() {
+                                let clamped_mb = mb.clamp(1, 1024);
+                                stop_signal.store(true, Ordering::Relaxed);
+                                for h in search_threads.drain(..) {
+                                    h.join().unwrap();
+                                }
+                                tt = Arc::new(TranspositionTable::new(clamped_mb));
                             }
-
-                            // Reallocate if requested size is clamped
-                            // Note: We don't check 'if different' here strictly because we don't track old size easily in this scope without lock.
-                            // But reallocation is fine.
-                            tt = Arc::new(TranspositionTable::new(clamped_mb));
+                        } else if name.eq_ignore_ascii_case("Threads") {
+                            if let Ok(t) = value.parse::<usize>() {
+                                num_threads = t.clamp(1, 64);
+                            }
+                        } else if name.eq_ignore_ascii_case("Move Overhead") {
+                            if let Ok(ov) = value.parse::<u128>() {
+                                move_overhead = ov;
+                            }
+                        } else if name.eq_ignore_ascii_case("EvalFile") {
+                            crate::nnue::init_nnue(value);
+                            game_state.refresh_accumulator();
+                        } else if name.eq_ignore_ascii_case("UCI_Chess960") {
+                            let val = value.parse::<bool>().unwrap_or(false);
+                            UCI_CHESS960.store(val, Ordering::Relaxed);
+                        } else if name.eq_ignore_ascii_case("SyzygyPath") {
+                            syzygy::init_tablebase(value);
                         }
-                    } else if parts[2] == "Threads" && parts[3] == "value" {
-                        if let Ok(t) = parts[4].parse::<usize>() {
-                            num_threads = t;
-                        }
-                    } else if parts[2] == "Move" && parts[3] == "Overhead" && parts[4] == "value" {
-                        if let Ok(ov) = parts[5].parse::<u128>() {
-                            move_overhead = ov;
-                        }
-                    } else if parts[2] == "EvalFile" && parts[3] == "value" {
-                        // Load NNUE
-                        let path = parts[4];
-                        crate::nnue::init_nnue(path);
-                        game_state.refresh_accumulator();
-                    } else if parts[2] == "UCI_Chess960" && parts[3] == "value" {
-                        let val = parts[4] == "true";
-                        UCI_CHESS960.store(val, Ordering::Relaxed);
-                    } else if parts[2] == "SyzygyPath" && parts[3] == "value" {
-                        let path = parts[4];
-                        syzygy::init_tablebase(path);
                     }
                 }
             }
@@ -473,4 +434,51 @@ fn parse_go(side: usize, parts: &[&str], overhead: u128) -> search::Limits {
     }
 
     search::Limits::Infinite
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_go_defaults() {
+        let parts = vec!["go"];
+        let limits = parse_go(0, &parts, 10);
+        match limits {
+            crate::search::Limits::Infinite => assert!(true),
+            _ => assert!(false, "Expected Infinite"),
+        }
+    }
+
+    #[test]
+    fn test_parse_go_depth() {
+        let parts = vec!["go", "depth", "10"];
+        let limits = parse_go(0, &parts, 10);
+        match limits {
+            crate::search::Limits::FixedDepth(d) => assert_eq!(d, 10),
+            _ => assert!(false, "Expected FixedDepth(10)"),
+        }
+    }
+
+    #[test]
+    fn test_parse_go_time() {
+        let parts = vec!["go", "wtime", "1000", "btime", "2000"];
+        let limits = parse_go(0, &parts, 10);
+        match limits {
+            crate::search::Limits::FixedTime(tm) => {
+                 // Hard to check internal state of TimeManager without getters,
+                 // but checking we got FixedTime is sufficient for basic robustness.
+                 assert!(true);
+            }
+            _ => assert!(false, "Expected FixedTime"),
+        }
+    }
+
+    #[test]
+    fn test_square_from_str() {
+        assert_eq!(square_from_str("a1"), 0);
+        assert_eq!(square_from_str("h1"), 7);
+        assert_eq!(square_from_str("e1"), 4);
+        assert_eq!(square_from_str("a8"), 56);
+        assert_eq!(square_from_str("h8"), 63);
+    }
 }
