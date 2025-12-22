@@ -4,6 +4,7 @@ pub mod book;
 pub mod bullet_helper;
 pub mod chess960; // Helper
 pub mod datagen;
+pub mod debug;
 pub mod endgame;
 pub mod eval;
 pub mod logging;

@@ -569,6 +569,35 @@ impl GameState {
 
     // New Signature: Accepts Option<&mut [Accumulator; 2]>
     pub fn make_move_inplace(&mut self, mv: Move, accumulators: &mut Option<&mut [Accumulator; 2]>) -> UnmakeInfo {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                self.board[mv.source() as usize] != NO_PIECE as u8,
+                "No piece on source: {:?}, FEN: {}",
+                mv,
+                self.to_fen()
+            );
+
+            // Capture logic check
+            if mv.is_capture() {
+                // If it's a capture, the target must be occupied OR it must be en-passant
+                // We check if target is empty first
+                if self.board[mv.target() as usize] == NO_PIECE as u8 {
+                     // Check for EP
+                     // Must be Pawn + Target == En Passant Square
+                     let piece = self.board[mv.source() as usize] as usize;
+                     let is_pawn = piece == P || piece == p;
+                     let is_ep_sq = mv.target() == self.en_passant;
+                     debug_assert!(
+                        is_pawn && is_ep_sq,
+                        "Capture on empty square (not EP): {:?}, FEN: {}",
+                        mv,
+                        self.to_fen()
+                     );
+                }
+            }
+        }
+
         let side = self.side_to_move;
         let mut captured_piece;
         let old_hash = self.hash;
@@ -910,6 +939,9 @@ impl GameState {
             }
         }
 
+        #[cfg(debug_assertions)]
+        crate::debug::validate_board_consistency(self);
+
         UnmakeInfo {
             captured: captured_piece,
             en_passant: old_en_passant,
@@ -1046,6 +1078,9 @@ impl GameState {
                  acc[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, k_sq_black);
             }
         }
+
+        #[cfg(debug_assertions)]
+        crate::debug::validate_board_consistency(self);
     }
 }
 
