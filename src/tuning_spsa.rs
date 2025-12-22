@@ -1,76 +1,146 @@
 use crate::parameters::SearchParameters;
 use crate::search;
-use crate::state::{GameState, WHITE, BOTH, K, k, Q, q, R, r, B, b, N, n, NO_PIECE};
+use crate::state::{GameState, WHITE, BOTH, K, k, N, B, n, b, NO_PIECE};
 use crate::tt::TranspositionTable;
-use rand::Rng; // Trait must be in scope
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use rand::{Rng, SeedableRng, RngCore};
+use rand::rngs::StdRng;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::BufReader;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
-// --- Tuning Config ---
-const EPOCHS: usize = 100;
-const GAMES_PER_EPOCH: usize = 1000;
-const SPSA_C: f64 = 0.5; // Perturbation size scaling
-const SPSA_A: f64 = 0.5; // Learning rate scaling
-const SPSA_ALPHA: f64 = 0.602;
-const SPSA_GAMMA: f64 = 0.101;
+// Tuning Configuration
+const GAMES_PER_ITERATION: usize = 1000; // Must be even (pairs)
+const DEFAULT_A: f64 = 500.0; // 10 * max_iter (assuming 50) ? Tunable.
+const DEFAULT_C: f64 = 0.5;
+const DEFAULT_ALPHA: f64 = 0.602;
+const DEFAULT_GAMMA: f64 = 0.101;
 
-pub fn run_tuning() {
-    println!("--- SPSA Tuner ---");
-    println!("Running {} epochs of {} games.", EPOCHS, GAMES_PER_EPOCH);
+#[derive(Serialize, Deserialize, Debug)]
+struct SpsaState {
+    iteration: usize,
+    params: SearchParameters,
+    // Hyperparameters
+    learning_rate_scale: f64, // a
+    perturbation_scale: f64,  // c
+    decay_offset: f64,        // A
+    alpha: f64,
+    gamma: f64,
+    // RNG State (seed)
+    rng_seed: u64,
+    // History for logging
+    history: Vec<SpsaLogEntry>,
+}
 
-    let mut params = SearchParameters::default();
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SpsaLogEntry {
+    iteration: usize,
+    score_diff: f64, // (wins_plus - wins_minus) / games
+    gradient_norm: f64,
+}
 
-    if let Ok(loaded) = SearchParameters::load_from_json("spsa_params.json") {
-        println!("Loaded parameters from spsa_params.json");
-        params = loaded;
-    } else {
-        println!("Starting from default parameters.");
+impl SpsaState {
+    fn new() -> Self {
+        SpsaState {
+            iteration: 1,
+            params: SearchParameters::default(),
+            learning_rate_scale: 0.5,
+            perturbation_scale: DEFAULT_C,
+            decay_offset: DEFAULT_A,
+            alpha: DEFAULT_ALPHA,
+            gamma: DEFAULT_GAMMA,
+            rng_seed: 42,
+            history: Vec::new(),
+        }
     }
 
-    let mut rng = rand::rng();
+    fn load(path: &str) -> Self {
+        if let Ok(file) = File::open(path) {
+            let reader = BufReader::new(file);
+            if let Ok(state) = serde_json::from_reader::<BufReader<File>, SpsaState>(reader) {
+                println!("Resuming SPSA from iteration {}", state.iteration);
+                return state;
+            }
+        }
+        println!("Starting fresh SPSA tuning.");
+        Self::new()
+    }
 
-    for epoch in 1..=EPOCHS {
-        // 1. Calculate ak and ck
-        let ak = SPSA_A / (epoch as f64 + 50.0).powf(SPSA_ALPHA);
-        let ck = SPSA_C / (epoch as f64).powf(SPSA_GAMMA);
-
-        // 2. Generate Delta (Bernoulli +/- 1)
-        let delta = generate_delta(&mut rng);
-
-        // 3. Create Perturbed Parameters
-        let mut theta_plus = params.clone();
-        apply_perturbation(&mut theta_plus, &delta, ck);
-
-        let mut theta_minus = params.clone();
-        apply_perturbation(&mut theta_minus, &delta, -ck);
-
-        // 4. Run Matches (A vs B)
-        let score_diff = run_match_batch(&theta_plus, &theta_minus, GAMES_PER_EPOCH);
-
-        // Gradient Estimate: g = (y+ - y-) / (2 * ck) * delta
-        let gradient_step = score_diff / (2.0 * ck);
-
-        println!("Epoch {}: Score Diff = {:.4}, ck = {:.4}, ak = {:.4}", epoch, score_diff, ck, ak);
-
-        apply_gradient(&mut params, &delta, gradient_step * ak);
-
-        params.save_to_json("spsa_params.json").unwrap();
-        println!("Parameters saved.");
+    fn save(&self, path: &str) {
+        if let Ok(file) = File::create(path) {
+            serde_json::to_writer_pretty(file, self).unwrap();
+        }
     }
 }
 
-// Map parameters to a vector for perturbation
+pub fn run_tuning() {
+    let mut state = SpsaState::load("spsa_state.json");
+    let mut rng = StdRng::seed_from_u64(state.rng_seed);
+
+    println!("--- SPSA Tuner Started ---");
+    println!("Params: a={}, c={}, A={}, alpha={}, gamma={}",
+             state.learning_rate_scale, state.perturbation_scale, state.decay_offset, state.alpha, state.gamma);
+
+    loop {
+        let iter_idx = state.iteration as f64;
+        let ak = state.learning_rate_scale / (state.decay_offset + iter_idx).powf(state.alpha);
+        let ck = state.perturbation_scale / iter_idx.powf(state.gamma);
+
+        let delta = generate_delta(&mut rng);
+
+        // Perturb
+        let mut theta_plus = state.params.clone();
+        apply_perturbation(&mut theta_plus, &delta, ck);
+        constrain_params(&mut theta_plus);
+
+        let mut theta_minus = state.params.clone();
+        apply_perturbation(&mut theta_minus, &delta, -ck);
+        constrain_params(&mut theta_minus);
+
+        println!("Iter {}: Running {} games... ck={:.4}, ak={:.4}", state.iteration, GAMES_PER_ITERATION, ck, ak);
+
+        let start = Instant::now();
+        // Run Batch: Theta+ vs Theta-
+        // We use shared openings and same seeds for game logic if possible (engine is deterministic)
+        let score_diff = run_match_batch(&theta_plus, &theta_minus, GAMES_PER_ITERATION, &mut rng);
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let games_sec = GAMES_PER_ITERATION as f64 / elapsed;
+
+        // Gradient Step
+        let step_size = score_diff / (2.0 * ck);
+        apply_gradient(&mut state.params, &delta, step_size * ak);
+        constrain_params(&mut state.params);
+
+        // Logging
+        let grad_norm = step_size.abs(); // Simplified norm
+        println!("Iter {} Done. Score Diff: {:.4}. Grad Norm: {:.4}. Speed: {:.1} gps",
+                 state.iteration, score_diff, grad_norm, games_sec);
+
+        state.history.push(SpsaLogEntry {
+            iteration: state.iteration,
+            score_diff,
+            gradient_norm: grad_norm,
+        });
+
+        state.iteration += 1;
+        state.rng_seed = rng.next_u64(); // Advance seed
+        state.save("spsa_state.json");
+
+        // Also save readable params
+        state.params.save_to_json("spsa_current_params.json").ok();
+    }
+}
+
 const PARAM_COUNT: usize = 7;
 
-fn generate_delta(rng: &mut impl rand::Rng) -> Vec<f64> {
+fn generate_delta(rng: &mut impl Rng) -> Vec<f64> {
     let mut d = Vec::with_capacity(PARAM_COUNT);
     for _ in 0..PARAM_COUNT {
-        if rng.random_bool(0.5) {
-            d.push(1.0);
-        } else {
-            d.push(-1.0);
-        }
+        d.push(if rng.random_bool(0.5) { 1.0 } else { -1.0 });
     }
     d
 }
@@ -90,222 +160,171 @@ fn apply_perturbation(params: &mut SearchParameters, delta: &[f64], scale: f64) 
 }
 
 fn apply_gradient(params: &mut SearchParameters, delta: &[f64], step: f64) {
-    params.lmr_base += delta[0] * step;
-    params.lmr_divisor += delta[1] * step;
+    apply_perturbation(params, delta, step);
+}
 
-    params.nmp_base = (params.nmp_base as f64 + delta[2] * step).round() as i32;
-    params.nmp_divisor = (params.nmp_divisor as f64 + delta[3] * step).round() as i32;
-
-    params.rfp_margin = (params.rfp_margin as f64 + delta[4] * step * 10.0).round() as i32;
-    params.razoring_base = (params.razoring_base as f64 + delta[5] * step * 10.0).round() as i32;
-    params.razoring_multiplier = (params.razoring_multiplier as f64 + delta[6] * step * 10.0).round() as i32;
-
+fn constrain_params(params: &mut SearchParameters) {
+    params.lmr_base = params.lmr_base.max(0.0).min(5.0);
+    params.lmr_divisor = params.lmr_divisor.max(1.0).min(10.0);
+    params.nmp_base = params.nmp_base.max(0).min(10);
+    params.nmp_divisor = params.nmp_divisor.max(1).min(10);
+    params.rfp_margin = params.rfp_margin.max(0).min(200);
+    params.razoring_base = params.razoring_base.max(0).min(1000);
+    params.razoring_multiplier = params.razoring_multiplier.max(0).min(500);
     params.recalculate_tables();
-
-    println!("Updated Params: {:?}", params);
 }
 
-// Helpers
-fn is_material_draw(state: &GameState) -> bool {
-    // K vs K
-    if state.occupancies[BOTH].count_bits() == 2 {
-        return true;
-    }
-    // KB vs K or KN vs K
-    if state.occupancies[BOTH].count_bits() == 3 {
-        let others = state.occupancies[BOTH]
-            ^ state.bitboards[K]
-            ^ state.bitboards[k];
-        if others.count_bits() == 1 {
-             let sq = others.get_lsb_index();
-             // Check if it's N, B, n, b
-             if state.bitboards[N].get_bit(sq as u8)
-                 || state.bitboards[B].get_bit(sq as u8)
-                 || state.bitboards[n].get_bit(sq as u8)
-                 || state.bitboards[b].get_bit(sq as u8)
-             {
-                 return true;
-             }
-        }
-    }
-    false
-}
-
-fn generate_random_opening() -> GameState {
-    let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    let mut rng = rand::rng();
-
-    // 8 ply random opening
-    for _ in 0..8 {
-         let mut moves = crate::movegen::MoveGenerator::new();
-         moves.generate_moves(&state);
-         if moves.list.count == 0 { break; }
-
-         let idx = rng.random_range(0..moves.list.count);
-         let m = moves.list.moves[idx];
-         state = state.make_move(m);
-    }
-    state
-}
-
-// Runs a batch of games and returns (Wins - Losses) / Total (from perspective of P1)
-fn run_match_batch(p1: &SearchParameters, p2: &SearchParameters, games: usize) -> f64 {
+// Match Execution
+fn run_match_batch(p1: &SearchParameters, p2: &SearchParameters, games: usize, rng: &mut StdRng) -> f64 {
     let num_threads = std::thread::available_parallelism().unwrap().get().max(1);
-
-    // We play pairs. Total games = games.
-    let games = if games % 2 != 0 { games + 1 } else { games };
-    let pairs_total = games / 2;
+    let pairs = games / 2;
 
     // Generate openings
-    let mut openings = Vec::with_capacity(pairs_total);
-    for _ in 0..pairs_total {
-        openings.push(generate_random_opening());
+    let mut openings = Vec::with_capacity(pairs);
+    for _ in 0..pairs {
+        openings.push(generate_random_opening(rng));
     }
 
     let p1_arc = Arc::new(p1.clone());
     let p2_arc = Arc::new(p2.clone());
+    let openings_arc = Arc::new(openings);
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let total_score = Arc::new(Mutex::new(0.0));
     let mut handles = vec![];
 
-    // Distribute pairs to threads
-    let pairs_per_thread = pairs_total / num_threads;
-    let mut remainder = pairs_total % num_threads;
-    let mut start_idx = 0;
+    let chunk_size = (pairs + num_threads - 1) / num_threads;
 
-    for _ in 0..num_threads {
-        let count = pairs_per_thread + if remainder > 0 { remainder -= 1; 1 } else { 0 };
-        if count == 0 { continue; }
+    for i in 0..num_threads {
+        let start = i * chunk_size;
+        let end = (start + chunk_size).min(pairs);
+        if start >= end { break; }
 
-        let my_openings = openings[start_idx..start_idx+count].to_vec();
-        start_idx += count;
+        let my_p1 = p1_arc.clone();
+        let my_p2 = p2_arc.clone();
+        let my_ops = openings_arc.clone();
+        let my_score = total_score.clone();
 
-        let tx = tx.clone();
-        let p1 = p1_arc.clone();
-        let p2 = p2_arc.clone();
-
-        let builder = thread::Builder::new().stack_size(32 * 1024 * 1024);
+        let builder = thread::Builder::new().stack_size(8 * 1024 * 1024);
         handles.push(builder.spawn(move || {
-            let mut wins = 0.0;
-            // Reuse TT: 1MB, 1 shard (Private)
-            let mut tt = TranspositionTable::new(1, 1);
+            let mut local_score = 0.0;
+            let mut tt = TranspositionTable::new(1, 1); // 1MB private TT
 
-            for start_pos in my_openings {
+            for idx in start..end {
+                let root = my_ops[idx];
+
                 // Game 1: P1 White, P2 Black
                 tt.clear();
-                let score1 = play_game(&p1, &p2, start_pos, &mut tt);
-                wins += score1; // P1 is White, returns 1.0 if White wins
+                tt.new_search();
+                let s1 = play_game(&my_p1, &my_p2, root, &tt);
+                local_score += s1;
 
                 // Game 2: P2 White, P1 Black
                 tt.clear();
-                let score2 = play_game(&p2, &p1, start_pos, &mut tt);
-                // score2 is 1.0 if P2 (White) wins.
-                // P1 is Black. P1 wins if score2 is 0.0.
-                wins += 1.0 - score2;
+                tt.new_search();
+                let s2 = play_game(&my_p2, &my_p1, root, &tt);
+                local_score += 1.0 - s2; // P1 score (Black)
             }
-            tx.send(wins).unwrap();
-        }).unwrap());
-    }
 
-    let mut total_wins = 0.0;
-    for _ in 0..handles.len() {
-        total_wins += rx.recv().unwrap();
+            let mut lock = my_score.lock().unwrap();
+            *lock += local_score;
+        }).unwrap());
     }
 
     for h in handles {
         h.join().unwrap();
     }
 
-    // Normalized score [-1, 1]
-    let p1_score = total_wins / games as f64;
-    p1_score * 2.0 - 1.0
+    let final_score = *total_score.lock().unwrap();
+    // Normalize to [-1, 1]
+    (final_score / (pairs * 2) as f64) * 2.0 - 1.0
 }
 
-// Plays one game. Returns 1.0 if White wins, 0.0 if Black wins, 0.5 draw.
+fn generate_random_opening(rng: &mut impl Rng) -> GameState {
+    let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    // 8-ply random walk
+    for _ in 0..8 {
+         let mut moves = crate::movegen::MoveGenerator::new();
+         moves.generate_moves(&state);
+         if moves.list.count == 0 { break; }
+         let idx = rng.random_range(0..moves.list.count);
+         state = state.make_move(moves.list.moves[idx]);
+    }
+    state
+}
+
 fn play_game(
-    white_params: &Arc<SearchParameters>,
-    black_params: &Arc<SearchParameters>,
+    white: &SearchParameters,
+    black: &SearchParameters,
     start_pos: GameState,
-    tt: &mut TranspositionTable
+    tt: &TranspositionTable
 ) -> f64 {
     let mut state = start_pos;
     let mut history = vec![state.hash];
-    let mut rep_history = std::collections::HashMap::new();
-    rep_history.insert(state.hash, 1);
+    let mut rep = std::collections::HashMap::new();
+    rep.insert(state.hash, 1);
 
-    // Limit updated to 5000 nodes for better heuristic testing
     let limit = search::Limits::FixedNodes(5000);
-
-    let mut sd_white = search::SearchData::new();
-    let mut sd_black = search::SearchData::new();
-
+    let mut sd = search::SearchData::new();
     let stop = Arc::new(AtomicBool::new(false));
 
-    let mut high_score_winner = None; // None, Some(WHITE), Some(BLACK)
-    let mut consecutive_high_score = 0;
+    let mut consecutive_draw_score = 0;
 
-    for _ in 0..200 { // Max 200 moves
-        if state.halfmove_clock >= 100 { return 0.5; }
-        if is_material_draw(&state) { return 0.5; }
+    for _ in 0..200 {
+        if state.halfmove_clock >= 100 || is_material_draw(&state) { return 0.5; }
+        if let Some(&c) = rep.get(&state.hash) { if c >= 3 { return 0.5; } }
 
-        if let Some(&c) = rep_history.get(&state.hash) {
-            if c >= 3 { return 0.5; }
-        }
-
-        let params = if state.side_to_move == WHITE { white_params } else { black_params };
-        let sd = if state.side_to_move == WHITE { &mut sd_white } else { &mut sd_black };
+        let params = if state.side_to_move == WHITE { white } else { black };
 
         let (score, best_move) = search::search(
             &state,
             limit,
             tt,
             stop.clone(),
-            false, // not main thread
+            false,
             history.clone(),
-            sd,
+            &mut sd,
             params,
             None,
-            None, // No specific thread ID for tuning (private TT)
+            None,
         );
 
-        // Adjudication Logic
-        let leader = if score > 400 {
-            Some(state.side_to_move)
-        } else if score < -400 {
-            Some(1 - state.side_to_move)
+        if score.abs() < 10 {
+            consecutive_draw_score += 1;
         } else {
-            None
-        };
-
-        if let Some(l) = leader {
-            if high_score_winner == Some(l) {
-                consecutive_high_score += 1;
-            } else {
-                high_score_winner = Some(l);
-                consecutive_high_score = 1;
-            }
-        } else {
-            consecutive_high_score = 0;
-            high_score_winner = None;
+            consecutive_draw_score = 0;
         }
-
-        if consecutive_high_score >= 5 {
-             return if high_score_winner == Some(WHITE) { 1.0 } else { 0.0 };
-        }
+        if consecutive_draw_score >= 20 { return 0.5; }
 
         if let Some(mv) = best_move {
             state = state.make_move(mv);
             history.push(state.hash);
-            *rep_history.entry(state.hash).or_insert(0) += 1;
-        } else {
-            // No move -> Mate or Stalemate
-            if search::is_in_check(&state) {
-                return if state.side_to_move == WHITE { 0.0 } else { 1.0 }; // Loss for current side
-            } else {
-                return 0.5;
+            *rep.entry(state.hash).or_insert(0) += 1;
+
+            if search::is_in_check(&state) && search::is_check(&state, state.side_to_move) {
+                 // Mate
             }
+        } else {
+            return if search::is_in_check(&state) {
+                if state.side_to_move == WHITE { 0.0 } else { 1.0 }
+            } else {
+                0.5
+            };
         }
     }
-
     0.5
+}
+
+fn is_material_draw(state: &GameState) -> bool {
+    if state.occupancies[BOTH].count_bits() == 2 { return true; }
+    if state.occupancies[BOTH].count_bits() == 3 {
+        let others = state.occupancies[BOTH] ^ state.bitboards[K] ^ state.bitboards[k];
+        if others.count_bits() == 1 {
+             let sq = others.get_lsb_index();
+             if state.bitboards[N].get_bit(sq as u8) || state.bitboards[B].get_bit(sq as u8) ||
+                state.bitboards[n].get_bit(sq as u8) || state.bitboards[b].get_bit(sq as u8) {
+                 return true;
+             }
+        }
+    }
+    false
 }
