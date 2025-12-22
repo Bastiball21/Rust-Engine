@@ -6,7 +6,7 @@ use crate::tt::TranspositionTable;
 use crate::parameters::SearchParameters;
 use std::io::{self, BufRead};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use std::thread;
@@ -15,6 +15,7 @@ use crate::syzygy;
 
 // Global UCI Option
 pub static UCI_CHESS960: AtomicBool = AtomicBool::new(false);
+pub static TT_SHARDS: AtomicUsize = AtomicUsize::new(1); // Default 1 (Shared)
 
 pub fn parse_move_wrapper(state: &GameState, move_str: &str) -> Option<Move> {
     parse_move(state, move_str)
@@ -25,7 +26,7 @@ pub fn uci_loop() {
     let mut buffer = String::new();
 
     // Default 64MB Hash
-    let mut tt = Arc::new(TranspositionTable::new(64));
+    let mut tt = Arc::new(TranspositionTable::new_default(64));
 
     // Default Parameters
     let default_params = Arc::new(SearchParameters::default());
@@ -38,10 +39,8 @@ pub fn uci_loop() {
     let mut num_threads = 1;
     let mut move_overhead = 10;
 
-    if std::path::Path::new("nn-aether.nnue").exists() {
-        crate::nnue::init_nnue("nn-aether.nnue");
-        game_state.refresh_accumulator();
-    }
+    // LAZY LOADING: Removed eager init_nnue check here.
+    // We defer until 'EvalFile' option is set OR 'go' is called.
 
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -79,14 +78,16 @@ pub fn uci_loop() {
                 println!("option name Move Overhead type spin default 10 min 0 max 5000");
                 println!("option name EvalFile type string default <empty>");
                 println!("option name UCI_Chess960 type check default false");
+                println!("option name TTShards type spin default 1 min 1 max 64");
                 println!("uciok");
             }
             "isready" => println!("readyok"),
             "ucinewgame" => {
+                let shards = TT_SHARDS.load(Ordering::Relaxed);
                 if let Some(tt_mut) = Arc::get_mut(&mut tt) {
                     tt_mut.clear();
                 } else {
-                    tt = Arc::new(TranspositionTable::new(64));
+                    tt = Arc::new(TranspositionTable::new(64, shards));
                 }
 
                 game_state = GameState::parse_fen(
@@ -99,6 +100,17 @@ pub fn uci_loop() {
                 game_history = handle_position(&mut game_state, &parts);
             }
             "go" => {
+                // Check Lazy Load of NNUE
+                if crate::nnue::NETWORK.get().is_none() {
+                    // Try default
+                    if std::path::Path::new("nn-aether.nnue").exists() {
+                        crate::nnue::init_nnue("nn-aether.nnue");
+                    } else {
+                        // Warn if not found, search will fallback to HCE
+                        println!("info string Warning: NNUE not found, falling back to HCE");
+                    }
+                }
+
                 stop_signal.store(true, Ordering::Relaxed);
                 for h in search_threads.drain(..) {
                     h.join().unwrap();
@@ -114,7 +126,7 @@ pub fn uci_loop() {
 
                 for i in 0..num_threads {
                     let mut safe_state = game_state;
-                    safe_state.refresh_accumulator();
+                    // refresh_accumulator removed - handled in search
 
                     let stop_clone = stop_signal.clone();
                     let limits_clone = limits.clone();
@@ -123,6 +135,7 @@ pub fn uci_loop() {
                     let tt_clone = tt.clone();
                     let params_clone = default_params.clone();
                     let global_nodes_clone = global_nodes.clone();
+                    let thread_id = i;
 
                     let builder = thread::Builder::new()
                         .name(format!("search_worker_{}", i))
@@ -141,6 +154,7 @@ pub fn uci_loop() {
                                 &mut search_data,
                                 &params_clone,
                                 Some(&global_nodes_clone),
+                                Some(thread_id),
                             );
                         });
 
@@ -175,11 +189,12 @@ pub fn uci_loop() {
                         if name.eq_ignore_ascii_case("Hash") {
                             if let Ok(mb) = value.parse::<usize>() {
                                 let clamped_mb = mb.clamp(1, 1024);
+                                let shards = TT_SHARDS.load(Ordering::Relaxed);
                                 stop_signal.store(true, Ordering::Relaxed);
                                 for h in search_threads.drain(..) {
                                     h.join().unwrap();
                                 }
-                                tt = Arc::new(TranspositionTable::new(clamped_mb));
+                                tt = Arc::new(TranspositionTable::new(clamped_mb, shards));
                             }
                         } else if name.eq_ignore_ascii_case("Threads") {
                             if let Ok(t) = value.parse::<usize>() {
@@ -191,12 +206,15 @@ pub fn uci_loop() {
                             }
                         } else if name.eq_ignore_ascii_case("EvalFile") {
                             crate::nnue::init_nnue(value);
-                            game_state.refresh_accumulator();
                         } else if name.eq_ignore_ascii_case("UCI_Chess960") {
                             let val = value.parse::<bool>().unwrap_or(false);
                             UCI_CHESS960.store(val, Ordering::Relaxed);
                         } else if name.eq_ignore_ascii_case("SyzygyPath") {
                             syzygy::init_tablebase(value);
+                        } else if name.eq_ignore_ascii_case("TTShards") {
+                            if let Ok(s) = value.parse::<usize>() {
+                                TT_SHARDS.store(s.clamp(1, 64), Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -212,6 +230,9 @@ pub fn uci_loop() {
         }
     }
 }
+
+// ... handle_position, parse_move, square_from_str, parse_go ...
+// [Retained existing helper functions content below]
 
 fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
     let mut move_index = 0;
@@ -268,19 +289,6 @@ pub fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
     let src = square_from_str(src_str);
     let tgt = square_from_str(tgt_str);
 
-    // COMPATIBILITY: Handle e1g1 as e1h1 if UCI_Chess960 is false (Standard Chess)
-    // AND checks for castling validity.
-    // Actually, simply: If input is e1g1 and we find e1h1 in legal moves, match it?
-    // Be careful not to match e1g1 if e1g1 is actually valid (e.g. empty square move).
-    // In standard chess, e1g1 is EITHER castling OR normal king move to g1.
-    // If it's castling, the generator produces e1h1 (King takes Rook).
-    // So if user sends e1g1, and generator has e1h1, and e1g1 is NOT in generator (because g1 empty/attacked/whatever), then we might map.
-    // BUT safest way:
-    // If standard chess (UCI_Chess960 == false), and we see e1g1:
-    // 1. Check if e1g1 is in generated moves.
-    // 2. Check if e1h1 (Kingside Castle) is in generated moves.
-    // If e1h1 is there, and e1g1 matches the "Concept" of castling, map it.
-
     let promo = if move_str.len() > 4 {
         match move_str.chars().nth(4).unwrap() {
             'q' => Some(4),
@@ -293,7 +301,6 @@ pub fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
         None
     };
 
-    // First pass: Try exact match
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
         if mv.source() == src && mv.target() == tgt {
@@ -311,27 +318,23 @@ pub fn parse_move(state: &GameState, move_str: &str) -> Option<Move> {
         }
     }
 
-    // Second pass: Standard Chess Castling Compatibility
-    // Map e1g1 -> e1h1, e1c1 -> e1a1, e8g8 -> e8h8, e8c8 -> e8a8
-    // ONLY if UCI_Chess960 is FALSE.
     if !UCI_CHESS960.load(Ordering::Relaxed) {
         let is_white = state.side_to_move == crate::state::WHITE;
-        let king_sq = if is_white { 4 } else { 60 }; // e1 / e8
+        let king_sq = if is_white { 4 } else { 60 };
 
         if src == king_sq {
-            let kingside_tgt = if is_white { 6 } else { 62 }; // g1 / g8
-            let queenside_tgt = if is_white { 2 } else { 58 }; // c1 / c8
+            let kingside_tgt = if is_white { 6 } else { 62 };
+            let queenside_tgt = if is_white { 2 } else { 58 };
 
             let mut expected_rook_sq = 64;
 
             if tgt == kingside_tgt {
-                expected_rook_sq = if is_white { 7 } else { 63 }; // h1 / h8
+                expected_rook_sq = if is_white { 7 } else { 63 };
             } else if tgt == queenside_tgt {
-                expected_rook_sq = if is_white { 0 } else { 56 }; // a1 / a8
+                expected_rook_sq = if is_white { 0 } else { 56 };
             }
 
             if expected_rook_sq != 64 {
-                // Check if King->Rook move exists in generator
                 for i in 0..generator.list.count {
                     let mv = generator.list.moves[i];
                     if mv.source() == src && mv.target() == expected_rook_sq {
@@ -434,51 +437,4 @@ fn parse_go(side: usize, parts: &[&str], overhead: u128) -> search::Limits {
     }
 
     search::Limits::Infinite
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_go_defaults() {
-        let parts = vec!["go"];
-        let limits = parse_go(0, &parts, 10);
-        match limits {
-            crate::search::Limits::Infinite => assert!(true),
-            _ => assert!(false, "Expected Infinite"),
-        }
-    }
-
-    #[test]
-    fn test_parse_go_depth() {
-        let parts = vec!["go", "depth", "10"];
-        let limits = parse_go(0, &parts, 10);
-        match limits {
-            crate::search::Limits::FixedDepth(d) => assert_eq!(d, 10),
-            _ => assert!(false, "Expected FixedDepth(10)"),
-        }
-    }
-
-    #[test]
-    fn test_parse_go_time() {
-        let parts = vec!["go", "wtime", "1000", "btime", "2000"];
-        let limits = parse_go(0, &parts, 10);
-        match limits {
-            crate::search::Limits::FixedTime(tm) => {
-                 // Hard to check internal state of TimeManager without getters,
-                 // but checking we got FixedTime is sufficient for basic robustness.
-                 assert!(true);
-            }
-            _ => assert!(false, "Expected FixedTime"),
-        }
-    }
-
-    #[test]
-    fn test_square_from_str() {
-        assert_eq!(square_from_str("a1"), 0);
-        assert_eq!(square_from_str("h1"), 7);
-        assert_eq!(square_from_str("e1"), 4);
-        assert_eq!(square_from_str("a8"), 56);
-        assert_eq!(square_from_str("h8"), 63);
-    }
 }

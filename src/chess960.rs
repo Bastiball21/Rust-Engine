@@ -122,7 +122,7 @@ pub fn generate_chess960_position(index: u16) -> GameState {
     state.en_passant = 64;
 
     state.compute_hash();
-    state.refresh_accumulator();
+    // state.refresh_accumulator(); // Removed - caller responsibility
 
     state
 }

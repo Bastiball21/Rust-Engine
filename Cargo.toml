@@ -20,11 +20,18 @@ libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
+[dev-dependencies]
+criterion = "0.5"
+
 [features]
 default = ["bmi2"]
 bmi2 = []
 tuning = []
 packed-tt = []
+
+[[bench]]
+name = "bench_main"
+harness = false
 
 [profile.release]
 opt-level = 3

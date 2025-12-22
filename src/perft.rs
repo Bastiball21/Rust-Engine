@@ -190,22 +190,15 @@ mod tests {
         for i in 0..generator.list.count {
             let mv = generator.list.moves[i];
 
-            // Check legality first? Usually symmetry should hold even for illegal moves if logic is robust,
-            // but for perft we care about legal paths. However, make/unmake should be purely mechanical.
-
             let mut test_state = state; // Copy
-            let unmake_info = test_state.make_move_inplace(mv);
-            test_state.unmake_move(mv, unmake_info);
+            // In tests we can pass None for accumulator
+            let unmake_info = test_state.make_move_inplace(mv, &mut None);
+            test_state.unmake_move(mv, unmake_info, &mut None);
 
             assert_eq!(test_state.hash, original_hash, "Hash mismatch after unmake move {:?}", mv);
             assert_eq!(test_state.bitboards[WHITE].0, state.bitboards[WHITE].0);
             assert_eq!(test_state.en_passant, state.en_passant);
             assert_eq!(test_state.castling_rights, state.castling_rights);
-
-            // Note: Accumulator exact match?
-            // Accumulator might differ in floating point or internal state if refreshed?
-            // But logic should restore it.
-            // Let's check bitboards primarily.
         }
     }
 }
