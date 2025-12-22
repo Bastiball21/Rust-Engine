@@ -8,7 +8,7 @@ use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
 use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use crate::parameters::SearchParameters;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 const MAX_PLY: usize = 128;
@@ -326,6 +326,7 @@ pub struct SearchInfo<'a> {
     pub data: &'a mut SearchData,
     pub static_evals: [i32; MAX_PLY + 1],
     pub nodes: u64,
+    pub global_nodes: Option<&'a AtomicU64>,
     pub seldepth: u8,
     pub limits: Limits,
     pub stop_signal: Arc<AtomicBool>,
@@ -343,11 +344,13 @@ impl<'a> SearchInfo<'a> {
         tt: &'a TranspositionTable,
         main: bool,
         params: &'a SearchParameters,
+        global_nodes: Option<&'a AtomicU64>,
     ) -> Self {
         Self {
             data,
             static_evals: [0; MAX_PLY + 1],
             nodes: 0,
+            global_nodes,
             seldepth: 0,
             limits,
             stop_signal: stop,
@@ -361,6 +364,11 @@ impl<'a> SearchInfo<'a> {
     #[inline(always)]
     pub fn check_time(&mut self) {
         if self.nodes % 1024 == 0 {
+            // Update global nodes
+            if let Some(gn) = self.global_nodes {
+                gn.fetch_add(1024, Ordering::Relaxed);
+            }
+
             if self.stop_signal.load(Ordering::Relaxed) {
                 self.stopped = true;
                 return;
@@ -795,6 +803,7 @@ pub fn search(
     history: Vec<u64>,
     search_data: &mut SearchData,
     params: &SearchParameters,
+    global_nodes: Option<&AtomicU64>,
 ) -> (i32, Option<Move>) {
     let mut best_move: Option<Move> = None;
     let mut ponder_move = None;
@@ -836,6 +845,7 @@ pub fn search(
         tt,
         main_thread,
         params,
+        global_nodes,
     ));
     let mut path = history;
     let mut last_score = 0;
@@ -928,8 +938,15 @@ pub fn search(
 
         if main_thread {
             let elapsed = start_time.elapsed().as_secs_f64();
+            // Use global_nodes if available, otherwise just local nodes
+            let total_nodes = if let Some(gn) = global_nodes {
+                gn.load(Ordering::Relaxed)
+            } else {
+                info.nodes
+            };
+
             let nps = if elapsed > 0.0 {
-                (info.nodes as f64 / elapsed) as u64
+                (total_nodes as f64 / elapsed) as u64
             } else {
                 0
             };
@@ -956,7 +973,7 @@ pub fn search(
                 depth,
                 info.seldepth,
                 score_str,
-                info.nodes,
+                total_nodes,
                 nps,
                 tt.hashfull(),
                 start_time.elapsed().as_millis(),

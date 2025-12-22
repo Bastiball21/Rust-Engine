@@ -24,6 +24,7 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_
 default = ["bmi2"]
 bmi2 = []
 tuning = []
+packed-tt = []
 
 [profile.release]
 opt-level = 3
