@@ -263,7 +263,8 @@ fn play_game(
             false, // not main thread
             history.clone(),
             sd,
-            params
+            params,
+            None,
         );
 
         // Adjudication Logic

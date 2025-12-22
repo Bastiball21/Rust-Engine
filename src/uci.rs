@@ -6,7 +6,7 @@ use crate::tt::TranspositionTable;
 use crate::parameters::SearchParameters;
 use std::io::{self, BufRead};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::thread;
@@ -53,6 +53,26 @@ pub fn uci_loop() {
 
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+
+    // Global Node Counter (aggregated across all threads)
+    // Passed to threads as reference to allow updating.
+    // However, threads need 'static lifetime. So Arc is needed.
+    // Wait, the threads take ownership of their arguments.
+    // The previous implementation of search took arguments by value or reference.
+    // search::search signature was modified to take Option<&AtomicU64>.
+    // That lifetime must be valid for the thread duration.
+    // So we need Arc<AtomicU64>.
+    // But search::search takes &AtomicU64.
+    // We can pass &Arc, but threads need 'static.
+    // We need to change search::search to take Arc<AtomicU64> or Option<Arc<AtomicU64>>?
+    // Or just pass reference if we use scoped threads?
+    // We use std::thread::spawn, so we need Arc.
+    // But search::search takes `global_nodes: Option<&AtomicU64>`.
+    // I need to change search::search signature in search.rs to take Option<Arc<AtomicU64>> or just &AtomicU64 where 'a is sufficient?
+    // With `move ||` closure, we move the Arc into the closure. Then we pass a reference to the Arc's content to `search`.
+    // Correct.
+
+    let global_nodes = Arc::new(AtomicU64::new(0));
 
     loop {
         buffer.clear();
@@ -117,6 +137,9 @@ pub fn uci_loop() {
 
                 let limits = parse_go(game_state.side_to_move, &parts, move_overhead);
 
+                // Reset global nodes for new search
+                global_nodes.store(0, Ordering::Relaxed);
+
                 for i in 0..num_threads {
                     let state_clone = game_state;
 
@@ -139,6 +162,7 @@ pub fn uci_loop() {
                     let is_main = i == 0;
                     let tt_clone = tt.clone(); // Arc clone
                     let params_clone = default_params.clone();
+                    let global_nodes_clone = global_nodes.clone();
 
                     let builder = thread::Builder::new()
                         .name(format!("search_worker_{}", i))
@@ -158,6 +182,7 @@ pub fn uci_loop() {
                                     history_clone,
                                     &mut search_data,
                                     &params_clone,
+                                    Some(&global_nodes_clone),
                                 );
                             })
                             .unwrap(),

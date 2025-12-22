@@ -477,6 +477,7 @@ pub fn run_datagen(config: DatagenConfig) {
                                 history_vec.clone(),
                                 &mut search_data,
                                 &params_clone,
+                                None,
                             );
                             search_score = s;
                             best_move = m;
