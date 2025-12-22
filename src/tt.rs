@@ -5,6 +5,14 @@ use crate::state::{b, k, n, p, q, r, GameState, Move, B, K, N, P, Q, R, WHITE, N
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
+#[cfg(target_os = "linux")]
+use libc::{c_void, mmap, munmap, MAP_ANONYMOUS, MAP_FAILED, MAP_HUGETLB, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+#[cfg(target_os = "windows")]
+use std::ffi::c_void;
+
 pub struct TTEntry {
     pub key: AtomicU64,
     pub data: AtomicU64,
@@ -24,6 +32,7 @@ pub struct TranspositionTable {
     pub table: *mut Cluster,
     pub count: usize,
     pub generation: AtomicU8, // Tracks the "age" of the search
+    pub is_large_page: bool,
 }
 
 unsafe impl Send for TranspositionTable {}
@@ -33,9 +42,24 @@ impl Drop for TranspositionTable {
     fn drop(&mut self) {
         if !self.table.is_null() {
             let cluster_size = std::mem::size_of::<Cluster>();
-            let layout = Layout::from_size_align(self.count * cluster_size, 64).unwrap();
-            unsafe {
-                dealloc(self.table as *mut u8, layout);
+            let size_bytes = self.count * cluster_size;
+
+            if self.is_large_page {
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    munmap(self.table as *mut c_void, size_bytes);
+                }
+
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    // dwSize must be 0 if MEM_RELEASE is used
+                    VirtualFree(self.table as *mut c_void, 0, MEM_RELEASE);
+                }
+            } else {
+                let layout = Layout::from_size_align(size_bytes, 64).unwrap();
+                unsafe {
+                    dealloc(self.table as *mut u8, layout);
+                }
             }
         }
     }
@@ -46,13 +70,68 @@ impl TranspositionTable {
         let cluster_size = std::mem::size_of::<Cluster>();
         let desired_bytes = mb * 1024 * 1024;
         let count = desired_bytes / cluster_size;
-        let layout = Layout::from_size_align(count * cluster_size, 64).unwrap();
-        let ptr = unsafe { alloc_zeroed(layout) as *mut Cluster };
+        let size_bytes = count * cluster_size;
+
+        let mut ptr = std::ptr::null_mut();
+        let mut is_large_page = false;
+
+        // Try Linux Large Pages
+        #[cfg(target_os = "linux")]
+        {
+            unsafe {
+                let addr = mmap(
+                    std::ptr::null_mut(),
+                    size_bytes,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
+                    -1,
+                    0,
+                );
+
+                if addr != MAP_FAILED {
+                    ptr = addr as *mut Cluster;
+                    is_large_page = true;
+                    println!("info string Transposition Table allocated using large pages");
+                }
+            }
+        }
+
+        // Try Windows Large Pages
+        #[cfg(target_os = "windows")]
+        {
+            unsafe {
+                let addr = VirtualAlloc(
+                    std::ptr::null(),
+                    size_bytes,
+                    MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES,
+                    PAGE_READWRITE,
+                );
+
+                if !addr.is_null() {
+                    ptr = addr as *mut Cluster;
+                    is_large_page = true;
+                    println!("info string Transposition Table allocated using large pages");
+                }
+            }
+        }
+
+        // Fallback
+        if ptr.is_null() {
+             #[cfg(any(target_os = "linux", target_os = "windows"))]
+             {
+                 println!("info string Failed to allocate large pages, falling back to standard pages");
+             }
+
+             let layout = Layout::from_size_align(size_bytes, 64).unwrap();
+             ptr = unsafe { alloc_zeroed(layout) as *mut Cluster };
+        }
+
         println!("TT: {} MB / {} Clusters / 4-Way Associative", mb, count);
         Self {
             table: ptr,
             count,
             generation: AtomicU8::new(0),
+            is_large_page,
         }
     }
 
