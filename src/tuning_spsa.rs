@@ -1,8 +1,8 @@
 use crate::parameters::SearchParameters;
 use crate::search;
-use crate::state::{GameState, WHITE};
+use crate::state::{GameState, WHITE, BLACK, P, N, B, R, Q, K, p, n, b, r, q, k, BOTH};
 use crate::tt::TranspositionTable;
-use rand::Rng; // Trait must be in scope for generic bounds, even if we use updated methods
+use rand::Rng; // Trait must be in scope for generic bounds
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
@@ -28,13 +28,12 @@ pub fn run_tuning() {
         println!("Starting from default parameters.");
     }
 
-    // rand 0.9.x: use rand::rng()
     let mut rng = rand::rng();
 
-    for k in 1..=EPOCHS {
+    for epoch in 1..=EPOCHS {
         // 1. Calculate ak and ck
-        let ak = SPSA_A / (k as f64 + 50.0).powf(SPSA_ALPHA);
-        let ck = SPSA_C / (k as f64).powf(SPSA_GAMMA);
+        let ak = SPSA_A / (epoch as f64 + 50.0).powf(SPSA_ALPHA);
+        let ck = SPSA_C / (epoch as f64).powf(SPSA_GAMMA);
 
         // 2. Generate Delta (Bernoulli +/- 1)
         let delta = generate_delta(&mut rng);
@@ -52,7 +51,7 @@ pub fn run_tuning() {
         // Gradient Estimate: g = (y+ - y-) / (2 * ck) * delta
         let gradient_step = score_diff / (2.0 * ck);
 
-        println!("Epoch {}: Score Diff = {:.4}, ck = {:.4}, ak = {:.4}", k, score_diff, ck, ak);
+        println!("Epoch {}: Score Diff = {:.4}, ck = {:.4}, ak = {:.4}", epoch, score_diff, ck, ak);
 
         apply_gradient(&mut params, &delta, gradient_step * ak);
 
@@ -71,7 +70,6 @@ pub fn run_tuning() {
 // 6: razoring_multiplier
 const PARAM_COUNT: usize = 7;
 
-// Updated for rand 0.9.x
 fn generate_delta(rng: &mut impl rand::Rng) -> Vec<f64> {
     let mut d = Vec::with_capacity(PARAM_COUNT);
     for _ in 0..PARAM_COUNT {
@@ -118,41 +116,89 @@ fn apply_gradient(params: &mut SearchParameters, delta: &[f64], step: f64) {
 // Runs a batch of games and returns (Wins - Losses) / Total (from perspective of P1)
 fn run_match_batch(p1: &SearchParameters, p2: &SearchParameters, games: usize) -> f64 {
     let num_threads = std::thread::available_parallelism().unwrap().get().max(1);
-    let games_per_thread = games / num_threads;
+
+    // Ensure even number of games for pairs
+    let num_pairs = games / 2;
+    let pairs_per_thread = num_pairs / num_threads;
+    let remainder = num_pairs % num_threads;
 
     let p1_arc = Arc::new(p1.clone());
     let p2_arc = Arc::new(p2.clone());
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    // Generate Openings
+    let mut openings = Vec::with_capacity(num_pairs);
+    let mut rng = rand::rng();
+    let start_state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
+    for _ in 0..num_pairs {
+        let mut state = start_state.clone();
+        let mut hist = std::collections::HashMap::new();
+        hist.insert(state.hash, 1);
+
+        let mut moves = crate::movegen::MoveGenerator::new();
+        let mut valid = true;
+
+        for _ in 0..8 {
+            moves.generate_moves(&state);
+            if moves.list.count == 0 {
+                valid = false;
+                break;
+            }
+            let idx = rng.random_range(0..moves.list.count);
+            let m = moves.list.moves[idx];
+            state = state.make_move(m); // Legacy make_move is fine for setup
+
+            // Check for early repetition or material draw in opening (unlikely but safe)
+            if *hist.entry(state.hash).or_insert(0) >= 3 {
+                 valid = false;
+                 break;
+            }
+        }
+
+        if valid {
+            openings.push(state);
+        } else {
+            // Retry or just push startpos (fallback)
+            openings.push(start_state);
+        }
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
     let mut handles = vec![];
 
+    // Create TTs (1MB each)
+    let mut tts = Vec::with_capacity(num_threads);
     for _ in 0..num_threads {
+        tts.push(TranspositionTable::new(1));
+    }
+
+    let mut start_idx = 0;
+
+    for i in 0..num_threads {
         let tx = tx.clone();
         let p1 = p1_arc.clone();
         let p2 = p2_arc.clone();
 
+        // Distribute openings
+        let count = pairs_per_thread + if i < remainder { 1 } else { 0 };
+        let thread_openings = openings[start_idx..start_idx + count].to_vec();
+        start_idx += count;
+
+        let mut tt = tts.pop().unwrap(); // Move TT into thread
+
         let builder = thread::Builder::new().stack_size(32 * 1024 * 1024);
         handles.push(builder.spawn(move || {
             let mut wins = 0.0;
-            let my_games = games_per_thread;
-            for i in 0..my_games {
-                // Alternate colors
-                let (white, black) = if i % 2 == 0 {
-                    (p1.clone(), p2.clone())
-                } else {
-                    (p2.clone(), p1.clone())
-                };
 
-                let result = play_game(&white, &black);
+            for opening in thread_openings {
+                // Game A: P1 White, P2 Black
+                let score_a = play_game(&p1, &p2, &opening, &mut tt);
 
-                if i % 2 == 0 {
-                    // P1 is white
-                    wins += result; // 1.0 if white wins
-                } else {
-                    // P1 is black
-                    wins += 1.0 - result; // 1.0 if black wins (result is 0.0)
-                }
+                // Game B: P2 White, P1 Black
+                let score_b = play_game(&p2, &p1, &opening, &mut tt);
+
+                // P1 Score = Score A (as White) + (1.0 - Score B (as Black))
+                wins += score_a + (1.0 - score_b);
             }
             tx.send(wins).unwrap();
         }).unwrap());
@@ -167,45 +213,79 @@ fn run_match_batch(p1: &SearchParameters, p2: &SearchParameters, games: usize) -
         h.join().unwrap();
     }
 
+    // Total Games = num_pairs * 2
+    // Wins is sum of P1 points.
+    let total_games = (num_pairs * 2) as f64;
+    let p1_score = total_wins / total_games;
+
     // Normalized score [-1, 1]
-    let p1_score = total_wins / (games_per_thread * num_threads) as f64;
     p1_score * 2.0 - 1.0
 }
 
-// Plays one game. Returns 1.0 if White wins, 0.0 if Black wins, 0.5 draw.
-fn play_game(white_params: &Arc<SearchParameters>, black_params: &Arc<SearchParameters>) -> f64 {
-    let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+fn is_material_draw(state: &GameState) -> bool {
+    let occ = state.occupancies[BOTH];
+    let count = occ.count_bits();
 
-    // rand 0.9.x
-    let mut rng = rand::rng();
+    if count > 3 { return false; }
+
+    // K vs K
+    if count == 2 { return true; }
+
+    // KB vs K or KN vs K
+    // Remove kings
+    let kings = state.bitboards[K] | state.bitboards[k];
+    let others = occ.0 & !kings.0;
+
+    if others == 0 { return true; } // Just kings
+
+    let knights = state.bitboards[N] | state.bitboards[n];
+    let bishops = state.bitboards[B] | state.bitboards[b];
+
+    // Check if remaining piece is Knight
+    if (others & knights.0) != 0 && (others & !knights.0) == 0 {
+        return true;
+    }
+
+    // Check if remaining piece is Bishop
+    if (others & bishops.0) != 0 && (others & !bishops.0) == 0 {
+        return true;
+    }
+
+    false
+}
+
+// Plays one game. Returns 1.0 if White wins, 0.0 if Black wins, 0.5 draw.
+fn play_game(
+    white_params: &Arc<SearchParameters>,
+    black_params: &Arc<SearchParameters>,
+    start_state: &GameState,
+    tt: &mut TranspositionTable
+) -> f64 {
+    tt.clear(); // Clear TT before game start to ensure stability
+
+    let mut state = *start_state;
+
     let mut history = vec![state.hash];
     let mut rep_history = std::collections::HashMap::new();
     rep_history.insert(state.hash, 1);
 
-    // 8 ply random opening
-    for _ in 0..8 {
-         let mut moves = crate::movegen::MoveGenerator::new();
-         moves.generate_moves(&state);
-         if moves.list.count == 0 { return 0.5; }
-
-         let idx = rng.random_range(0..moves.list.count);
-         let m = moves.list.moves[idx];
-         state = state.make_move(m);
-         history.push(state.hash);
-         *rep_history.entry(state.hash).or_insert(0) += 1;
-    }
-
-    let mut tt = TranspositionTable::new(1);
-
-    // Fast tuning match parameters (e.g. 1000 nodes)
-    let limit = search::Limits::FixedNodes(1000);
+    // Deep tuning depth
+    let limit = search::Limits::FixedNodes(5000);
 
     let mut sd_white = search::SearchData::new();
     let mut sd_black = search::SearchData::new();
 
     let stop = Arc::new(AtomicBool::new(false));
 
+    let mut white_wins = 0;
+    let mut black_wins = 0;
+
     for _ in 0..200 { // Max 200 moves
+        // Material Draw Check
+        if is_material_draw(&state) {
+            return 0.5;
+        }
+
         if state.halfmove_clock >= 100 { return 0.5; }
         if let Some(&c) = rep_history.get(&state.hash) {
             if c >= 3 { return 0.5; }
@@ -214,10 +294,10 @@ fn play_game(white_params: &Arc<SearchParameters>, black_params: &Arc<SearchPara
         let params = if state.side_to_move == WHITE { white_params } else { black_params };
         let sd = if state.side_to_move == WHITE { &mut sd_white } else { &mut sd_black };
 
-        let (_, best_move) = search::search(
+        let (score, best_move) = search::search(
             &state,
             limit,
-            &tt,
+            tt, // Pass as immutable ref (Search uses atomics)
             stop.clone(),
             false, // not main thread
             history.clone(),
@@ -226,11 +306,26 @@ fn play_game(white_params: &Arc<SearchParameters>, black_params: &Arc<SearchPara
         );
 
         if let Some(mv) = best_move {
+            // Score Adjudication (Absolute White Perspective)
+            let white_score = if state.side_to_move == WHITE { score } else { -score };
+
+            if white_score > 400 {
+                white_wins += 1;
+                black_wins = 0;
+            } else if white_score < -400 {
+                black_wins += 1;
+                white_wins = 0;
+            } else {
+                white_wins = 0;
+                black_wins = 0;
+            }
+
+            if white_wins >= 5 { return 1.0; } // White Wins
+            if black_wins >= 5 { return 0.0; } // Black Wins (White Loses)
+
             state = state.make_move(mv);
             history.push(state.hash);
             *rep_history.entry(state.hash).or_insert(0) += 1;
-
-            // Adjudication could be added here
         } else {
             // No move -> Mate or Stalemate
             if search::is_in_check(&state) {
