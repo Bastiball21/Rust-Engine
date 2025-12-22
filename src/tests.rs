@@ -111,23 +111,32 @@ pub mod tests {
         // Manually desynchronize board array at target
         state.board[8] = NO_PIECE as u8;
 
-        // Perform the move. This should trigger the recovery logic (and warning).
-        // It should NOT panic.
-        let info = state.make_move_inplace(mv, &mut None);
+        if cfg!(debug_assertions) {
+            // In debug mode, we now enforce strict consistency and expect a panic
+            // rather than attempting recovery.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.make_move_inplace(mv, &mut None);
+            }));
+            assert!(result.is_err(), "Expected panic in debug build due to capture-on-empty");
+        } else {
+            // Perform the move. This should trigger the recovery logic (and warning).
+            // It should NOT panic.
+            let info = state.make_move_inplace(mv, &mut None);
 
-        // Verify recovery was successful
-        // The captured piece should be correctly identified as 'p'
-        assert_eq!(info.captured, crate::state::p as u8);
+            // Verify recovery was successful
+            // The captured piece should be correctly identified as 'p'
+            assert_eq!(info.captured, crate::state::p as u8);
 
-        // Verify the board state after move
-        // A2 should now contain White Rook
-        assert_eq!(state.board[8], R as u8);
-        assert!(state.bitboards[R].get_bit(8));
-        // A1 should be empty
-        assert_eq!(state.board[0], NO_PIECE as u8);
-        assert!(!state.bitboards[R].get_bit(0));
-        // Black Pawn should be gone from bitboards
-        assert!(!state.bitboards[crate::state::p].get_bit(8));
+            // Verify the board state after move
+            // A2 should now contain White Rook
+            assert_eq!(state.board[8], R as u8);
+            assert!(state.bitboards[R].get_bit(8));
+            // A1 should be empty
+            assert_eq!(state.board[0], NO_PIECE as u8);
+            assert!(!state.bitboards[R].get_bit(0));
+            // Black Pawn should be gone from bitboards
+            assert!(!state.bitboards[crate::state::p].get_bit(8));
+        }
     }
 }
 
