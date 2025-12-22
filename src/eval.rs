@@ -131,6 +131,11 @@ pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
             &state.accumulator[1 - state.side_to_move],
         );
         return score;
+    } else {
+        // Log once if falling back to HCE during search?
+        // Too noisy for search. Just ensure caller knows via 'info string'.
+        // We do not have access to info logging here easily without flooding.
+        // We rely on main/uci init log.
     }
 
     let score = evaluate_hce(state, alpha, beta);

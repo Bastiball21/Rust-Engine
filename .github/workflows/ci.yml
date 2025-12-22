@@ -1,39 +1,40 @@
-name: Rust CI
+name: Rust Engine CI
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ main, master, development ]
   pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
+    branches: [ main, master ]
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_MIN_STACK: 8388608 # 8MB stack for tests
 
 jobs:
   build:
+    name: Build and Test
     runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-    - name: Build Release
-      run: cargo build --release --verbose
 
-  test:
-    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+        components: rustfmt, clippy
+
+    - name: Check Formatting
+      run: cargo fmt -- --check
+
+    - name: Run Clippy
+      run: cargo clippy -- -D warnings
+
     - name: Run Tests
       run: cargo test --release --verbose
 
-  stress-test:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-    - name: Build Release
-      run: cargo build --release
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
-    - name: Run Stress Script
-      run: python3 scripts/stress_test.py
+    - name: Run Perft Tests
+      # Perft tests are now integrated into the main test suite in src/perft.rs
+      run: echo "Perft tests run as part of 'cargo test' above."

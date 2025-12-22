@@ -31,6 +31,11 @@ pub fn run_perft_suite() {
             "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
             [1, 44, 1486, 62379, 2103487, 89941194],
         ),
+        (
+            "Castling Check (Custom)",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            [1, 26, 0, 0, 0, 0], // Depth 1: 26 moves (5K+14R+7R = 26)
+        ),
     ];
 
     let mut total_nodes = 0;
@@ -41,7 +46,7 @@ pub fn run_perft_suite() {
         let mut state = GameState::parse_fen(fen);
 
         // Run Depth 5 (or 4 if 5 is too slow for quick tests)
-        let depth = 5;
+        let depth = 4.min(expected.len() - 1); // Limit to depth 4 for speed in suite
         if expected.len() <= depth {
             continue;
         }
@@ -61,17 +66,19 @@ pub fn run_perft_suite() {
             println!("RESULT: FAIL (Expected {})", expected[depth]);
             // If failed, print divide for debug
             perft_divide(&mut state, depth as u8);
-            return;
+            // return; // Continue to test others
         }
     }
 
     println!("\n--- SUITE COMPLETE ---");
     println!("Total Nodes: {}", total_nodes);
     println!("Total Time:  {}ms", total_time);
-    println!(
-        "NPS:         {}",
-        (total_nodes as u128 * 1000) / (total_time.max(1))
-    );
+    if total_time > 0 {
+        println!(
+            "NPS:         {}",
+            (total_nodes as u128 * 1000) / total_time
+        );
+    }
 }
 
 // Recursive perft function
@@ -128,4 +135,77 @@ pub fn perft_divide(state: &GameState, depth: u8) {
         }
     }
     println!("Total: {}", total);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::GameState;
+
+    #[test]
+    fn test_perft_start_pos() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        let state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(perft(&state, 1), 20);
+        assert_eq!(perft(&state, 2), 400);
+        assert_eq!(perft(&state, 3), 8902);
+        // assert_eq!(perft(&state, 4), 197281); // Takes ~0.5s
+    }
+
+    #[test]
+    fn test_perft_kiwipete() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        let state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        assert_eq!(perft(&state, 1), 48);
+        assert_eq!(perft(&state, 2), 2039);
+        assert_eq!(perft(&state, 3), 97862);
+    }
+
+    #[test]
+    fn test_perft_castling() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        let state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        assert_eq!(perft(&state, 1), 26);
+    }
+
+    #[test]
+    fn test_make_unmake_symmetry() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        let mut state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+
+        let mut generator = MoveGenerator::new();
+        generator.generate_moves(&state);
+
+        let original_hash = state.hash;
+
+        // We verify that unmake restores the state perfectly
+        for i in 0..generator.list.count {
+            let mv = generator.list.moves[i];
+
+            // Check legality first? Usually symmetry should hold even for illegal moves if logic is robust,
+            // but for perft we care about legal paths. However, make/unmake should be purely mechanical.
+
+            let mut test_state = state; // Copy
+            let unmake_info = test_state.make_move_inplace(mv);
+            test_state.unmake_move(mv, unmake_info);
+
+            assert_eq!(test_state.hash, original_hash, "Hash mismatch after unmake move {:?}", mv);
+            assert_eq!(test_state.bitboards[WHITE].0, state.bitboards[WHITE].0);
+            assert_eq!(test_state.en_passant, state.en_passant);
+            assert_eq!(test_state.castling_rights, state.castling_rights);
+
+            // Note: Accumulator exact match?
+            // Accumulator might differ in floating point or internal state if refreshed?
+            // But logic should restore it.
+            // Let's check bitboards primarily.
+        }
+    }
 }

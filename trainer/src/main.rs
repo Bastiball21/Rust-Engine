@@ -14,6 +14,27 @@ use bullet_lib::{
 use std::path::Path;
 
 fn main() {
+    println!("Aether NNUE Trainer");
+
+    // Basic runtime check for CUDA availability via environment or simple command
+    // This assumes if `nvidia-smi` works, we have drivers.
+    // Ideally we would probe `cudarc` or `bullet` api but `bullet` might init eagerly.
+
+    let has_cuda = std::process::Command::new("nvidia-smi")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !has_cuda {
+        eprintln!("ERROR: CUDA is not detected on this system (nvidia-smi failed).");
+        eprintln!("The trainer requires a CUDA-capable GPU to function.");
+        std::process::exit(1);
+    }
+
+    println!("CUDA detected. Initializing training...");
+
     // hyperparams to fiddle with
     let hl_size = 512;
     let initial_lr = 0.001;
