@@ -114,7 +114,7 @@ impl Trace {
 pub fn init_eval() {}
 
 // --- MAIN EVAL ---
-pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
+pub fn evaluate(state: &GameState, accumulators: &Option<&[crate::nnue::Accumulator; 2]>, alpha: i32, beta: i32) -> i32 {
     let lazy_score = evaluate_lazy(state);
     let margin = LAZY_EVAL_MARGIN;
 
@@ -125,19 +125,17 @@ pub fn evaluate(state: &GameState, alpha: i32, beta: i32) -> i32 {
         return beta;
     }
 
-    if crate::nnue::NETWORK.get().is_some() {
-        let score = crate::nnue::evaluate(
-            &state.accumulator[state.side_to_move],
-            &state.accumulator[1 - state.side_to_move],
-        );
-        return score;
-    } else {
-        // Log once if falling back to HCE during search?
-        // Too noisy for search. Just ensure caller knows via 'info string'.
-        // We do not have access to info logging here easily without flooding.
-        // We rely on main/uci init log.
+    if let Some(acc) = accumulators {
+        if crate::nnue::NETWORK.get().is_some() {
+            let score = crate::nnue::evaluate(
+                &acc[state.side_to_move],
+                &acc[1 - state.side_to_move],
+            );
+            return score;
+        }
     }
 
+    // Fallback to HCE
     let score = evaluate_hce(state, alpha, beta);
     if state.side_to_move == BLACK {
         -score
@@ -614,7 +612,8 @@ mod tests {
         let fen = "8/8/8/8/8/8/4r3/4K3 w - - 0 1";
         let state = GameState::parse_fen(fen);
 
-        let score = evaluate(&state, -32000, 32000);
+        // Pass None for accumulator (no NNUE in HCE test)
+        let score = evaluate(&state, &None, -32000, 32000);
         println!("Score: {}", score);
 
         // Without fix, score should be roughly:
@@ -651,7 +650,7 @@ mod tests {
         // Ensure NNUE is NOT used
         assert!(crate::nnue::NETWORK.get().is_none());
 
-        let score = evaluate(&state, -32000, 32000);
+        let score = evaluate(&state, &None, -32000, 32000);
 
         println!("Score for Black (Winning): {}", score);
 

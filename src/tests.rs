@@ -113,7 +113,7 @@ pub mod tests {
 
         // Perform the move. This should trigger the recovery logic (and warning).
         // It should NOT panic.
-        let info = state.make_move_inplace(mv);
+        let info = state.make_move_inplace(mv, &mut None);
 
         // Verify recovery was successful
         // The captured piece should be correctly identified as 'p'
@@ -133,5 +133,5 @@ pub mod tests {
 
 pub fn run_mate_suite() {
     // Placeholder for legacy test logic or mate suite.
-    println!("Mate suite disabled.");
+    println!("Mate suite placeholder.");
 }

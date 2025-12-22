@@ -148,7 +148,7 @@ pub struct GameState {
     pub hash: u64,
     pub halfmove_clock: u8,
     pub fullmove_number: u16,
-    pub accumulator: [Accumulator; 2],
+    // REMOVED: pub accumulator: [Accumulator; 2],
     // Chess960: Store the FILE (0-7) of the initial rook positions for castling.
     // Index: [Color][Side] where Side 0=KingSide, 1=QueenSide
     pub castling_rook_files: [[u8; 2]; 2],
@@ -166,7 +166,7 @@ impl GameState {
             hash: 0,
             halfmove_clock: 0,
             fullmove_number: 1,
-            accumulator: [Accumulator::default(); 2],
+            // accumulator removed
             castling_rook_files: [[7, 0], [7, 0]],
         }
     }
@@ -210,13 +210,13 @@ impl GameState {
         self.hash = h;
     }
 
-    pub fn refresh_accumulator(&mut self) {
+    pub fn refresh_accumulator(&self, acc: &mut [Accumulator; 2]) {
         let bitboards = &self.bitboards;
         let white_king_sq = self.bitboards[K].get_lsb_index() as usize;
         let black_king_sq = self.bitboards[k].get_lsb_index() as usize;
 
-        self.accumulator[WHITE].refresh(bitboards, WHITE, white_king_sq);
-        self.accumulator[BLACK].refresh(bitboards, BLACK, black_king_sq);
+        acc[WHITE].refresh(bitboards, WHITE, white_king_sq);
+        acc[BLACK].refresh(bitboards, BLACK, black_king_sq);
     }
 
     pub fn parse_fen(fen: &str) -> GameState {
@@ -375,7 +375,7 @@ impl GameState {
         state.occupancies[BOTH] = state.occupancies[WHITE] | state.occupancies[BLACK];
 
         state.compute_hash();
-        state.refresh_accumulator();
+        // Accumulator refresh is now explicit caller responsibility
         state
     }
 
@@ -531,11 +531,6 @@ impl GameState {
 
         self.halfmove_clock = 0;
 
-        // Note: Fullmove number usually increments after Black moves.
-        // We handle this in make_move. We should do it here too?
-        // Logic: if Side was BLACK, we moved to WHITE, so increment.
-        // But self.side_to_move is now flipped.
-        // So if self.side_to_move == WHITE, it means BLACK just moved.
         if self.side_to_move == WHITE {
             self.fullmove_number += 1;
         }
@@ -560,17 +555,20 @@ impl GameState {
         self.en_passant = info.en_passant;
         self.halfmove_clock = info.halfmove_clock;
         self.hash = info.old_hash;
-        // Castling rights don't change in null move
     }
 
-    // Legacy support for Copy-Make (can be removed later or kept for tests)
+    // Legacy Support: make_move needs to operate on CLONED accumulators if we want full state.
+    // BUT we removed accumulators from GameState.
+    // So this function returns GameState WITHOUT accumulators updated.
+    // This is fine for Perft. For Search, we use inplace.
     pub fn make_move(&self, mv: Move) -> GameState {
         let mut new_state = *self;
-        new_state.make_move_inplace(mv);
+        new_state.make_move_inplace(mv, &mut None); // Pass None for accumulator
         new_state
     }
 
-    pub fn make_move_inplace(&mut self, mv: Move) -> UnmakeInfo {
+    // New Signature: Accepts Option<&mut [Accumulator; 2]>
+    pub fn make_move_inplace(&mut self, mv: Move, accumulators: &mut Option<&mut [Accumulator; 2]>) -> UnmakeInfo {
         let side = self.side_to_move;
         let mut captured_piece;
         let old_hash = self.hash;
@@ -590,7 +588,6 @@ impl GameState {
 
         self.halfmove_clock += 1;
 
-        // MAILBOX OPTIMIZATION: Get piece from board array instead of loop
         let source = mv.source();
         let target = mv.target();
         let promotion = mv.promotion();
@@ -599,7 +596,6 @@ impl GameState {
         let mut piece_type = self.board[source as usize] as usize;
 
         if piece_type == NO_PIECE {
-            // Should not happen in legal search
              let start_range = if side == WHITE { P } else { p };
              let end_range = if side == WHITE { K } else { k };
              for pp in start_range..=end_range {
@@ -620,7 +616,6 @@ impl GameState {
 
         let mut is_castling = false;
 
-        // Detect Castling
         if piece_type == K || piece_type == k {
             let target_piece = self.board[target as usize] as usize;
             let rook_type = if side == WHITE { R } else { r };
@@ -629,7 +624,6 @@ impl GameState {
             }
         }
 
-        // Update En Passant: Reset it for next move
         if self.en_passant != 64 {
             let file = (self.en_passant % 8) as u8;
             self.hash ^= zobrist::en_passant_key(file);
@@ -637,19 +631,15 @@ impl GameState {
         self.en_passant = 64;
 
         if is_castling {
-            captured_piece = NO_PIECE as u8; // Castling "captures" own rook but we handle restore manually
-
-            // 1. Remove King from Source
+            captured_piece = NO_PIECE as u8;
             self.hash ^= zobrist::piece_key(piece_type, source as usize);
             self.bitboards[piece_type].pop_bit(source);
             self.board[source as usize] = NO_PIECE as u8;
             removed.push((piece_type, source as usize));
 
-            // Occupancy Update
             self.occupancies[side].pop_bit(source);
             self.occupancies[BOTH].pop_bit(source);
 
-            // 2. Remove Rook from Target (Rook's source)
             let rook_type = if side == WHITE { R } else { r };
             self.hash ^= zobrist::piece_key(rook_type, target as usize);
             self.bitboards[rook_type].pop_bit(target);
@@ -659,19 +649,17 @@ impl GameState {
             self.occupancies[side].pop_bit(target);
             self.occupancies[BOTH].pop_bit(target);
 
-            // 3. Determine Destinations
             let rank_base = if side == WHITE { 0 } else { 56 };
             let king_file_dst;
             let rook_file_dst;
 
             if target > source {
-                // Kingside
                 if (target % 8) > (source % 8) {
-                    king_file_dst = 6; // g-file
-                    rook_file_dst = 5; // f-file
+                    king_file_dst = 6;
+                    rook_file_dst = 5;
                 } else {
-                    king_file_dst = 2; // c-file
-                    rook_file_dst = 3; // d-file
+                    king_file_dst = 2;
+                    rook_file_dst = 3;
                 }
             } else {
                 if (target % 8) > (source % 8) {
@@ -686,7 +674,6 @@ impl GameState {
             let k_dst = rank_base + king_file_dst;
             let r_dst = rank_base + rook_file_dst;
 
-            // 4. Place King and Rook at Destinations
             self.bitboards[piece_type].set_bit(k_dst);
             self.board[k_dst as usize] = piece_type as u8;
             self.hash ^= zobrist::piece_key(piece_type, k_dst as usize);
@@ -705,9 +692,6 @@ impl GameState {
 
             self.halfmove_clock = 0;
         } else {
-            // NORMAL MOVE LOGIC
-
-            // 1. Remove moving piece from source
             removed.push((piece_type, source as usize));
 
             if piece_type == P || piece_type == p || is_capture {
@@ -721,7 +705,6 @@ impl GameState {
             self.occupancies[side].pop_bit(source);
             self.occupancies[BOTH].pop_bit(source);
 
-            // 2. Add moving piece (or promo) to target
             let actual_piece = if let Some(promo) = promotion {
                 let p_idx = if side == WHITE { promo } else { promo + 6 };
                 p_idx
@@ -737,11 +720,9 @@ impl GameState {
                 self.hash ^= zobrist::piece_key(piece_type, target as usize);
             }
 
-            // Capture Logic
             if is_capture {
                 let enemy_side = 1 - side;
                 if (piece_type == P || piece_type == p) && target == old_en_passant {
-                    // En Passant
                     let cap_sq = if side == WHITE {
                         target - 8
                     } else {
@@ -758,14 +739,11 @@ impl GameState {
                     self.occupancies[enemy_side].pop_bit(cap_sq);
                     self.occupancies[BOTH].pop_bit(cap_sq);
 
-                    // Target was empty for EP
                     self.board[target as usize] = actual_piece as u8;
                 } else {
-                    // Normal Capture
                     captured_piece = self.board[target as usize];
 
                     if captured_piece == NO_PIECE as u8 {
-                        // Fallback to bitboards if board[] is desynchronized (empty)
                         let enemy_start = if side == WHITE { p } else { P };
                         let enemy_end = if side == WHITE { k } else { K };
                         for pp in enemy_start..=enemy_end {
@@ -797,7 +775,6 @@ impl GameState {
                          self.bitboards[cap_p].pop_bit(target);
                          self.hash ^= zobrist::piece_key(cap_p, target as usize);
                          removed.push((cap_p, target as usize));
-                         // Note: board update for captured piece is implicit (overwritten below)
                     }
                     self.occupancies[enemy_side].pop_bit(target);
                     self.board[target as usize] = actual_piece as u8;
@@ -809,11 +786,9 @@ impl GameState {
 
             added.push((actual_piece, target as usize));
 
-            // Occupancy Add
             self.occupancies[side].set_bit(target);
             self.occupancies[BOTH].set_bit(target);
 
-            // Set new EP
              if piece_type == P || piece_type == p {
                 let diff = (target as i8 - source as i8).abs();
                 if diff == 16 {
@@ -828,8 +803,6 @@ impl GameState {
             }
         }
 
-        // CASTLING RIGHTS UPDATE
-        // Remove rights if they were present
         if (self.castling_rights & 1) != 0 {
             self.hash ^=
                 zobrist::castling_file_key(WHITE, 0, self.castling_rook_files[WHITE][0]);
@@ -848,7 +821,6 @@ impl GameState {
         }
         self.hash ^= zobrist::castling_key(self.castling_rights);
 
-        // Logic
         if piece_type == K {
             self.castling_rights &= !3;
         }
@@ -856,7 +828,6 @@ impl GameState {
             self.castling_rights &= !12;
         }
 
-        // Remove 'mut' from 'check_rook_rights' callback to avoid unused warning
         let check_rook_rights = |sq: u8, rights: &mut u8, files: [[u8; 2]; 2]| {
             let f = sq % 8;
             let rank_val = sq / 8;
@@ -873,7 +844,6 @@ impl GameState {
         check_rook_rights(source, &mut self.castling_rights, self.castling_rook_files);
         check_rook_rights(target, &mut self.castling_rights, self.castling_rook_files);
 
-        // Re-add rights keys
         self.hash ^= zobrist::castling_key(self.castling_rights);
         if (self.castling_rights & 1) != 0 {
             self.hash ^=
@@ -899,49 +869,45 @@ impl GameState {
         // Update Accumulators (Logic for King Buckets)
         // --------------------------------------------------------------------
 
-        // We need to check if King bucket changed.
-        // If King moved, potential bucket change.
-        // We check if either King's bucket changed.
+        if let Some(acc) = accumulators {
+            let new_k_sq_white = self.bitboards[K].get_lsb_index() as usize;
+            let new_k_sq_black = self.bitboards[k].get_lsb_index() as usize;
 
-        let new_k_sq_white = self.bitboards[K].get_lsb_index() as usize;
-        let new_k_sq_black = self.bitboards[k].get_lsb_index() as usize;
+            let (old_k_sq_w, old_k_sq_b) = if piece_type == K {
+                 (source as usize, new_k_sq_black)
+            } else if piece_type == k {
+                 (new_k_sq_white, source as usize)
+            } else {
+                 (new_k_sq_white, new_k_sq_black)
+            };
 
-        // We know old positions? We can infer or check if piece_type == K/k.
-        let (old_k_sq_w, old_k_sq_b) = if piece_type == K {
-             (source as usize, new_k_sq_black)
-        } else if piece_type == k {
-             (new_k_sq_white, source as usize)
-        } else {
-             (new_k_sq_white, new_k_sq_black)
-        };
+            let old_bucket_w = crate::nnue::get_king_bucket(WHITE, old_k_sq_w);
+            let new_bucket_w = crate::nnue::get_king_bucket(WHITE, new_k_sq_white);
 
-        let old_bucket_w = crate::nnue::get_king_bucket(WHITE, old_k_sq_w);
-        let new_bucket_w = crate::nnue::get_king_bucket(WHITE, new_k_sq_white);
+            let old_bucket_b = crate::nnue::get_king_bucket(BLACK, old_k_sq_b);
+            let new_bucket_b = crate::nnue::get_king_bucket(BLACK, new_k_sq_black);
 
-        let old_bucket_b = crate::nnue::get_king_bucket(BLACK, old_k_sq_b);
-        let new_bucket_b = crate::nnue::get_king_bucket(BLACK, new_k_sq_black);
+            let mut needs_backup = false;
+            if old_bucket_w != new_bucket_w || old_bucket_b != new_bucket_b {
+                 needs_backup = true;
+            }
 
-        let mut needs_backup = false;
-        if old_bucket_w != new_bucket_w || old_bucket_b != new_bucket_b {
-             needs_backup = true;
-        }
-
-        if needs_backup {
-             acc_backup = Some(self.accumulator); // Clone full accumulators (2KB)
-             // Refresh
-             if old_bucket_w != new_bucket_w {
-                  self.accumulator[WHITE].refresh(&self.bitboards, WHITE, new_k_sq_white);
-             } else {
-                  self.accumulator[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, new_k_sq_white);
-             }
-             if old_bucket_b != new_bucket_b {
-                  self.accumulator[BLACK].refresh(&self.bitboards, BLACK, new_k_sq_black);
-             } else {
-                  self.accumulator[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, new_k_sq_black);
-             }
-        } else {
-             self.accumulator[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, new_k_sq_white);
-             self.accumulator[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, new_k_sq_black);
+            if needs_backup {
+                 acc_backup = Some(**acc); // Clone current
+                 if old_bucket_w != new_bucket_w {
+                      acc[WHITE].refresh(&self.bitboards, WHITE, new_k_sq_white);
+                 } else {
+                      acc[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, new_k_sq_white);
+                 }
+                 if old_bucket_b != new_bucket_b {
+                      acc[BLACK].refresh(&self.bitboards, BLACK, new_k_sq_black);
+                 } else {
+                      acc[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, new_k_sq_black);
+                 }
+            } else {
+                 acc[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, new_k_sq_white);
+                 acc[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, new_k_sq_black);
+            }
         }
 
         UnmakeInfo {
@@ -955,7 +921,7 @@ impl GameState {
         }
     }
 
-    pub fn unmake_move(&mut self, mv: Move, info: UnmakeInfo) {
+    pub fn unmake_move(&mut self, mv: Move, info: UnmakeInfo, accumulators: &mut Option<&mut [Accumulator; 2]>) {
         // Reverse Move Logic
         // 1. Restore Side
         self.side_to_move = 1 - self.side_to_move;
@@ -979,10 +945,6 @@ impl GameState {
         let is_capture = mv.is_capture();
 
         if info.is_castling {
-             // Castling Unmake
-             // Make Logic: K from src->k_dst, R from tgt->r_dst.
-             // We need to move K from k_dst->src, R from r_dst->tgt.
-
              let rank_base = if side == WHITE { 0 } else { 56 };
              let king_file_dst;
              let rook_file_dst;
@@ -1011,7 +973,6 @@ impl GameState {
              let k_piece = if side == WHITE { K } else { k };
              let r_piece = if side == WHITE { R } else { r };
 
-             // Remove from destinations
              self.bitboards[k_piece].pop_bit(k_dst);
              self.board[k_dst as usize] = NO_PIECE as u8;
              self.occupancies[side].pop_bit(k_dst);
@@ -1024,7 +985,6 @@ impl GameState {
              self.occupancies[BOTH].pop_bit(r_dst);
              removed.push((r_piece, r_dst as usize));
 
-             // Add back to sources
              self.bitboards[k_piece].set_bit(source);
              self.board[source as usize] = k_piece as u8;
              self.occupancies[side].set_bit(source);
@@ -1038,23 +998,14 @@ impl GameState {
              added.push((r_piece, target as usize));
 
         } else {
-             // Normal Unmake
+             let moved_piece = self.board[target as usize] as usize;
 
-             // What is at target?
-             // If promotion, it's the promoted piece.
-             // If normal, it's the mover.
-             let moved_piece = self.board[target as usize] as usize; // This is what is currently at target
-
-             // Remove from target
              self.bitboards[moved_piece].pop_bit(target);
              self.board[target as usize] = NO_PIECE as u8;
              self.occupancies[side].pop_bit(target);
              self.occupancies[BOTH].pop_bit(target);
              removed.push((moved_piece, target as usize));
 
-             // Place back at source
-             // If promotion, we placed PromotedPiece. We remove it (done above).
-             // We need to place Pawn at source.
              let original_piece = if promotion.is_some() {
                   if side == WHITE { P } else { p }
              } else {
@@ -1067,12 +1018,10 @@ impl GameState {
              self.occupancies[BOTH].set_bit(source);
              added.push((original_piece, source as usize));
 
-             // Restore captured piece
              if is_capture {
                   let captured = info.captured as usize;
                   let enemy_side = 1 - side;
                   let cap_sq = if (original_piece == P || original_piece == p) && target == info.en_passant {
-                       // EP Capture
                        if side == WHITE { target - 8 } else { target + 8 }
                   } else {
                        target
@@ -1086,16 +1035,16 @@ impl GameState {
              }
         }
 
-        // NNUE Restore
-        if let Some(backup) = info.acc_backup {
-             self.accumulator = backup;
-        } else {
-             // Inverse update
-             let k_sq_white = self.bitboards[K].get_lsb_index() as usize;
-             let k_sq_black = self.bitboards[k].get_lsb_index() as usize;
+        if let Some(acc) = accumulators {
+            if let Some(backup) = info.acc_backup {
+                 **acc = backup;
+            } else {
+                 let k_sq_white = self.bitboards[K].get_lsb_index() as usize;
+                 let k_sq_black = self.bitboards[k].get_lsb_index() as usize;
 
-             self.accumulator[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, k_sq_white);
-             self.accumulator[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, k_sq_black);
+                 acc[WHITE].update(added.as_slice(), removed.as_slice(), WHITE, k_sq_white);
+                 acc[BLACK].update(added.as_slice(), removed.as_slice(), BLACK, k_sq_black);
+            }
         }
     }
 }
@@ -1116,8 +1065,6 @@ fn find_outermost_rook(
     let rooks = state.bitboards[rook_type];
 
     if is_kingside {
-        // Look for rook to the right of King (file > k_file)
-        // We want the *outermost* one, so iterate 7 down to k_file + 1
         for f in (k_file + 1..8).rev() {
             let sq = rank * 8 + f;
             if rooks.get_bit(sq) {
@@ -1125,8 +1072,6 @@ fn find_outermost_rook(
             }
         }
     } else {
-        // Look for rook to the left of King (file < k_file)
-        // We want the *outermost* one, so iterate 0 up to k_file - 1
         for f in 0..k_file {
             let sq = rank * 8 + f;
             if rooks.get_bit(sq) {

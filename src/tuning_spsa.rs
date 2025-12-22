@@ -187,8 +187,8 @@ fn run_match_batch(p1: &SearchParameters, p2: &SearchParameters, games: usize) -
         let builder = thread::Builder::new().stack_size(32 * 1024 * 1024);
         handles.push(builder.spawn(move || {
             let mut wins = 0.0;
-            // Reuse TT: 1MB
-            let mut tt = TranspositionTable::new(1);
+            // Reuse TT: 1MB, 1 shard (Private)
+            let mut tt = TranspositionTable::new(1, 1);
 
             for start_pos in my_openings {
                 // Game 1: P1 White, P2 Black
@@ -265,6 +265,7 @@ fn play_game(
             sd,
             params,
             None,
+            None, // No specific thread ID for tuning (private TT)
         );
 
         // Adjudication Logic
