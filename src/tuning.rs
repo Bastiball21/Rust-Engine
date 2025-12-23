@@ -227,6 +227,7 @@ fn load_entries(path: &str) -> Vec<TunerEntry> {
     entries
 }
 
+#[cfg(feature = "tuning")]
 fn save_parameters(params: &[Parameter]) {
     // 1. Update the in-memory globals (Apply the tuning results)
     for p in params {
