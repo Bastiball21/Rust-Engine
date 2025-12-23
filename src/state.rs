@@ -773,10 +773,21 @@ impl GameState {
                     captured_piece = self.board[target as usize];
 
                     if captured_piece == NO_PIECE as u8 {
-                        let enemy_start = if side == WHITE { p } else { P };
-                        let enemy_end = if side == WHITE { k } else { K };
-                        for pp in enemy_start..=enemy_end {
+                        // Scan all pieces, not just enemies, to detect friendly fire
+                        for pp in 0..12 {
+                            // Skip the piece we just moved to the target square!
+                            if pp == actual_piece { continue; }
+
                             if self.bitboards[pp].get_bit(target) {
+                                let is_friendly = if side == WHITE { pp <= K } else { pp >= p };
+                                if is_friendly {
+                                    self.dump_diagnostics(mv, "Friendly Fire Detected");
+                                    panic!(
+                                        "CRITICAL: Friendly fire detected (Self-Capture) - Possible TT Corruption. Target: {}, Piece: {}, Move: {:?}, FEN: {}",
+                                        target, pp, mv, self.to_fen()
+                                    );
+                                }
+
                                 captured_piece = pp as u8;
                                 eprintln!(
                                     "WARNING: Board desync detected at {}. Recovered via bitboards. Move: {:?}",
