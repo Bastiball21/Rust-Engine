@@ -1080,6 +1080,49 @@ impl GameState {
         crate::debug::validate_board_consistency(self);
     }
 
+    pub fn is_move_consistent(&self, mv: Move) -> bool {
+        let source = mv.source() as usize;
+        let target = mv.target() as usize;
+
+        // 1. Source Consistency
+        let piece = self.board[source];
+        if piece == NO_PIECE as u8 {
+            return false;
+        }
+
+        // 2. Capture Consistency
+        if mv.is_capture() {
+            // Target occupied?
+            if self.board[target] != NO_PIECE as u8 {
+                return true;
+            }
+            // En Passant?
+            let is_pawn = piece == P as u8 || piece == p as u8;
+            if is_pawn && target as u8 == self.en_passant {
+                return true;
+            }
+            // Otherwise inconsistent capture
+            return false;
+        } else {
+            // Quiet Move
+            // Target empty?
+            if self.board[target] == NO_PIECE as u8 {
+                return true;
+            }
+            // Castling? (King moves to own Rook)
+            let piece_type = piece as usize;
+            if piece_type == K || piece_type == k {
+                let target_piece = self.board[target] as usize;
+                let rook_type = if self.side_to_move == WHITE { R } else { r };
+                if target_piece == rook_type {
+                    return true;
+                }
+            }
+            // Otherwise inconsistent quiet move (target occupied)
+            return false;
+        }
+    }
+
     pub fn dump_diagnostics(&self, mv: Move, reason: &str) {
         eprintln!("=== DIAGNOSTIC DUMP: {} ===", reason);
         eprintln!("Move: {:?}, FEN: {}", mv, self.to_fen());
