@@ -72,12 +72,24 @@ impl TTEntryTrait for TTEntry {
             | ((flag as u64) << 40)
             | ((age as u64) << 48);
 
-        self.data.store(data, Ordering::Relaxed);
-        self.key.store(key, Ordering::Release);
+        // Lockless XOR Protection
+        // We store (key ^ data) in the key field.
+        // This ensures that if we read a mismatched key/data pair, the XOR check will fail.
+        let stored_key = key ^ data;
+
+        self.data.store(data, Ordering::Release);
+        self.key.store(stored_key, Ordering::Release);
     }
 
-    fn probe(&self, _key: u64) -> Option<(i32, u8, u8, u8, Option<Move>)> {
+    fn probe(&self, key: u64) -> Option<(i32, u8, u8, u8, Option<Move>)> {
         let data = self.data.load(Ordering::Relaxed);
+        let stored_key = self.key.load(Ordering::Acquire);
+
+        // Verify integrity
+        if (stored_key ^ data) != key {
+            return None;
+        }
+
         let move_u16 = (data & 0xFFFF) as u16;
         let score = ((data >> 16) & 0xFFFF) as i32 - 32000;
         let depth = ((data >> 32) & 0xFF) as u8;
