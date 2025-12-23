@@ -67,7 +67,7 @@ pub mod tests {
         crate::movegen::init_move_tables();
 
         // Standard position
-        let mut state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        let state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
         // e1 (4) -> g1 (6) ?? No, internal is e1 -> h1 (7)
 
         let mut generator = MoveGenerator::new();

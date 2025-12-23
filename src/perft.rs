@@ -179,7 +179,7 @@ mod tests {
         crate::zobrist::init_zobrist();
         crate::bitboard::init_magic_tables();
         crate::movegen::init_move_tables();
-        let mut state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
 
         let mut generator = MoveGenerator::new();
         generator.generate_moves(&state);

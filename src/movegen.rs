@@ -44,25 +44,34 @@ pub fn get_king_attacks(sq: u8) -> Bitboard {
     KING_TABLE.get().expect("Move tables not initialized")[sq as usize]
 }
 
+pub const MAX_MOVES: usize = 512;
+
 #[derive(Clone, Copy)]
 pub struct MoveList {
-    pub moves: [Move; 256],
+    pub moves: [Move; MAX_MOVES],
     pub count: usize,
 }
 
 impl MoveList {
     pub fn new() -> Self {
         Self {
-            moves: [Move::default(); 256],
+            moves: [Move::default(); MAX_MOVES],
             count: 0,
         }
     }
 
     #[inline(always)]
     pub fn push(&mut self, m: Move) {
-        if self.count < 256 {
+        if self.count < MAX_MOVES {
             self.moves[self.count] = m;
             self.count += 1;
+        } else {
+            #[cfg(debug_assertions)]
+            panic!(
+                "MoveList overflow! Attempted to push move {} (limit {})",
+                self.count + 1,
+                MAX_MOVES
+            );
         }
     }
 }

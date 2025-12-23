@@ -2,7 +2,7 @@
 use crate::bitboard::{self, Bitboard};
 use crate::eval;
 use crate::syzygy;
-use crate::movegen::{self, GenType, MoveGenerator};
+use crate::movegen::{self, GenType, MoveGenerator, MAX_MOVES};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, NO_PIECE, P, Q, R, WHITE};
 use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
 use crate::time::TimeManager;
@@ -123,8 +123,8 @@ pub struct MovePicker<'a> {
     tt_move: Option<Move>,
     killers: [Option<Move>; 2],
     counter_move: Option<Move>,
-    move_list: [Move; 256],
-    move_scores: [i32; 256],
+    move_list: [Move; MAX_MOVES],
+    move_scores: [i32; MAX_MOVES],
     move_count: usize,
     move_index: usize,
     bad_captures: [Move; 64],
@@ -170,8 +170,8 @@ impl<'a> MovePicker<'a> {
             tt_move,
             killers,
             counter_move,
-            move_list: [Move::default(); 256],
-            move_scores: [0; 256],
+            move_list: [Move::default(); MAX_MOVES],
+            move_scores: [0; MAX_MOVES],
             move_count: 0,
             move_index: 0,
             bad_captures: [Move::default(); 64],

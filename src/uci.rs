@@ -125,7 +125,7 @@ pub fn uci_loop() {
                 log::info!("Starting search with {} threads", num_threads);
 
                 for i in 0..num_threads {
-                    let mut safe_state = game_state;
+                    let safe_state = game_state;
                     // refresh_accumulator removed - handled in search
 
                     let stop_clone = stop_signal.clone();

@@ -9,7 +9,7 @@ mod tests {
         let state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         // Start position
 
-        let mut search_data = crate::search::SearchData::new();
+        let search_data = crate::search::SearchData::new();
         // search_data needs to be initialized.
 
         // This is a placeholder test.
