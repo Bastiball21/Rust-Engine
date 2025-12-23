@@ -1080,6 +1080,40 @@ impl GameState {
         crate::debug::validate_board_consistency(self);
     }
 
+    pub fn is_consistent(&self) -> bool {
+        let mut occ_both = Bitboard(0);
+        let mut occ_white = Bitboard(0);
+        let mut occ_black = Bitboard(0);
+
+        for sq in 0..64 {
+            let piece = self.board[sq] as usize;
+            if piece != NO_PIECE {
+                if !self.bitboards[piece].get_bit(sq as u8) {
+                    return false;
+                }
+                let mask = Bitboard(1u64 << sq);
+                occ_both = occ_both | mask;
+                if piece < 6 {
+                    occ_white = occ_white | mask;
+                } else {
+                    occ_black = occ_black | mask;
+                }
+            }
+        }
+
+        if occ_both != self.occupancies[BOTH] {
+            return false;
+        }
+        if occ_white != self.occupancies[WHITE] {
+            return false;
+        }
+        if occ_black != self.occupancies[BLACK] {
+            return false;
+        }
+
+        true
+    }
+
     pub fn is_move_consistent(&self, mv: Move) -> bool {
         let source = mv.source() as usize;
         let target = mv.target() as usize;

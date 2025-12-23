@@ -523,6 +523,15 @@ pub fn run_datagen(config: DatagenConfig) {
 
                         positions.push((state.clone(), clamped_score as i16));
 
+                        if !state.is_consistent() {
+                            eprintln!(
+                                "WARNING: State inconsistency detected in datagen! FEN: {}",
+                                state.to_fen()
+                            );
+                            abort_game = true;
+                            break;
+                        }
+
                         if !state.is_move_consistent(final_move) {
                             eprintln!(
                                 "WARNING: Inconsistent move detected in datagen! Move: {:?}, FEN: {}",
