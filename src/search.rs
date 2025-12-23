@@ -189,11 +189,26 @@ impl<'a> MovePicker<'a> {
                 MovePickerStage::TtMove => {
                     self.stage = MovePickerStage::GenerateCaptures;
                     if let Some(mv) = self.tt_move {
+                        // TT Move Verification
+                        // 1. Check if source square has a piece of our color
+                        let from = mv.source();
+                        let piece_on_src = get_piece_type_safe(state, from);
+                        if piece_on_src == NO_PIECE {
+                            continue;
+                        }
+
+                        let side = state.side_to_move;
+                        if side == WHITE {
+                            if piece_on_src > 5 { continue; } // Not white piece
+                        } else {
+                            if piece_on_src < 6 { continue; } // Not black piece
+                        }
+
                         if self.tt.is_pseudo_legal(state, mv) {
                             if mv.is_capture() {
                                 let target_piece = get_piece_type_safe(state, mv.target());
                                 if target_piece == NO_PIECE {
-                                    let piece = get_piece_type_safe(state, mv.source());
+                                    let piece = piece_on_src;
                                     let is_ep = mv.target() == state.en_passant
                                         && (piece == P || piece == p);
                                     if !is_ep {
