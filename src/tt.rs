@@ -427,12 +427,24 @@ impl TranspositionTable {
 
             for i in 0..CLUSTER_SIZE {
                 let entry = &cluster.entries[i];
-                let entry_key = entry.key();
 
                 #[cfg(feature = "packed-tt")]
-                let match_found = (entry_key == (hash & 0xFFFF_0000_0000_0000)) && (entry_key != 0);
+                let (match_found, is_empty) = {
+                    let entry_key = entry.key();
+                    (
+                        (entry_key == (hash & 0xFFFF_0000_0000_0000)) && (entry_key != 0),
+                        entry_key == 0
+                    )
+                };
+
                 #[cfg(not(feature = "packed-tt"))]
-                let match_found = entry_key == hash;
+                let (match_found, is_empty) = {
+                    let data = entry.data.load(Ordering::Relaxed);
+                    let stored_key = entry.key.load(Ordering::Acquire);
+                    let recovered_key = stored_key ^ data;
+                    // data != 0 ensures we don't match empty slots if hash happens to be 0
+                    (recovered_key == hash && data != 0, data == 0)
+                };
 
                 if match_found {
                     let (_, _, _, _, old_move) = entry.probe(hash).unwrap_or((0,0,0,0,None));
@@ -441,7 +453,7 @@ impl TranspositionTable {
                     return;
                 }
 
-                if entry_key == 0 {
+                if is_empty {
                     entry.save(hash, score, depth, flag, current_gen, best_move);
                     return;
                 }
@@ -488,11 +500,10 @@ impl TranspositionTable {
 
                 #[cfg(not(feature = "packed-tt"))]
                 {
-                    if entry.key() == hash {
-                        if let Some((score, depth, flag, _, mut mv)) = entry.probe(hash) {
-                            if let Some(ref mut m) = mv { Self::fix_move(m, state); }
-                            return Some((score, depth, flag, mv));
-                        }
+                    // entry.probe() handles the XOR decoding internally
+                    if let Some((score, depth, flag, _, mut mv)) = entry.probe(hash) {
+                        if let Some(ref mut m) = mv { Self::fix_move(m, state); }
+                        return Some((score, depth, flag, mv));
                     }
                 }
             }
@@ -593,9 +604,11 @@ impl TranspositionTable {
                 unsafe {
                     let cluster = &*shard.table.add(i);
                     for entry in &cluster.entries {
-                        if entry.key() != 0 {
-                            used += 1;
-                        }
+                        #[cfg(feature = "packed-tt")]
+                        if entry.key() != 0 { used += 1; }
+
+                        #[cfg(not(feature = "packed-tt"))]
+                        if entry.data.load(Ordering::Relaxed) != 0 { used += 1; }
                     }
                 }
             }
