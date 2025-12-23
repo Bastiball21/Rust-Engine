@@ -523,6 +523,16 @@ pub fn run_datagen(config: DatagenConfig) {
 
                         positions.push((state.clone(), clamped_score as i16));
 
+                        if !state.is_move_consistent(final_move) {
+                            eprintln!(
+                                "WARNING: Inconsistent move detected in datagen! Move: {:?}, FEN: {}",
+                                final_move,
+                                state.to_fen()
+                            );
+                            abort_game = true;
+                            break;
+                        }
+
                         let next_state = state.make_move(final_move);
 
                         if crate::search::is_check(&next_state, state.side_to_move) {
