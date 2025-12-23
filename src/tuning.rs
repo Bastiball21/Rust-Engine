@@ -227,8 +227,8 @@ fn load_entries(path: &str) -> Vec<TunerEntry> {
     entries
 }
 
-#[cfg(feature = "tuning")]
 fn save_parameters(params: &[Parameter]) {
+    // 1. Update the in-memory globals (Apply the tuning results)
     for p in params {
         let int_val = p.val as i32;
         match p.ptype {
@@ -255,6 +255,41 @@ fn save_parameters(params: &[Parameter]) {
         }
     }
 
-    let mut file = File::create("tuned_params.txt").unwrap();
-    writeln!(file, "Tuned Values Saved.").unwrap();
+    // 2. Write the values to the file in Rust format
+    let mut file = File::create("tuned_params.txt").expect("Could not create file");
+
+    // Helper to format an atomic array into a string
+    let format_table = |name: &str, table: &[std::sync::atomic::AtomicI32]| -> String {
+        let values: Vec<String> = table.iter()
+            .map(|x| x.load(Ordering::Relaxed).to_string())
+            .collect();
+        format!("#[rustfmt::skip] pub static {}: [EvalValue; {}] = a![ {} ];", name, table.len(), values.join(", "))
+    };
+
+    writeln!(file, "// --- TUNED PARAMETERS ---").unwrap();
+    writeln!(file, "// Paste these into src/eval.rs\n").unwrap();
+
+    writeln!(file, "{}", format_table("MG_VALS", &eval::MG_VALS)).unwrap();
+    writeln!(file, "{}", format_table("EG_VALS", &eval::EG_VALS)).unwrap();
+    writeln!(file, "").unwrap();
+
+    writeln!(file, "{}", format_table("MG_PAWN_TABLE", &eval::MG_PAWN_TABLE)).unwrap();
+    writeln!(file, "{}", format_table("EG_PAWN_TABLE", &eval::EG_PAWN_TABLE)).unwrap();
+    
+    writeln!(file, "{}", format_table("MG_KNIGHT_TABLE", &eval::MG_KNIGHT_TABLE)).unwrap();
+    writeln!(file, "{}", format_table("EG_KNIGHT_TABLE", &eval::EG_KNIGHT_TABLE)).unwrap();
+
+    writeln!(file, "{}", format_table("MG_BISHOP_TABLE", &eval::MG_BISHOP_TABLE)).unwrap();
+    writeln!(file, "{}", format_table("EG_BISHOP_TABLE", &eval::EG_BISHOP_TABLE)).unwrap();
+
+    writeln!(file, "{}", format_table("MG_ROOK_TABLE", &eval::MG_ROOK_TABLE)).unwrap();
+    writeln!(file, "{}", format_table("EG_ROOK_TABLE", &eval::EG_ROOK_TABLE)).unwrap();
+
+    writeln!(file, "{}", format_table("MG_QUEEN_TABLE", &eval::MG_QUEEN_TABLE)).unwrap();
+    writeln!(file, "{}", format_table("EG_QUEEN_TABLE", &eval::EG_QUEEN_TABLE)).unwrap();
+
+    writeln!(file, "{}", format_table("MG_KING_TABLE", &eval::MG_KING_TABLE)).unwrap();
+    writeln!(file, "{}", format_table("EG_KING_TABLE", &eval::EG_KING_TABLE)).unwrap();
+
+    println!("Saved best parameters to tuned_params.txt");
 }
