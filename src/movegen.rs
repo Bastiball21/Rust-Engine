@@ -132,7 +132,7 @@ impl MoveGenerator {
 
         // TARGET MASKS
         let target_mask = match gen_type {
-            GenType::All => !occupancy_friendly,
+            GenType::All => !occupancy_friendly & !enemy_king_bb,
             GenType::Captures => occupancy_enemy,
             GenType::Quiets => !occupancy_all,
         };
