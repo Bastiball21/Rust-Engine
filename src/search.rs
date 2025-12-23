@@ -185,38 +185,14 @@ impl<'a> MovePicker<'a> {
 
     pub fn next_move(&mut self, state: &GameState, data: &SearchData) -> Option<Move> {
         loop {
+            let mut move_to_return = None;
+
             match self.stage {
                 MovePickerStage::TtMove => {
                     self.stage = MovePickerStage::GenerateCaptures;
                     if let Some(mv) = self.tt_move {
-                        // TT Move Verification
-                        // 1. Check if source square has a piece of our color
-                        let from = mv.source();
-                        let piece_on_src = get_piece_type_safe(state, from);
-                        if piece_on_src == NO_PIECE {
-                            continue;
-                        }
-
-                        let side = state.side_to_move;
-                        if side == WHITE {
-                            if piece_on_src > 5 { continue; } // Not white piece
-                        } else {
-                            if piece_on_src < 6 { continue; } // Not black piece
-                        }
-
                         if self.tt.is_pseudo_legal(state, mv) {
-                            if mv.is_capture() {
-                                let target_piece = get_piece_type_safe(state, mv.target());
-                                if target_piece == NO_PIECE {
-                                    let piece = piece_on_src;
-                                    let is_ep = mv.target() == state.en_passant
-                                        && (piece == P || piece == p);
-                                    if !is_ep {
-                                        continue;
-                                    }
-                                }
-                            }
-                            return Some(mv);
+                            move_to_return = Some(mv);
                         }
                     }
                 }
@@ -230,7 +206,7 @@ impl<'a> MovePicker<'a> {
                         if Some(mv) != self.tt_move {
                             let see_val = see(state, mv);
                             if see_val >= 0 {
-                                return Some(mv);
+                                move_to_return = Some(mv);
                             } else {
                                 if self.bad_capture_count < 64 {
                                     self.bad_captures[self.bad_capture_count] = mv;
@@ -250,18 +226,22 @@ impl<'a> MovePicker<'a> {
                     self.stage = MovePickerStage::GenerateQuiets;
                     if let Some(k1) = self.killers[0] {
                         if Some(k1) != self.tt_move && self.tt.is_pseudo_legal(state, k1) && !k1.is_capture() {
-                             return Some(k1);
+                             move_to_return = Some(k1);
                         }
                     }
-                    if let Some(k2) = self.killers[1] {
-                        if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(state, k2) && !k2.is_capture() {
-                             return Some(k2);
+                    if move_to_return.is_none() {
+                        if let Some(k2) = self.killers[1] {
+                            if Some(k2) != self.tt_move && Some(k2) != self.killers[0] && self.tt.is_pseudo_legal(state, k2) && !k2.is_capture() {
+                                move_to_return = Some(k2);
+                            }
                         }
                     }
-                    if let Some(cm) = self.counter_move {
-                         if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(state, cm) && !cm.is_capture() {
-                             return Some(cm);
-                         }
+                    if move_to_return.is_none() {
+                        if let Some(cm) = self.counter_move {
+                             if Some(cm) != self.tt_move && Some(cm) != self.killers[0] && Some(cm) != self.killers[1] && self.tt.is_pseudo_legal(state, cm) && !cm.is_capture() {
+                                 move_to_return = Some(cm);
+                             }
+                        }
                     }
                 }
                 MovePickerStage::GenerateQuiets => {
@@ -275,7 +255,7 @@ impl<'a> MovePicker<'a> {
                            && Some(mv) != self.killers[0]
                            && Some(mv) != self.killers[1]
                            && Some(mv) != self.counter_move {
-                            return Some(mv);
+                            move_to_return = Some(mv);
                         }
                     } else {
                         self.stage = if self.captures_only {
@@ -292,7 +272,7 @@ impl<'a> MovePicker<'a> {
                             self.bad_captures[i] = self.bad_captures[i+1];
                         }
                         self.bad_capture_count -= 1;
-                        return Some(mv);
+                        move_to_return = Some(mv);
                     } else {
                         self.stage = MovePickerStage::Done;
                     }
@@ -301,7 +281,34 @@ impl<'a> MovePicker<'a> {
                     return None;
                 }
             }
+
+            if let Some(mv) = move_to_return {
+                if self.is_valid_move(state, mv) {
+                    return Some(mv);
+                }
+            }
         }
+    }
+
+    fn is_valid_move(&self, state: &GameState, mv: Move) -> bool {
+        let from = mv.source();
+        let piece = get_piece_type_safe(state, from);
+        if piece == NO_PIECE { return false; }
+
+        let side = state.side_to_move;
+        if side == WHITE {
+            if piece > 5 { return false; }
+        } else {
+            if piece < 6 { return false; }
+        }
+
+        if mv.is_capture() {
+            let target = mv.target();
+            let target_piece = get_piece_type_safe(state, target);
+            let is_ep = target == state.en_passant && (piece == P || piece == p);
+            if target_piece == NO_PIECE && !is_ep { return false; }
+        }
+        true
     }
 
     fn generate_moves(&mut self, state: &GameState, gen_type: GenType) {
