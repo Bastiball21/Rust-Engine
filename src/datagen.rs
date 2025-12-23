@@ -268,14 +268,16 @@ pub fn run_datagen(config: DatagenConfig) {
                     let mut state;
                     let mut game_ply = 0;
 
-                    if let Some(ref bk) = book_arc {
+                    let random_plies = if let Some(ref bk) = book_arc {
                         let idx = rng.range(0, bk.positions.len());
                         state = bk.positions[idx];
+                        rng.range(2, 5)
                     } else {
                         state = GameState::parse_fen(
                             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
                         );
-                    }
+                        8 + rng.range(0, 2)
+                    };
 
                     let mut result_val = 0.5;
                     let mut finished = false;
@@ -288,50 +290,46 @@ pub fn run_datagen(config: DatagenConfig) {
 
                     let mut abort_game = false;
 
-                    if book_arc.is_none() {
-                        let random_plies = 8 + rng.range(0, 2);
+                    for _ in 0..random_plies {
+                        let mut moves = crate::movegen::MoveGenerator::new();
+                        moves.generate_moves(&state);
 
-                        for _ in 0..random_plies {
-                            let mut moves = crate::movegen::MoveGenerator::new();
-                            moves.generate_moves(&state);
+                        if moves.list.count == 0 {
+                            abort_game = true;
+                            break;
+                        }
 
-                            if moves.list.count == 0 {
-                                abort_game = true;
-                                break;
+                        let mut legal_moves = Vec::with_capacity(64);
+
+                        for i in 0..moves.list.count {
+                            let m = moves.list.moves[i];
+                            let next_state = state.make_move(m);
+                            if !crate::search::is_check(&next_state, state.side_to_move) {
+                                legal_moves.push(m);
                             }
+                        }
 
-                            let mut legal_moves = Vec::with_capacity(64);
+                        if legal_moves.is_empty() {
+                            abort_game = true;
+                            break;
+                        }
 
-                            for i in 0..moves.list.count {
-                                let m = moves.list.moves[i];
-                                let next_state = state.make_move(m);
-                                if !crate::search::is_check(&next_state, state.side_to_move) {
-                                    legal_moves.push(m);
-                                }
-                            }
+                        let idx = rng.range(0, legal_moves.len());
+                        let m = legal_moves[idx];
 
-                            if legal_moves.is_empty() {
-                                abort_game = true;
-                                break;
-                            }
+                        state = state.make_move(m);
+                        game_ply += 1;
 
-                            let idx = rng.range(0, legal_moves.len());
-                            let m = legal_moves[idx];
+                        *rep_history.entry(state.hash).or_insert(0) += 1;
+                        history_vec.push(state.hash);
 
-                            state = state.make_move(m);
-                            game_ply += 1;
-
-                            *rep_history.entry(state.hash).or_insert(0) += 1;
-                            history_vec.push(state.hash);
-
-                            if state.halfmove_clock >= 100 {
-                                abort_game = true;
-                                break;
-                            }
-                            if is_trivial_endgame(&state) {
-                                abort_game = true;
-                                break;
-                            }
+                        if state.halfmove_clock >= 100 {
+                            abort_game = true;
+                            break;
+                        }
+                        if is_trivial_endgame(&state) {
+                            abort_game = true;
+                            break;
                         }
                     }
 
