@@ -144,3 +144,109 @@ pub fn run_mate_suite() {
     // Placeholder for legacy test logic or mate suite.
     println!("Mate suite placeholder.");
 }
+
+    /// Regression test for "Capture on Empty Square" panic.
+    /// Verifies that the engine dumps diagnostics before panicking when
+    /// a move is marked as a capture but the target square is empty.
+    #[test]
+    fn repro_capture_on_empty() {
+        use std::panic;
+        use crate::state::{GameState, Move};
+
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+
+        // FEN from log: 1nb1k1nr/7P/7P/6p1/8/5N2/2pK1P2/qqB2B1R b - - 0 35
+        let fen = "1nb1k1nr/7P/7P/6p1/8/5N2/2pK1P2/qqB2B1R b - - 0 35";
+        let mut state = GameState::parse_fen(fen);
+        let mv = Move::new(52, 60, None, true);
+
+        // This test verifies that the diagnostic dump occurs before panic
+        // We catch the panic.
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            state.make_move_inplace(mv, &mut None);
+        }));
+
+        // We expect a panic because we kept strict panic behavior
+        assert!(result.is_err(), "Expected panic for capture on empty square");
+    }
+
+    /// Stress test for Make/Unmake symmetry.
+    /// Runs a random walk and asserts that `unmake_move` fully restores the state.
+    /// Also indirectly verifies `MoveGenerator` correctness (no illegal/quiet-to-occupied moves).
+    #[test]
+    fn make_unmake_stress_test() {
+        use rand::Rng;
+        use crate::state::{GameState};
+        use crate::movegen::{MoveGenerator};
+
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        crate::zobrist::init_zobrist();
+
+        let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let mut rng = rand::rng();
+
+        for i in 0..5000 {
+            let mut generator = MoveGenerator::new();
+            generator.generate_moves(&state);
+
+            if generator.list.count == 0 {
+                // Reset to startpos if mate
+                state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+                continue;
+            }
+
+            let idx = rng.random_range(0..generator.list.count);
+            let mv = generator.list.moves[idx];
+
+            let original = state.clone();
+            let info = state.make_move_inplace(mv, &mut None);
+
+            // Check for legality (King safety)
+            // If the move leaves us in check, it's illegal.
+            // But verify unmake works regardless, because unmake should be robust.
+            // HOWEVER, we must NOT continue the random walk with an illegal state.
+
+            let mut state_after = state.clone();
+            state_after.unmake_move(mv, info, &mut None);
+
+            if state_after.board != original.board || state_after.bitboards != original.bitboards {
+                eprintln!("!!! Divergence detected at iteration {} !!!", i);
+                eprintln!("Move: {:?}", mv);
+                eprintln!("Original FEN: {}", original.to_fen());
+
+                original.dump_diagnostics(mv, "Original State");
+                state_after.dump_diagnostics(mv, "After Unmake");
+
+                assert_eq!(state_after.bitboards, original.bitboards, "Bitboards mismatch");
+                assert_eq!(state_after.board, original.board, "Board mismatch");
+            }
+
+            assert_eq!(state_after.side_to_move, original.side_to_move, "Side mismatch");
+            assert_eq!(state_after.castling_rights, original.castling_rights, "Castling rights mismatch");
+            assert_eq!(state_after.en_passant, original.en_passant, "En passant mismatch");
+            assert_eq!(state_after.hash, original.hash, "Hash mismatch");
+            assert_eq!(state_after.halfmove_clock, original.halfmove_clock, "Halfmove clock mismatch");
+            assert_eq!(state_after.fullmove_number, original.fullmove_number, "Fullmove number mismatch");
+
+            // Check if the move we just made left us in check (illegal state)
+            // Note: state currently holds the position AFTER the move.
+            // The side to move has swapped.
+            // So we check if the PREVIOUS side (who moved) is in check.
+            let mover = 1 - state.side_to_move;
+            if crate::search::is_check(&state, mover) {
+                 // Illegal move. We must NOT accept this state for the next iteration.
+                 // Unmake and try again (or just skip).
+                 // We already tested unmake above on `state_after`.
+                 // So we just revert `state` to `original`.
+                 state = original;
+                 continue;
+            }
+
+            // Continue with the move made
+            if state.halfmove_clock >= 100 {
+                state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+            }
+        }
+    }

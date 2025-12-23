@@ -788,14 +788,11 @@ impl GameState {
                     }
 
                     if captured_piece == NO_PIECE as u8 {
+                        self.dump_diagnostics(mv, "Capture on empty square");
                         panic!(
-                            "CRITICAL: Capture move on empty square! Move: {:?}, FEN: {}, BB[P]: {:x}, BB[p]: {:x}, Target: {}, Source: {}",
+                            "CRITICAL: Capture move on empty square! Move: {:?}, FEN: {}",
                             mv,
-                            self.to_fen(),
-                            self.bitboards[P].0,
-                            self.bitboards[p].0,
-                            target,
-                            source
+                            self.to_fen()
                         );
                     }
 
@@ -1081,6 +1078,31 @@ impl GameState {
 
         #[cfg(debug_assertions)]
         crate::debug::validate_board_consistency(self);
+    }
+
+    pub fn dump_diagnostics(&self, mv: Move, reason: &str) {
+        eprintln!("=== DIAGNOSTIC DUMP: {} ===", reason);
+        eprintln!("Move: {:?}, FEN: {}", mv, self.to_fen());
+        eprintln!("Source: {}, Target: {}", mv.source(), mv.target());
+        eprintln!("Mailbox (sq: piece):");
+        for rank in (0..8).rev() {
+            for file in 0..8 {
+                let sq = rank * 8 + file;
+                let piece = self.board[sq as usize];
+                if piece != NO_PIECE as u8 {
+                    eprintln!("  sq {}: {}", sq, piece);
+                }
+            }
+        }
+        eprintln!("Bitboards:");
+        for piece_idx in 0..12 {
+            eprintln!("  BB[{}]: {:016x}", piece_idx, self.bitboards[piece_idx].0);
+        }
+        eprintln!("Occupancies:");
+        eprintln!("  White: {:016x}", self.occupancies[WHITE].0);
+        eprintln!("  Black: {:016x}", self.occupancies[BLACK].0);
+        eprintln!("  Both:  {:016x}", self.occupancies[BOTH].0);
+        eprintln!("==============================");
     }
 }
 
