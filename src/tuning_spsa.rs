@@ -77,6 +77,9 @@ impl SpsaState {
 }
 
 pub fn run_tuning() {
+    // Attempt to load NNUE for evaluation accuracy, fallback to HCE if missing
+    crate::nnue::init_nnue("nn-aether.nnue");
+
     let mut state = SpsaState::load("spsa_state.json");
     let mut rng = StdRng::seed_from_u64(state.rng_seed);
 
@@ -263,7 +266,8 @@ fn play_game(
     let mut rep = std::collections::HashMap::new();
     rep.insert(state.hash, 1);
 
-    let limit = search::Limits::FixedNodes(5000);
+    // Increased node count to reduce draw rate and noise
+    let limit = search::Limits::FixedNodes(10000);
     let mut sd = search::SearchData::new();
     let stop = Arc::new(AtomicBool::new(false));
 
