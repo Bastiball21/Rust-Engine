@@ -1080,6 +1080,50 @@ impl GameState {
         crate::debug::validate_board_consistency(self);
     }
 
+    /// Checks if the board state is internally consistent.
+    /// Returns false if Bitboards, Board array, or Occupancies disagree.
+    pub fn is_consistent(&self) -> bool {
+        // 1. Check Occupancy Coherence
+        let calc_white = self.bitboards[P].0
+            | self.bitboards[N].0
+            | self.bitboards[B].0
+            | self.bitboards[R].0
+            | self.bitboards[Q].0
+            | self.bitboards[K].0;
+        let calc_black = self.bitboards[p].0
+            | self.bitboards[n].0
+            | self.bitboards[b].0
+            | self.bitboards[r].0
+            | self.bitboards[q].0
+            | self.bitboards[k].0;
+
+        if self.occupancies[WHITE].0 != calc_white || self.occupancies[BLACK].0 != calc_black {
+            return false;
+        }
+        if self.occupancies[BOTH].0 != (calc_white | calc_black) {
+            return false;
+        }
+
+        // 2. Check Board Array vs Bitboards (Sampling or Full)
+        // We check that every non-empty square in Board corresponds to a Bitboard bit.
+        // And ensure no pieces exist in Board that aren't in Bitboards.
+        for sq in 0..64 {
+            let piece = self.board[sq];
+            if piece != NO_PIECE as u8 {
+                if !self.bitboards[piece as usize].get_bit(sq as u8) {
+                    return false; // Board says piece, Bitboard says empty
+                }
+            } else {
+                // Board says empty, ensure Occupancy agrees
+                if self.occupancies[BOTH].get_bit(sq as u8) {
+                    return false; // Occupancy says piece, Board says empty (The Panic Case)
+                }
+            }
+        }
+
+        true
+    }
+
     pub fn dump_diagnostics(&self, mv: Move, reason: &str) {
         eprintln!("=== DIAGNOSTIC DUMP: {} ===", reason);
         eprintln!("Move: {:?}, FEN: {}", mv, self.to_fen());

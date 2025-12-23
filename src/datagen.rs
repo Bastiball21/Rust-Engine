@@ -337,11 +337,31 @@ pub fn run_datagen(config: DatagenConfig) {
                         continue;
                     }
 
+                    // --- CONSISTENCY CHECK ---
+                    if !state.is_consistent() {
+                        println!(
+                            "WARNING: State corruption detected after random plies. Aborting game."
+                        );
+                        continue;
+                    }
+                    // -------------------------
+
                     if is_trivial_endgame(&state) {
                         continue;
                     }
 
                     loop {
+                        // --- CONSISTENCY CHECK ---
+                        if !state.is_consistent() {
+                            println!(
+                                "WARNING: State corruption detected at ply {}. Aborting game.",
+                                game_ply
+                            );
+                            abort_game = true;
+                            break;
+                        }
+                        // -------------------------
+
                         if let Some(&count) = rep_history.get(&state.hash) {
                             if count >= 3 {
                                 result_val = 0.5;
@@ -518,6 +538,16 @@ pub fn run_datagen(config: DatagenConfig) {
                             }
                             valid
                         };
+
+                        // --- FAIL-SAFE CHECK FOR CAPTURE ON EMPTY ---
+                        if final_move.is_capture()
+                            && state.board[final_move.target() as usize] == crate::state::NO_PIECE as u8
+                        {
+                            println!("CRITICAL: Generated capture on empty square. Aborting.");
+                            abort_game = true;
+                            break;
+                        }
+                        // --------------------------------------------
 
                         let clamped_score = search_score.clamp(-32000, 32000);
 
