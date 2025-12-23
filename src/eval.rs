@@ -569,19 +569,74 @@ unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
 
 // --- TRACE (Required for Tuning) ---
 pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
-    let (fix_mg, fix_eg) = evaluate_fixed(state);
-    trace.fixed_mg = fix_mg;
-    trace.fixed_eg = fix_eg;
-    for piece in 0..6 {
-        let w_count = state.bitboards[piece].count_bits() as i8;
-        let b_count = state.bitboards[piece + 6].count_bits() as i8;
-        let net = w_count - b_count;
-        if net != 0 {
-            trace.add(piece, net);
-            trace.add(piece + 6, net);
+    // 1. Calculate Fixed Score (Evaluation terms NOT being tuned, e.g. Mobility, Kingsafety if not in params)
+    // We assume 'evaluate_fixed' returns the FULL score currently, which includes PSTs.
+    // Since we want to TUNE PSTs, we must subtract their current values from the fixed score
+    // OR (better) just calculate the truly fixed parts.
+
+    // For simplicity with your current setup:
+    // We will initialize fixed score to 0 and ONLY add the terms you are NOT tuning.
+    // (Assuming you are only tuning Material and PSTs for now)
+
+    trace.fixed_mg = 0;
+    trace.fixed_eg = 0;
+
+    // 2. Loop through all pieces to add Material and PST terms to the trace
+    for piece_type in 0..6 {
+        for side in [crate::state::WHITE, crate::state::BLACK] {
+            let piece_idx = if side == crate::state::WHITE {
+                piece_type
+            } else {
+                piece_type + 6
+            };
+            let mut bb = state.bitboards[piece_idx];
+
+            // Sign: +1 for White, -1 for Black (relative to the trace perspective)
+            // The tuner expects counts. White = +1 count, Black = -1 count.
+            let sign = if side == crate::state::WHITE { 1 } else { -1 };
+
+            while bb.0 != 0 {
+                let sq = bb.get_lsb_index() as usize;
+                bb.pop_bit(sq as u8);
+
+                // --- A. Material Term ---
+                // Material MG index: 0..5
+                // Material EG index: 6..11
+                if side == crate::state::WHITE {
+                    trace.add(piece_type, 1); // MG Material White
+                    trace.add(piece_type + 6, 1); // EG Material White
+                } else {
+                    trace.add(piece_type, -1); // MG Material Black
+                    trace.add(piece_type + 6, -1); // EG Material Black
+                }
+
+                // --- B. PST Term ---
+                // Tuning params structure:
+                // Indices 0-11: Material
+                // Indices 12+: PSTs.
+                // Each piece type has 128 params (64 MG + 64 EG).
+                // Offset = 12 + (piece_type * 128)
+
+                let pst_base = 12 + (piece_type * 128);
+
+                // For PSTs, the table is always from White's perspective.
+                // If Black, we must flip the square (sq ^ 56).
+                let table_sq = if side == crate::state::WHITE {
+                    sq ^ 56
+                } else {
+                    sq
+                };
+
+                let mg_idx = pst_base + table_sq;
+                let eg_idx = pst_base + 64 + table_sq;
+
+                trace.add(mg_idx, sign);
+                trace.add(eg_idx, sign);
+            }
         }
     }
-    // Tuning: just return optimized eval, assuming trace is only for fixed params
+
+    // Return value doesn't matter much for trace generation, but we return HCE for consistency
     evaluate_hce(state, -32000, 32000)
 }
 
