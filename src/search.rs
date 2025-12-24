@@ -446,7 +446,7 @@ impl<'a> SearchInfo<'a> {
 
     #[inline(always)]
     pub fn check_time(&mut self) {
-        if self.nodes % 1024 == 0 {
+        if (self.nodes & 1023) == 0 {
             if let Some(gn) = self.global_nodes {
                 gn.fetch_add(1024, Ordering::Relaxed);
             }
@@ -908,8 +908,6 @@ pub fn search(
     let mut last_score = 0;
 
     let _nodes_at_root = 0;
-    let mut best_move_stability = 0;
-    let mut previous_best_move: Option<Move> = None;
 
     let mut root_state = *state;
 
@@ -942,6 +940,9 @@ pub fn search(
             }
 
             if score <= alpha {
+                if let Limits::FixedTime(ref mut tm) = info.limits {
+                    tm.report_aspiration_fail(2); // FLAG_ALPHA (Fail Low)
+                }
                 beta = (alpha + beta) / 2;
                 alpha = (-INFINITY).max(alpha - delta);
                 delta += delta / 2 + delta / 4;
@@ -959,31 +960,29 @@ pub fn search(
             break;
         }
 
+        let mut forced_margin = None;
         if let Limits::FixedTime(ref mut tm) = info.limits {
-            if main_thread && depth > 4 {
-                let current_best_move = tt.get_move(state.hash, state, thread_id);
-                if current_best_move == previous_best_move {
-                    best_move_stability += 1;
-                } else {
-                    best_move_stability = 0;
+            if main_thread {
+                let best_move_found = tt.get_move(state.hash, state, thread_id).unwrap_or_default();
+                tm.report_completed_depth(depth as i32, score, best_move_found);
+
+                forced_margin = tm.check_for_forced_move(depth as i32);
+
+                if tm.check_soft_limit() {
+                    info.stopped = true;
+                    info.stop_signal.store(true, Ordering::Relaxed);
                 }
-                previous_best_move = current_best_move;
-
-                let stability_factor = match best_move_stability {
-                    0 => 2.50,
-                    1 => 1.20,
-                    2 => 0.90,
-                    3 => 0.80,
-                    _ => 0.75,
-                };
-
-                tm.set_stability_factor(stability_factor);
             }
+        }
 
-            if main_thread && tm.check_soft_limit() {
-                info.stopped = true;
-                info.stop_signal.store(true, Ordering::Relaxed);
-            }
+        if let Some(margin) = forced_margin {
+             let best_move_found = tt.get_move(state.hash, state, thread_id).unwrap_or_default();
+             let is_forced = is_forced_move(&mut root_state, margin, &mut info, best_move_found, score, depth);
+             if is_forced {
+                 if let Limits::FixedTime(ref mut tm) = info.limits {
+                     tm.report_forced_move(depth as i32);
+                 }
+             }
         }
 
         if main_thread {
@@ -1402,6 +1401,16 @@ fn negamax(
             }
         }
 
+        // SEE Pruning for Quiet Moves
+        if !is_pv
+           && !in_check
+           && is_quiet
+           && new_depth < 8
+           && !see_ge(state, mv, -50 * (new_depth as i32))
+        {
+             continue;
+        }
+
         let unmake_info = state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
 
         let our_side = state.side_to_move;
@@ -1685,4 +1694,36 @@ pub fn format_move_uci(mv: Move, state: &GameState) -> String {
         }
     }
     s
+}
+
+fn is_forced_move(
+    state: &mut GameState,
+    margin: i32,
+    info: &mut SearchInfo,
+    best_move: Move,
+    value: i32,
+    depth: u8
+) -> bool {
+    let r_beta = (value - margin).max(-MATE_SCORE + 1);
+    let r_depth = (depth.saturating_sub(1)) / 2;
+
+    // Check if other moves fail low
+    let score = negamax(
+        state,
+        r_depth,
+        r_beta - 1,
+        r_beta,
+        info,
+        0,
+        false,
+        None, None,
+        Some(best_move), // Exclude the best move
+        false
+    );
+
+    score < r_beta
+}
+
+fn see_ge(state: &GameState, mv: Move, threshold: i32) -> bool {
+    see(state, mv) >= threshold
 }
