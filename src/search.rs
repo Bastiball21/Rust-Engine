@@ -20,6 +20,9 @@ const INFINITY: i32 = 32000;
 const MATE_VALUE: i32 = 31000;
 const MATE_SCORE: i32 = 30000;
 
+pub const WINNING_CAPTURE_BONUS: i32 = 10_000_000;
+pub const MIN_WINNING_SEE_SCORE: i32 = WINNING_CAPTURE_BONUS - 16384;
+
 // Continuation History
 type ContHistTable = [[[i32; 64]; 12]; 768];
 
@@ -131,11 +134,10 @@ impl SearchData {
 enum MovePickerStage {
     TtMove,
     GenerateCaptures,
-    GoodCaptures,
+    YieldGoodCaptures,
     Killers,
     GenerateQuiets,
-    Quiets,
-    BadCaptures,
+    YieldRemaining,
     Done,
 }
 
@@ -148,10 +150,7 @@ pub struct MovePicker<'a> {
     move_scores: [i32; MAX_MOVES],
     move_count: usize,
     move_index: usize,
-    bad_captures: [Move; 64],
-    bad_capture_count: usize,
     tt: &'a TranspositionTable,
-    // state removed to allow mutable borrow in loop
     captures_only: bool,
     cont_index: Option<usize>,
     thread_id: Option<usize>,
@@ -195,8 +194,6 @@ impl<'a> MovePicker<'a> {
             move_scores: [0; MAX_MOVES],
             move_count: 0,
             move_index: 0,
-            bad_captures: [Move::default(); 64],
-            bad_capture_count: 0,
             tt,
             captures_only,
             cont_index,
@@ -244,28 +241,44 @@ impl<'a> MovePicker<'a> {
                 MovePickerStage::GenerateCaptures => {
                     self.generate_moves(state, GenType::Captures);
                     self.score_captures(state, data);
-                    self.stage = MovePickerStage::GoodCaptures;
+                    self.stage = MovePickerStage::YieldGoodCaptures;
                 }
-                MovePickerStage::GoodCaptures => {
-                    if let Some(mv) = self.pick_best_move() {
-                        if Some(mv) != self.tt_move {
-                            let see_val = see(state, mv);
-                            if see_val >= 0 {
-                                return Some(mv);
-                            } else {
-                                if self.bad_capture_count < 64 {
-                                    self.bad_captures[self.bad_capture_count] = mv;
-                                    self.bad_capture_count += 1;
-                                }
-                            }
-                        }
-                    } else {
-                        self.stage = if self.captures_only {
-                            MovePickerStage::Done
-                        } else {
-                            MovePickerStage::Killers
+                MovePickerStage::YieldGoodCaptures => {
+                    loop {
+                        let mv = match self.pick_best_move() {
+                            Some(m) => m,
+                            None => break, // No more moves
                         };
+
+                        // Check if we ran out of "Good" captures (score < MIN_WINNING_SEE_SCORE)
+                        // self.move_index has been incremented by pick_best_move,
+                        // so the move we just picked is at self.move_index - 1
+                        if self.move_scores[self.move_index - 1] < MIN_WINNING_SEE_SCORE {
+                             // Put back and transition to next stage
+                             self.move_index -= 1;
+                             break;
+                        }
+
+                        if Some(mv) == self.tt_move {
+                             continue;
+                        }
+
+                        // Lazy SEE
+                        if !see_ge(state, mv, 0) {
+                            // Penalize
+                            self.move_scores[self.move_index - 1] -= WINNING_CAPTURE_BONUS;
+                            self.move_index -= 1; // Put back
+                            continue;
+                        }
+
+                        return Some(mv);
                     }
+
+                    self.stage = if self.captures_only {
+                        MovePickerStage::YieldRemaining
+                    } else {
+                        MovePickerStage::Killers
+                    };
                 }
                 MovePickerStage::Killers => {
                     self.stage = MovePickerStage::GenerateQuiets;
@@ -286,37 +299,26 @@ impl<'a> MovePicker<'a> {
                     }
                 }
                 MovePickerStage::GenerateQuiets => {
-                    self.generate_moves(state, GenType::Quiets);
-                    self.score_quiets(state, data);
-                    self.stage = MovePickerStage::Quiets;
+                    let start = self.move_count;
+                    self.generate_moves_append(state, GenType::Quiets);
+                    self.score_quiets(state, data, start);
+                    self.stage = MovePickerStage::YieldRemaining;
                 }
-                MovePickerStage::Quiets => {
-                    if let Some(mv) = self.pick_best_move() {
-                        if Some(mv) != self.tt_move
-                           && Some(mv) != self.killers[0]
-                           && Some(mv) != self.killers[1]
-                           && Some(mv) != self.counter_move {
-                            return Some(mv);
-                        }
-                    } else {
-                        self.stage = if self.captures_only {
-                            MovePickerStage::Done
-                        } else {
-                            MovePickerStage::BadCaptures
+                MovePickerStage::YieldRemaining => {
+                    while self.move_index < self.move_count {
+                        let mv = match self.pick_best_move() {
+                             Some(m) => m,
+                             None => break,
                         };
-                    }
-                }
-                MovePickerStage::BadCaptures => {
-                    if self.bad_capture_count > 0 {
-                        let mv = self.bad_captures[0];
-                        for i in 0..self.bad_capture_count - 1 {
-                            self.bad_captures[i] = self.bad_captures[i+1];
+
+                        if Some(mv) == self.tt_move
+                           || (!self.captures_only && (Some(mv) == self.killers[0] || Some(mv) == self.killers[1] || Some(mv) == self.counter_move))
+                        {
+                            continue;
                         }
-                        self.bad_capture_count -= 1;
                         return Some(mv);
-                    } else {
-                        self.stage = MovePickerStage::Done;
                     }
+                    self.stage = MovePickerStage::Done;
                 }
                 MovePickerStage::Done => {
                     return None;
@@ -333,6 +335,17 @@ impl<'a> MovePicker<'a> {
         self.move_index = 0;
     }
 
+    fn generate_moves_append(&mut self, state: &GameState, gen_type: GenType) {
+         let mut generator = MoveGenerator::new();
+         generator.generate_moves_type(state, gen_type);
+         for i in 0..generator.list.count {
+             if self.move_count < MAX_MOVES {
+                 self.move_list[self.move_count] = generator.list.moves[i];
+                 self.move_count += 1;
+             }
+         }
+    }
+
     fn pick_best_move(&mut self) -> Option<Move> {
         if self.move_index >= self.move_count {
             return None;
@@ -341,6 +354,9 @@ impl<'a> MovePicker<'a> {
         let mut best_score = -INFINITY;
         let mut best_idx = self.move_index;
 
+        // Optimization: if we are in YieldRemaining, we might have mixed scores (negatives from bad captures, positives from quiets).
+        // Standard sort is fine.
+
         for i in self.move_index..self.move_count {
             if self.move_scores[i] > best_score {
                 best_score = self.move_scores[i];
@@ -348,8 +364,10 @@ impl<'a> MovePicker<'a> {
             }
         }
 
-        self.move_list.swap(self.move_index, best_idx);
-        self.move_scores.swap(self.move_index, best_idx);
+        if best_idx != self.move_index {
+            self.move_list.swap(self.move_index, best_idx);
+            self.move_scores.swap(self.move_index, best_idx);
+        }
 
         let mv = self.move_list[self.move_index];
         self.move_index += 1;
@@ -357,24 +375,28 @@ impl<'a> MovePicker<'a> {
     }
 
     fn score_captures(&mut self, state: &GameState, data: &SearchData) {
+        let mvv_lva = [
+            [105, 104, 103, 102, 101, 100],
+            [205, 204, 203, 202, 201, 200],
+            [305, 304, 303, 302, 301, 300],
+            [405, 404, 403, 402, 401, 400],
+            [505, 504, 503, 502, 501, 500],
+            [605, 604, 603, 602, 601, 600],
+        ];
+
         for i in 0..self.move_count {
             let mv = self.move_list[i];
             let attacker = get_piece_type_safe(state, mv.source());
             let victim = get_victim_type(state, mv.target());
 
-            let mvv_lva = [
-                [105, 104, 103, 102, 101, 100],
-                [205, 204, 203, 202, 201, 200],
-                [305, 304, 303, 302, 301, 300],
-                [405, 404, 403, 402, 401, 400],
-                [505, 504, 503, 502, 501, 500],
-                [605, 604, 603, 602, 601, 600],
-            ];
-            let mut score = if victim < 12 {
-                 100000 + mvv_lva[victim % 6][attacker % 6]
+            // Base WINNING_CAPTURE_BONUS
+            let mut score = WINNING_CAPTURE_BONUS;
+
+            if victim < 12 {
+                 score += mvv_lva[victim % 6][attacker % 6];
             } else {
-                 100000 + 100
-            };
+                 score += 100; // En Passant or similar?
+            }
 
             if attacker < 12 && victim < 12 {
                 score += data.capture_history[attacker][mv.target() as usize][victim % 6] / 16;
@@ -383,11 +405,16 @@ impl<'a> MovePicker<'a> {
         }
     }
 
-    fn score_quiets(&mut self, state: &GameState, data: &SearchData) {
-        for i in 0..self.move_count {
+    fn score_quiets(&mut self, state: &GameState, data: &SearchData, start_idx: usize) {
+        let us = state.side_to_move;
+        let enemy_pawns = state.bitboards[if us == WHITE { p } else { P }];
+        let enemy_pawn_attacks = bitboard::pawn_attacks(enemy_pawns, 1 - us);
+
+        for i in start_idx..self.move_count {
             let mv = self.move_list[i];
             let from = mv.source() as usize;
             let to = mv.target() as usize;
+
             let mut score = data.history[from][to];
             if let Some(c_idx) = self.cont_index {
                 let piece = get_piece_type_safe(state, mv.source());
@@ -395,6 +422,17 @@ impl<'a> MovePicker<'a> {
                     score += data.cont_history[c_idx][piece][to];
                 }
             }
+
+            // Threat Logic
+            // Bonus for moving away from pawn attack
+            if enemy_pawn_attacks.get_bit(from as u8) {
+                score += 500;
+            }
+            // Penalty for moving into pawn attack
+            if enemy_pawn_attacks.get_bit(to as u8) {
+                score -= 1000;
+            }
+
             self.move_scores[i] = score;
         }
     }

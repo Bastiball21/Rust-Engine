@@ -6,6 +6,10 @@ mod tests {
 
     #[test]
     fn test_tactical_move_ordering() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+
         // Simple test to ensure move ordering logic compiles and runs
         let state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         // Start position
