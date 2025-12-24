@@ -1088,58 +1088,72 @@ impl GameState {
              added.push((r_piece, target as usize));
 
         } else {
-             let mut moved_piece = self.board[target as usize] as usize;
+            // 1. Identify what is currently at the target (the piece that moved there)
+            let mut moved_piece = self.board[target as usize] as usize;
 
-             // Robustness: If board says NO_PIECE (Desync), try to find it in bitboards
-             if moved_piece == NO_PIECE {
-                 for p_idx in 0..12 {
-                     if self.bitboards[p_idx].get_bit(target) {
-                         moved_piece = p_idx;
-                         break;
-                     }
-                 }
-             }
+            // Robustness: If board says NO_PIECE (Desync), try to find it in bitboards
+            if moved_piece == NO_PIECE {
+                for p_idx in 0..12 {
+                    if self.bitboards[p_idx].get_bit(target) {
+                        moved_piece = p_idx;
+                        break;
+                    }
+                }
+            }
 
-             // If still NO_PIECE, we have a critical failure, but we must avoid index panic.
-             // We can't do much if we don't know what piece moved.
-             // But usually bitboard scan should find it.
-             if moved_piece != NO_PIECE {
-                 self.bitboards[moved_piece].pop_bit(target);
-                 removed.push((moved_piece, target as usize));
-             }
+            // 2. Remove it from target (NNUE update)
+            if moved_piece != NO_PIECE {
+                removed.push((moved_piece, target as usize));
+                self.bitboards[moved_piece].pop_bit(target);
+            }
 
-             self.board[target as usize] = NO_PIECE as u8;
-             self.occupancies[side].pop_bit(target);
-             self.occupancies[BOTH].pop_bit(target);
-             removed.push((moved_piece, target as usize));
+            self.board[target as usize] = NO_PIECE as u8;
+            self.occupancies[side].pop_bit(target);
+            self.occupancies[BOTH].pop_bit(target);
 
-             let original_piece = if promotion.is_some() {
-                  if side == WHITE { P } else { p }
-             } else {
-                  moved_piece
-             };
+            // 3. Put the original piece back at the source
+            let original_piece = if promotion.is_some() {
+                if side == WHITE {
+                    P
+                } else {
+                    p
+                }
+            } else {
+                moved_piece
+            };
 
-             self.bitboards[original_piece].set_bit(source);
-             self.board[source as usize] = original_piece as u8;
-             self.occupancies[side].set_bit(source);
-             self.occupancies[BOTH].set_bit(source);
-             added.push((original_piece, source as usize));
+            // Critical: If moved_piece was NO_PIECE (desync), we might panic here if we use it.
+            // But if we are here, we hope moved_piece is valid or original_piece is valid.
+            // We'll trust the robustness check above found it.
+            if original_piece != NO_PIECE {
+                self.bitboards[original_piece].set_bit(source);
+                self.board[source as usize] = original_piece as u8;
+                self.occupancies[side].set_bit(source);
+                self.occupancies[BOTH].set_bit(source);
+                added.push((original_piece, source as usize));
+            }
 
-             if is_capture {
-                  let captured = info.captured as usize;
-                  let enemy_side = 1 - side;
-                  let cap_sq = if (original_piece == P || original_piece == p) && target == info.en_passant {
-                       if side == WHITE { target - 8 } else { target + 8 }
-                  } else {
-                       target
-                  };
+            // 4. Restore captured piece
+            if is_capture {
+                let captured = info.captured as usize;
+                let cap_sq =
+                    if (original_piece == P || original_piece == p) && target == info.en_passant {
+                        if side == WHITE {
+                            target - 8
+                        } else {
+                            target + 8
+                        }
+                    } else {
+                        target
+                    };
 
-                  self.bitboards[captured].set_bit(cap_sq);
-                  self.board[cap_sq as usize] = captured as u8;
-                  self.occupancies[enemy_side].set_bit(cap_sq);
-                  self.occupancies[BOTH].set_bit(cap_sq);
-                  added.push((captured, cap_sq as usize));
-             }
+                self.bitboards[captured].set_bit(cap_sq);
+                self.board[cap_sq as usize] = captured as u8;
+                let enemy_side = 1 - side;
+                self.occupancies[enemy_side].set_bit(cap_sq);
+                self.occupancies[BOTH].set_bit(cap_sq);
+                added.push((captured, cap_sq as usize));
+            }
         }
 
         if let Some(acc) = accumulators {
