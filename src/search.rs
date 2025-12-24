@@ -1393,7 +1393,7 @@ fn negamax(
 
         if score < singular_beta {
             extension = 1;
-            if !is_pv && score < singular_beta - 30 {
+            if !is_pv && score < singular_beta - (new_depth as i32 * 2) {
                 extension = 2;
             }
         } else if singular_beta >= beta {
@@ -1504,6 +1504,9 @@ fn negamax(
 
                 let history = info.data.history[mv.source() as usize][mv.target() as usize];
                 lmr_r -= history / 8192;
+                if !improving {
+                    lmr_r += 1;
+                }
 
                 reduction = lmr_r.max(0) as u8;
             }
@@ -1561,11 +1564,13 @@ fn negamax(
         state.unmake_move(mv, unmake_info, &mut Some(&mut info.data.accumulators));
 
         // Validation
-        if let Err(e) = state.validate_consistency() {
-             eprintln!("CRITICAL: Consistency failure after unmake move {:?}", mv);
-             eprintln!("Error: {}", e);
-             state.dump_diagnostics(mv, "Unmake Failure");
-             panic!("Consistency Check Failed");
+        if cfg!(debug_assertions) || (info.nodes & 0xFFFF) == 0 {
+            if let Err(e) = state.validate_consistency() {
+                 eprintln!("CRITICAL: Consistency failure after unmake move {:?}", mv);
+                 eprintln!("Error: {}", e);
+                 state.dump_diagnostics(mv, "Unmake Failure");
+                 panic!("Consistency Check Failed");
+            }
         }
 
         if info.stopped {
