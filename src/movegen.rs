@@ -2,46 +2,9 @@
 use crate::bitboard::{self, Bitboard};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use std::cmp::{max, min};
-use std::sync::OnceLock;
-
-// --- SAFE GLOBAL TABLES ---
-static KNIGHT_TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
-static KING_TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
 
 pub fn init_move_tables() {
-    KNIGHT_TABLE.get_or_init(|| {
-        let mut table = [Bitboard(0); 64];
-        for square in 0..64 {
-            table[square] = bitboard::mask_knight_attacks(square as u8);
-        }
-        table
-    });
-
-    KING_TABLE.get_or_init(|| {
-        let mut table = [Bitboard(0); 64];
-        for square in 0..64 {
-            table[square] = bitboard::mask_king_attacks(square as u8);
-        }
-        table
-    });
-}
-
-// --- ACCESSORS ---
-
-#[inline(always)]
-pub fn get_knight_attacks(sq: u8) -> Bitboard {
-    if sq >= 64 {
-        return Bitboard(0);
-    } // Safety check
-    KNIGHT_TABLE.get().expect("Move tables not initialized")[sq as usize]
-}
-
-#[inline(always)]
-pub fn get_king_attacks(sq: u8) -> Bitboard {
-    if sq >= 64 {
-        return Bitboard(0);
-    } // Safety check
-    KING_TABLE.get().expect("Move tables not initialized")[sq as usize]
+    // Moved to bitboard.rs init_magic_tables
 }
 
 pub const MAX_MOVES: usize = 512;
@@ -218,7 +181,7 @@ impl MoveGenerator {
         while knights.0 != 0 {
             let src = knights.get_lsb_index() as u8;
             knights.pop_bit(src);
-            let mut attacks = get_knight_attacks(src) & target_mask;
+            let mut attacks = bitboard::get_knight_attacks(src) & target_mask;
             while attacks.0 != 0 {
                 let t = attacks.get_lsb_index() as u8;
                 attacks.pop_bit(t);
@@ -281,7 +244,7 @@ impl MoveGenerator {
         let king = state.bitboards[king_type];
         if king.0 != 0 {
             let src = king.get_lsb_index() as u8;
-            let mut attacks = get_king_attacks(src) & target_mask;
+            let mut attacks = bitboard::get_king_attacks(src) & target_mask;
             while attacks.0 != 0 {
                 let t = attacks.get_lsb_index() as u8;
                 attacks.pop_bit(t);
@@ -414,7 +377,7 @@ pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -
     } else {
         state.bitboards[n]
     };
-    if (get_knight_attacks(square) & knights).0 != 0 {
+    if (bitboard::get_knight_attacks(square) & knights).0 != 0 {
         return true;
     }
 
@@ -446,7 +409,7 @@ pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -
     } else {
         state.bitboards[k]
     };
-    if (get_king_attacks(square) & king).0 != 0 {
+    if (bitboard::get_king_attacks(square) & king).0 != 0 {
         return true;
     }
 
@@ -484,13 +447,13 @@ pub fn gives_check(state: &GameState, mv: Move) -> bool {
     let occ_bb = Bitboard(occ);
 
     let attacks = match piece {
-        N | n => get_knight_attacks(to),
+        N | n => bitboard::get_knight_attacks(to),
         B | b => bitboard::get_bishop_attacks(to, occ_bb),
         R | r => bitboard::get_rook_attacks(to, occ_bb),
         Q | q => bitboard::get_queen_attacks(to, occ_bb),
         P => bitboard::pawn_attacks(Bitboard(1u64 << to), WHITE),
         p => bitboard::pawn_attacks(Bitboard(1u64 << to), BLACK),
-        K | k => get_king_attacks(to),
+        K | k => bitboard::get_king_attacks(to),
         _ => Bitboard(0),
     };
 

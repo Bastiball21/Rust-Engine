@@ -9,6 +9,7 @@ pub const FILE_H: u64 = 0x8080808080808080;
 pub const RANK_1: u64 = 0x00000000000000FF;
 pub const RANK_8: u64 = 0xFF00000000000000;
 
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Bitboard(pub u64);
 
@@ -25,12 +26,26 @@ static BISHOP_OFFSETS: OnceLock<[usize; 64]> = OnceLock::new();
 static ROOK_MASKS: OnceLock<[Bitboard; 64]> = OnceLock::new();
 static BISHOP_MASKS: OnceLock<[Bitboard; 64]> = OnceLock::new();
 
+// Precomputed Move Tables
+static KNIGHT_TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
+static KING_TABLE: OnceLock<[Bitboard; 64]> = OnceLock::new();
+
 static FILE_MASKS: OnceLock<[Bitboard; 64]> = OnceLock::new();
 static RANK_MASKS: OnceLock<[Bitboard; 64]> = OnceLock::new();
 static PASSED_PAWN_MASKS: OnceLock<[[Bitboard; 64]; 2]> = OnceLock::new();
 static KING_ZONE_MASKS: OnceLock<[Bitboard; 64]> = OnceLock::new();
 
 // --- SAFE ACCESSORS ---
+#[inline(always)]
+pub fn get_knight_attacks(sq: u8) -> Bitboard {
+    KNIGHT_TABLE.get().expect("Tables not init")[sq as usize]
+}
+
+#[inline(always)]
+pub fn get_king_attacks(sq: u8) -> Bitboard {
+    KING_TABLE.get().expect("Tables not init")[sq as usize]
+}
+
 #[inline(always)]
 pub fn file_mask(sq: usize) -> Bitboard {
     FILE_MASKS.get().expect("Tables not init")[sq]
@@ -77,6 +92,7 @@ impl Bitboard {
     }
     #[inline(always)]
     pub fn get_lsb_index(&self) -> u32 {
+        debug_assert!(self.0 != 0);
         self.0.trailing_zeros()
     }
 
@@ -123,6 +139,7 @@ impl std::ops::Not for Bitboard {
 }
 
 // --- INITIALIZATION ---
+#[cold]
 pub fn init_magic_tables() {
     if ROOK_TABLE.get().is_some() {
         return;
@@ -131,6 +148,20 @@ pub fn init_magic_tables() {
     init_eval_masks();
 
     println!("Initializing PEXT Bitboards...");
+
+    // Initialize Knight/King Tables
+    let mut n_attacks = [Bitboard(0); 64];
+    let mut k_attacks = [Bitboard(0); 64];
+    for sq in 0..64 {
+        n_attacks[sq] = mask_knight_attacks(sq as u8);
+        k_attacks[sq] = mask_king_attacks(sq as u8);
+    }
+    if KNIGHT_TABLE.get().is_none() {
+        let _ = KNIGHT_TABLE.set(n_attacks);
+    }
+    if KING_TABLE.get().is_none() {
+        let _ = KING_TABLE.set(k_attacks);
+    }
 
     // 1. Initialize Masks
     let mut r_masks = [Bitboard(0); 64];
@@ -216,6 +247,7 @@ pub fn init_magic_tables() {
     }
 }
 
+#[cold]
 fn init_eval_masks() {
     let mut f_masks = [Bitboard(0); 64];
     let mut r_masks = [Bitboard(0); 64];
@@ -318,20 +350,17 @@ fn pext_safe(val: u64, mask: u64) -> u64 {
     }
 }
 
-fn software_pext(val: u64, mask: u64) -> u64 {
+fn software_pext(val: u64, mut mask: u64) -> u64 {
     let mut res = 0;
-    let mut bb = val;
-    let mut m = mask;
     let mut bit = 1;
-    while m != 0 {
-        if (m & 1) != 0 {
-            if (bb & 1) != 0 {
-                res |= bit;
-            }
-            bit <<= 1;
+
+    while mask != 0 {
+        let lsb = mask & (!mask + 1);
+        if val & lsb != 0 {
+            res |= bit;
         }
-        bb >>= 1;
-        m >>= 1;
+        bit <<= 1;
+        mask ^= lsb;
     }
     res
 }
@@ -341,16 +370,21 @@ pub fn mask_rook_attacks(square: u8) -> Bitboard {
     let mut attacks = Bitboard(0);
     let r = square / 8;
     let f = square % 8;
-    for r_itr in 1..7 {
-        if r_itr != r {
-            attacks.set_bit(r_itr * 8 + f);
-        }
+
+    for r2 in (r + 1)..7 {
+        attacks.set_bit(r2 * 8 + f);
     }
-    for f_itr in 1..7 {
-        if f_itr != f {
-            attacks.set_bit(r * 8 + f_itr);
-        }
+    for r2 in (1..r).rev() {
+        attacks.set_bit(r2 * 8 + f);
     }
+
+    for f2 in (f + 1)..7 {
+        attacks.set_bit(r * 8 + f2);
+    }
+    for f2 in (1..f).rev() {
+        attacks.set_bit(r * 8 + f2);
+    }
+
     attacks
 }
 

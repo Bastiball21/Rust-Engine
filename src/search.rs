@@ -532,7 +532,7 @@ fn gives_check_fast(state: &GameState, mv: Move) -> bool {
     }
 
     let attacks = match piece {
-        1 | 7 => crate::movegen::get_knight_attacks(mv.target()),
+        1 | 7 => crate::bitboard::get_knight_attacks(mv.target()),
         0 => bitboard::pawn_attacks(Bitboard(1 << mv.target()), WHITE),
         6 => bitboard::pawn_attacks(Bitboard(1 << mv.target()), BLACK),
         _ => {
