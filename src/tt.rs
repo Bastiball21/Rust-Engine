@@ -637,15 +637,45 @@ impl TranspositionTable {
                 false
             }
             P => {
-                if to == from + 8 && !is_occupied { return true; }
-                if from >= 8 && from <= 15 && to == from + 16 && !state.occupancies[2].get_bit(from + 8) && !is_occupied { return true; }
-                if (to == from + 7 || to == from + 9) && (is_occupied || to == state.en_passant) { return true; }
+                let file_from = from % 8;
+                let file_to = to % 8;
+                if to == from + 8 && !is_occupied {
+                    return true;
+                }
+                if from >= 8
+                    && from <= 15
+                    && to == from + 16
+                    && !state.occupancies[2].get_bit(from + 8)
+                    && !is_occupied
+                {
+                    return true;
+                }
+                if (to == from + 7 || to == from + 9)
+                    && (is_occupied || to == state.en_passant)
+                {
+                    return (file_from as i8 - file_to as i8).abs() == 1;
+                }
                 false
             }
             p => {
-                if to == from.wrapping_sub(8) && !is_occupied { return true; }
-                if from >= 48 && from <= 55 && to == from.wrapping_sub(16) && !state.occupancies[2].get_bit(from.wrapping_sub(8)) && !is_occupied { return true; }
-                if (to == from.wrapping_sub(7) || to == from.wrapping_sub(9)) && (is_occupied || to == state.en_passant) { return true; }
+                let file_from = from % 8;
+                let file_to = to % 8;
+                if to == from.wrapping_sub(8) && !is_occupied {
+                    return true;
+                }
+                if from >= 48
+                    && from <= 55
+                    && to == from.wrapping_sub(16)
+                    && !state.occupancies[2].get_bit(from.wrapping_sub(8))
+                    && !is_occupied
+                {
+                    return true;
+                }
+                if (to == from.wrapping_sub(7) || to == from.wrapping_sub(9))
+                    && (is_occupied || to == state.en_passant)
+                {
+                    return (file_from as i8 - file_to as i8).abs() == 1;
+                }
                 false
             }
             R | r => bitboard::get_rook_attacks(from, state.occupancies[2]).get_bit(to),
