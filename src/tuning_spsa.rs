@@ -264,7 +264,9 @@ fn play_game(
     rep.insert(state.hash, 1);
 
     let limit = search::Limits::FixedNodes(5000);
-    let mut sd = search::SearchData::new();
+    // SPSA games are also independent
+    let correction_history = Arc::new(search::CorrectionTable::new());
+    let mut sd = search::SearchData::new(correction_history);
     let stop = Arc::new(AtomicBool::new(false));
 
     let mut consecutive_draw_score = 0;

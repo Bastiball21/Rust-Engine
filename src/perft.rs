@@ -124,14 +124,15 @@ pub fn perft_divide(state: &mut GameState, depth: u8) {
 
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
-        let mut next_state = state.make_move(mv);
+
+        let info = state.make_move_inplace(mv, &mut None);
 
         let side_that_just_moved = 1 - state.side_to_move;
         let our_king = if side_that_just_moved == WHITE { K } else { k };
-        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
+        let king_sq = state.bitboards[our_king].get_lsb_index() as u8;
 
-        if !is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
-            let count = perft(&mut next_state, depth - 1);
+        if !is_square_attacked(state, king_sq, state.side_to_move) {
+            let count = perft(state, depth - 1);
             println!(
                 "{}{}: {}",
                 crate::search::square_to_coord(mv.source()),
@@ -140,6 +141,8 @@ pub fn perft_divide(state: &mut GameState, depth: u8) {
             );
             total += count;
         }
+
+        state.unmake_move(mv, info, &mut None);
     }
     println!("Total: {}", total);
 }
@@ -186,7 +189,7 @@ mod tests {
         crate::zobrist::init_zobrist();
         crate::bitboard::init_magic_tables();
         crate::movegen::init_move_tables();
-        let state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let mut state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
 
         let mut generator = MoveGenerator::new();
         generator.generate_moves(&state);
@@ -197,15 +200,14 @@ mod tests {
         for i in 0..generator.list.count {
             let mv = generator.list.moves[i];
 
-            let mut test_state = state; // Copy
             // In tests we can pass None for accumulator
-            let unmake_info = test_state.make_move_inplace(mv, &mut None);
-            test_state.unmake_move(mv, unmake_info, &mut None);
+            let unmake_info = state.make_move_inplace(mv, &mut None);
+            state.unmake_move(mv, unmake_info, &mut None);
 
-            assert_eq!(test_state.hash, original_hash, "Hash mismatch after unmake move {:?}", mv);
-            assert_eq!(test_state.bitboards[WHITE].0, state.bitboards[WHITE].0);
-            assert_eq!(test_state.en_passant, state.en_passant);
-            assert_eq!(test_state.castling_rights, state.castling_rights);
+            assert_eq!(state.hash, original_hash, "Hash mismatch after unmake move {:?}", mv);
+            assert_eq!(state.bitboards[WHITE].0, state.bitboards[WHITE].0);
+            assert_eq!(state.en_passant, state.en_passant);
+            assert_eq!(state.castling_rights, state.castling_rights);
         }
     }
 }

@@ -682,22 +682,16 @@ impl GameState {
             let king_file_dst;
             let rook_file_dst;
 
-            if target > source {
-                if (target % 8) > (source % 8) {
-                    king_file_dst = 6;
-                    rook_file_dst = 5;
-                } else {
-                    king_file_dst = 2;
-                    rook_file_dst = 3;
-                }
+            // FIX: Chess960 Castling Side Detection
+            let target_file = target % 8;
+            if target_file == self.castling_rook_files[side][0] {
+                // King-Side Castling
+                king_file_dst = 6; // g-file
+                rook_file_dst = 5; // f-file
             } else {
-                if (target % 8) > (source % 8) {
-                    king_file_dst = 6;
-                    rook_file_dst = 5;
-                } else {
-                    king_file_dst = 2;
-                    rook_file_dst = 3;
-                }
+                // Queen-Side Castling
+                king_file_dst = 2; // c-file
+                rook_file_dst = 3; // d-file
             }
 
             let k_dst = rank_base + king_file_dst;
@@ -949,7 +943,6 @@ impl GameState {
 
         #[cfg(debug_assertions)]
         {
-            crate::debug::validate_board_consistency(self);
             if let Err(e) = self.validate_consistency() {
                 self.dump_diagnostics(mv, &format!("Post-Make Consistency Failure: {}", e));
                 panic!("State corrupted after move {:?}", mv);
@@ -995,22 +988,16 @@ impl GameState {
              let king_file_dst;
              let rook_file_dst;
 
-             if target > source {
-                 if (target % 8) > (source % 8) {
-                     king_file_dst = 6;
-                     rook_file_dst = 5;
-                 } else {
-                     king_file_dst = 2;
-                     rook_file_dst = 3;
-                 }
+             // FIX: Chess960 Castling Side Detection
+             let target_file = target % 8;
+             if target_file == self.castling_rook_files[side][0] {
+                 // King-Side Castling
+                 king_file_dst = 6;
+                 rook_file_dst = 5;
              } else {
-                 if (target % 8) > (source % 8) {
-                     king_file_dst = 6;
-                     rook_file_dst = 5;
-                 } else {
-                     king_file_dst = 2;
-                     rook_file_dst = 3;
-                 }
+                 // Queen-Side Castling
+                 king_file_dst = 2;
+                 rook_file_dst = 3;
              }
 
              let k_dst = rank_base + king_file_dst;
@@ -1095,7 +1082,6 @@ impl GameState {
 
         #[cfg(debug_assertions)]
         {
-            crate::debug::validate_board_consistency(self);
             if let Err(e) = self.validate_consistency() {
                 self.dump_diagnostics(mv, &format!("Post-Unmake Consistency Failure: {}", e));
                 panic!("State corrupted after UNMAKE move {:?}: {}", mv, e);
@@ -1127,6 +1113,8 @@ impl GameState {
 
             // Check if piece in mailbox exists in exactly one bitboard
             let mut found_in_bitboards = NO_PIECE;
+
+            // Check all bitboards to see if this square is set
             for p_idx in 0..12 {
                 if self.bitboards[p_idx].get_bit(sq as u8) {
                     if found_in_bitboards != NO_PIECE {

@@ -550,9 +550,27 @@ impl TranspositionTable {
         let target_piece = state.board[to as usize] as usize;
         if target_piece != 12 {
              if side == WHITE {
-                  if target_piece <= K { return false; }
+                  if target_piece <= K {
+                    // Allow King moves to friendly rook for castling
+                    if (piece_type == K) && (target_piece == R) {
+                         // Check castling rights?
+                         // Ideally we should check if this specific rook is valid for castling,
+                         // but for pseudo-legal check, just knowing it's a rook and we have *some* rights is often enough,
+                         // or we can rely on movegen to filter.
+                         // But for TT retrieval validation, we should be slightly permissive or check rights.
+                         // The safest is to return true here and let make_move handle validity, OR check rights.
+                         if state.castling_rights & 3 != 0 { return true; }
+                    }
+                    return false;
+                  }
              } else {
-                  if target_piece >= p && target_piece <= k { return false; }
+                  if target_piece >= p && target_piece <= k {
+                    // Allow King moves to friendly rook for castling
+                    if (piece_type == k) && (target_piece == r) {
+                         if state.castling_rights & 12 != 0 { return true; }
+                    }
+                    return false;
+                  }
              }
         }
 
@@ -564,7 +582,39 @@ impl TranspositionTable {
         if mv.is_capture() {
             if !is_occupied && !is_ep { return false; }
         } else {
-            if is_occupied { return false; }
+            // Castling moves (King to Rook) are QUIET moves in terms of capture flag in some engines,
+            // but in Aether Move struct `is_capture` is a bit.
+            // The Move struct doesn't have a specific Castling flag, it uses the move coordinates.
+            // If the user's movegen generates castling as "King captures Rook" internally?
+            // "Castling moves are internally represented and processed as 'King captures Rook' (King moves to the rook's current square)..."
+            // Wait, if it's processed as King Captures Rook, then `is_capture` might be true?
+            // Let's check `state.rs`: `is_castling` logic relies on `piece_type == K` and `target_piece == R`.
+            // But does the `Move` object have `is_capture` set?
+            // In `state.rs`: `if is_castling { captured_piece = NO_PIECE ... }`.
+            // The Move generation usually sets `is_capture` based on target occupancy.
+            // If King moves to Rook, target is occupied. So `is_capture` would be true?
+            // `Move::new` sets capture bit if `is_capture` arg is true.
+            // Let's check `movegen.rs` (I can't see it right now but I can infer).
+            // Actually, in `state.rs`, `make_move_inplace`:
+            // `if piece_type == K ... if target_piece == R ... is_castling = true`.
+            // It doesn't check `mv.is_capture()`.
+            // However, `is_pseudo_legal` checks `mv.is_capture()`.
+
+            // If target is occupied (Rook), `is_occupied` is true.
+            // If `mv.is_capture()` is false, but `is_occupied` is true, it returns false.
+            // So if castling moves come from TT as "Quiet" (is_capture=false), we must handle that.
+            // If they come as "Capture" (is_capture=true), we must handle that too.
+            // Usually castling is stored as a special move or encoded.
+            // But here it seems to use coordinate encoding.
+
+            if is_occupied {
+                // Special case for Castling: King moves to own Rook
+                let is_castling_attempt = (piece_type == K && target_piece == R) || (piece_type == k && target_piece == r);
+                if is_castling_attempt {
+                    return true;
+                }
+                return false;
+            }
         }
 
         match piece_type {

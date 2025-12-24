@@ -252,7 +252,9 @@ pub fn run_datagen(config: DatagenConfig) {
                         .seed
                         .wrapping_add((t_id as u64).wrapping_mul(0xDEADBEEF)),
                 );
-                let mut search_data = search::SearchData::new();
+                // Each datagen thread has its own correction history (games are independent)
+                let correction_history = Arc::new(search::CorrectionTable::new());
+                let mut search_data = search::SearchData::new(correction_history.clone());
 
                 let mut rep_history: HashMap<u64, u8> = HashMap::with_capacity(300);
                 let mut history_vec: Vec<u64> = Vec::with_capacity(300);
