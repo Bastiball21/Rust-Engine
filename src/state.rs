@@ -715,16 +715,24 @@ impl GameState {
             let king_file_dst;
             let rook_file_dst;
 
-            // FIX: Chess960 Castling Side Detection
+            // Chess960 Castling Side Detection
             let target_file = target % 8;
             if target_file == self.castling_rook_files[side][0] {
                 // King-Side Castling
                 king_file_dst = 6; // g-file
                 rook_file_dst = 5; // f-file
-            } else {
+            } else if target_file == self.castling_rook_files[side][1] {
                 // Queen-Side Castling
                 king_file_dst = 2; // c-file
                 rook_file_dst = 3; // d-file
+            } else {
+                panic!(
+                    "CRITICAL: Castling target {} matches neither King-side ({}) nor Queen-side ({}) rook file. FEN: {}",
+                    target_file,
+                    self.castling_rook_files[side][0],
+                    self.castling_rook_files[side][1],
+                    self.to_fen()
+                );
             }
 
             let k_dst = rank_base + king_file_dst;
@@ -1029,16 +1037,24 @@ impl GameState {
              let king_file_dst;
              let rook_file_dst;
 
-             // FIX: Chess960 Castling Side Detection
+             // Chess960 Castling Side Detection
              let target_file = target % 8;
              if target_file == self.castling_rook_files[side][0] {
                  // King-Side Castling
                  king_file_dst = 6;
                  rook_file_dst = 5;
-             } else {
+             } else if target_file == self.castling_rook_files[side][1] {
                  // Queen-Side Castling
                  king_file_dst = 2;
                  rook_file_dst = 3;
+             } else {
+                 panic!(
+                     "CRITICAL: Unmake Castling target {} matches neither King-side ({}) nor Queen-side ({}) rook file. FEN: {}",
+                     target_file,
+                     self.castling_rook_files[side][0],
+                     self.castling_rook_files[side][1],
+                     self.to_fen()
+                 );
              }
 
              let k_dst = rank_base + king_file_dst;
