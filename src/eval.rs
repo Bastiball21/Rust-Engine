@@ -238,6 +238,275 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         return if state.side_to_move == BLACK { -beta } else { beta };
     }
 
+    // PASS 2: Expensive (Calculated in helper to allow reuse for trace fixed score)
+    let (c_mg, c_eg) = evaluate_complex_terms(state, &pawn_entry);
+    mg += c_mg;
+    eg += c_eg;
+
+    let phase_clamped = phase.clamp(0, 24);
+    let mut score = (mg * phase_clamped + eg * (24 - phase_clamped)) / 24;
+    let scale = crate::endgame::get_scale_factor(state, score);
+    score = (score * scale) / 128;
+
+    score
+}
+
+fn get_pst(piece: usize, sq: usize, side: usize, is_mg: bool) -> i32 {
+    let index = if side == WHITE { sq ^ 56 } else { sq };
+    match piece {
+        P => {
+            if is_mg {
+                MG_PAWN_TABLE[index].val()
+            } else {
+                EG_PAWN_TABLE[index].val()
+            }
+        }
+        N => {
+            if is_mg {
+                MG_KNIGHT_TABLE[index].val()
+            } else {
+                EG_KNIGHT_TABLE[index].val()
+            }
+        }
+        B => {
+            if is_mg {
+                MG_BISHOP_TABLE[index].val()
+            } else {
+                EG_BISHOP_TABLE[index].val()
+            }
+        }
+        R => {
+            if is_mg {
+                MG_ROOK_TABLE[index].val()
+            } else {
+                EG_ROOK_TABLE[index].val()
+            }
+        }
+        Q => {
+            if is_mg {
+                MG_QUEEN_TABLE[index].val()
+            } else {
+                EG_QUEEN_TABLE[index].val()
+            }
+        }
+        K => {
+            if is_mg {
+                MG_KING_TABLE[index].val()
+            } else {
+                EG_KING_TABLE[index].val()
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn get_piece_value(state: &GameState, sq: u8) -> i32 {
+    for piece in 0..12 {
+        if state.bitboards[piece].get_bit(sq) {
+            return match piece % 6 {
+                0 => 100,   // Pawn
+                1 => 320,   // Knight
+                2 => 330,   // Bishop
+                3 => 500,   // Rook
+                4 => 900,   // Queen
+                5 => 20000, // King
+                _ => 0,
+            };
+        }
+    }
+    0
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::arch::x86_64::*;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
+    let v128 = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+    let v64 = _mm_add_epi32(v128, _mm_shuffle_epi32(v128, 0b00_00_11_10));
+    let v32 = _mm_add_epi32(v64, _mm_shuffle_epi32(v64, 0b00_00_00_01));
+    _mm_cvtsi128_si32(v32)
+}
+
+// --- TRACE (Required for Tuning) ---
+pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
+    // 1. Calculate Fixed Score (Evaluation terms NOT being tuned, e.g. Mobility, Kingsafety if not in params)
+    // This includes Pawn Structure scores + All Complex Terms (Mobility, Threats, King Safety, etc.)
+    // It EXCLUDES Material and PSTs (which are tuned below).
+
+    let pawn_entry = crate::pawn::evaluate_pawns(state);
+    let (c_mg, c_eg) = evaluate_complex_terms(state, &pawn_entry);
+
+    trace.fixed_mg = pawn_entry.score_mg + c_mg;
+    trace.fixed_eg = pawn_entry.score_eg + c_eg;
+
+    // 2. Loop through all pieces to add Material and PST terms to the trace
+    for piece_type in 0..6 {
+        for side in [crate::state::WHITE, crate::state::BLACK] {
+            let piece_idx = if side == crate::state::WHITE { piece_type } else { piece_type + 6 };
+            let mut bb = state.bitboards[piece_idx];
+
+            // Sign: +1 for White, -1 for Black (relative to the trace perspective)
+            // The tuner expects counts. White = +1 count, Black = -1 count.
+            let sign = if side == crate::state::WHITE { 1 } else { -1 };
+
+            while bb.0 != 0 {
+                let sq = bb.get_lsb_index() as usize;
+                bb.pop_bit(sq as u8);
+
+                // --- A. Material Term ---
+                // Material MG index: 0..5
+                // Material EG index: 6..11
+                if side == crate::state::WHITE {
+                    trace.add(piece_type, 1);      // MG Material White
+                    trace.add(piece_type + 6, 1);  // EG Material White
+                } else {
+                    trace.add(piece_type, -1);     // MG Material Black
+                    trace.add(piece_type + 6, -1); // EG Material Black
+                }
+
+                // --- B. PST Term ---
+                // Tuning params structure:
+                // Indices 0-11: Material
+                // Indices 12+: PSTs.
+                // Each piece type has 128 params (64 MG + 64 EG).
+                // Offset = 12 + (piece_type * 128)
+
+                let pst_base = 12 + (piece_type * 128);
+
+                // For PSTs, the table is always from White's perspective.
+                // If Black, we must flip the square (sq ^ 56).
+                let table_sq = if side == crate::state::WHITE { sq ^ 56 } else { sq };
+
+                let mg_idx = pst_base + table_sq;
+                let eg_idx = pst_base + 64 + table_sq;
+
+                trace.add(mg_idx, sign);
+                trace.add(eg_idx, sign);
+            }
+        }
+    }
+
+    // Return value doesn't matter much for trace generation, but we return HCE for consistency
+    evaluate_hce(state, -32000, 32000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{GameState, BLACK};
+
+    #[test]
+    fn test_king_hanging_bug() {
+        // Initialize globals
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        crate::eval::init_eval();
+        crate::threat::init_threat();
+
+        // Position: White King at e1, Black Rook at e2. King is in check.
+        // No other pieces. King is attacked by Rook.
+        // King square e1 is NOT defended by any white piece (no other pieces).
+        // Bug: King is marked as "hanging", penalty 20,000 applied.
+        let fen = "8/8/8/8/8/8/4r3/4K3 w - - 0 1";
+        let state = GameState::parse_fen(fen);
+
+        // Pass None for accumulator (no NNUE in HCE test)
+        let score = evaluate(&state, &None, -32000, 32000);
+        println!("Score: {}", score);
+
+        // Without fix, score should be roughly:
+        // Material: 0 vs 500 (Rook) -> -500
+        // Hanging King: -20,000
+        // Total: ~ -20,500
+        //
+        // With fix, score should be ~ -500 (plus/minus PST/positional).
+
+        assert!(
+            score > -10000,
+            "Score {} indicates King is treated as hanging (approx -20000)",
+            score
+        );
+    }
+
+    #[test]
+    fn test_hce_evaluation_perspective() {
+        // Initialize globals
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        crate::eval::init_eval();
+        crate::threat::init_threat();
+
+        // 1. Black Winning Position (Black King safe, White King in corner, Black Queen attacking)
+        // FEN: 7k/8/8/8/8/8/8/K6q b - - 0 1
+        // Black to move.
+        let fen = "7k/8/8/8/8/8/8/K6q b - - 0 1";
+        let state = GameState::parse_fen(fen);
+
+        assert_eq!(state.side_to_move, BLACK);
+
+        // Ensure NNUE is NOT used
+        assert!(crate::nnue::NETWORK.get().is_none());
+
+        let score = evaluate(&state, &None, -32000, 32000);
+
+        println!("Score for Black (Winning): {}", score);
+
+        // Score should be positive because it is relative to side to move (Black).
+        // Since Black is winning, score > 0.
+        // If bug exists, it returns absolute score (negative), so score < 0.
+        assert!(
+            score > 0,
+            "Score should be positive for winning side (Black), got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_trace_fixed_score() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+        crate::eval::init_eval();
+        crate::threat::init_threat();
+
+        // Start position
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let state = GameState::parse_fen(fen);
+        let mut trace = Trace::new();
+        trace_evaluate(&state, &mut trace);
+
+        println!("Start Pos - Fixed MG: {}, EG: {}", trace.fixed_mg, trace.fixed_eg);
+
+        // In start position:
+        // Mobility: 0 (blocked)
+        // Threats: 0
+        // King Safety: Might be non-zero (shield, etc)
+        // Pawn Structure: 0
+
+        // Let's take a middlegame position where mobility and threats are present
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let state = GameState::parse_fen(fen);
+        let mut trace = Trace::new();
+        trace_evaluate(&state, &mut trace);
+
+        println!("Complex Pos - Fixed MG: {}, EG: {}", trace.fixed_mg, trace.fixed_eg);
+
+        // We expect NON-ZERO fixed scores because mobility and threats exist here.
+        assert!(trace.fixed_mg != 0 || trace.fixed_eg != 0, "Fixed score should not be zero in a complex position");
+    }
+}
+
+fn evaluate_complex_terms(
+    state: &GameState,
+    pawn_entry: &crate::pawn::PawnEntry,
+) -> (i32, i32) {
+    let mut mg = 0;
+    let mut eg = 0;
+
     // PASS 2: Expensive
     let mut king_rings = [Bitboard(0); 2];
     let mut king_sqs = [0usize; 2];
@@ -470,250 +739,5 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
     mg -= hanging_val * us_sign;
     eg -= (hanging_val / 2) * us_sign;
 
-    let phase_clamped = phase.clamp(0, 24);
-    let mut score = (mg * phase_clamped + eg * (24 - phase_clamped)) / 24;
-    let scale = crate::endgame::get_scale_factor(state, score);
-    score = (score * scale) / 128;
-
-    score
-}
-
-fn evaluate_fixed(state: &GameState) -> (i32, i32) {
-    let mut mg = 0;
-    let mut eg = 0;
-
-    for piece in 0..6 {
-        let mut bb = state.bitboards[piece];
-        while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize;
-            bb.pop_bit(sq as u8);
-            mg += MG_VALS[piece].val() + get_pst(piece, sq, WHITE, true);
-            eg += EG_VALS[piece].val() + get_pst(piece, sq, WHITE, false);
-        }
-        let mut bb = state.bitboards[piece + 6];
-        while bb.0 != 0 {
-            let sq = bb.get_lsb_index() as usize;
-            bb.pop_bit(sq as u8);
-            mg -= MG_VALS[piece].val() + get_pst(piece, sq, BLACK, true);
-            eg -= EG_VALS[piece].val() + get_pst(piece, sq, BLACK, false);
-        }
-    }
     (mg, eg)
-}
-
-fn get_pst(piece: usize, sq: usize, side: usize, is_mg: bool) -> i32 {
-    let index = if side == WHITE { sq ^ 56 } else { sq };
-    match piece {
-        P => {
-            if is_mg {
-                MG_PAWN_TABLE[index].val()
-            } else {
-                EG_PAWN_TABLE[index].val()
-            }
-        }
-        N => {
-            if is_mg {
-                MG_KNIGHT_TABLE[index].val()
-            } else {
-                EG_KNIGHT_TABLE[index].val()
-            }
-        }
-        B => {
-            if is_mg {
-                MG_BISHOP_TABLE[index].val()
-            } else {
-                EG_BISHOP_TABLE[index].val()
-            }
-        }
-        R => {
-            if is_mg {
-                MG_ROOK_TABLE[index].val()
-            } else {
-                EG_ROOK_TABLE[index].val()
-            }
-        }
-        Q => {
-            if is_mg {
-                MG_QUEEN_TABLE[index].val()
-            } else {
-                EG_QUEEN_TABLE[index].val()
-            }
-        }
-        K => {
-            if is_mg {
-                MG_KING_TABLE[index].val()
-            } else {
-                EG_KING_TABLE[index].val()
-            }
-        }
-        _ => 0,
-    }
-}
-
-fn get_piece_value(state: &GameState, sq: u8) -> i32 {
-    for piece in 0..12 {
-        if state.bitboards[piece].get_bit(sq) {
-            return match piece % 6 {
-                0 => 100,   // Pawn
-                1 => 320,   // Knight
-                2 => 330,   // Bishop
-                3 => 500,   // Rook
-                4 => 900,   // Queen
-                5 => 20000, // King
-                _ => 0,
-            };
-        }
-    }
-    0
-}
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use std::arch::x86_64::*;
-
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[inline(always)]
-unsafe fn hsum_256_epi32(v: __m256i) -> i32 {
-    let v128 = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
-    let v64 = _mm_add_epi32(v128, _mm_shuffle_epi32(v128, 0b00_00_11_10));
-    let v32 = _mm_add_epi32(v64, _mm_shuffle_epi32(v64, 0b00_00_00_01));
-    _mm_cvtsi128_si32(v32)
-}
-
-// --- TRACE (Required for Tuning) ---
-pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
-    // 1. Calculate Fixed Score (Evaluation terms NOT being tuned, e.g. Mobility, Kingsafety if not in params)
-    // We assume 'evaluate_fixed' returns the FULL score currently, which includes PSTs.
-    // Since we want to TUNE PSTs, we must subtract their current values from the fixed score
-    // OR (better) just calculate the truly fixed parts.
-    
-    // For simplicity with your current setup: 
-    // We will initialize fixed score to 0 and ONLY add the terms you are NOT tuning.
-    // (Assuming you are only tuning Material and PSTs for now)
-    
-    trace.fixed_mg = 0; 
-    trace.fixed_eg = 0;
-
-    // 2. Loop through all pieces to add Material and PST terms to the trace
-    for piece_type in 0..6 {
-        for side in [crate::state::WHITE, crate::state::BLACK] {
-            let piece_idx = if side == crate::state::WHITE { piece_type } else { piece_type + 6 };
-            let mut bb = state.bitboards[piece_idx];
-            
-            // Sign: +1 for White, -1 for Black (relative to the trace perspective)
-            // The tuner expects counts. White = +1 count, Black = -1 count.
-            let sign = if side == crate::state::WHITE { 1 } else { -1 };
-
-            while bb.0 != 0 {
-                let sq = bb.get_lsb_index() as usize;
-                bb.pop_bit(sq as u8);
-
-                // --- A. Material Term ---
-                // Material MG index: 0..5
-                // Material EG index: 6..11
-                if side == crate::state::WHITE {
-                    trace.add(piece_type, 1);      // MG Material White
-                    trace.add(piece_type + 6, 1);  // EG Material White
-                } else {
-                    trace.add(piece_type, -1);     // MG Material Black
-                    trace.add(piece_type + 6, -1); // EG Material Black
-                }
-
-                // --- B. PST Term ---
-                // Tuning params structure:
-                // Indices 0-11: Material
-                // Indices 12+: PSTs. 
-                // Each piece type has 128 params (64 MG + 64 EG).
-                // Offset = 12 + (piece_type * 128)
-                
-                let pst_base = 12 + (piece_type * 128);
-                
-                // For PSTs, the table is always from White's perspective.
-                // If Black, we must flip the square (sq ^ 56).
-                let table_sq = if side == crate::state::WHITE { sq ^ 56 } else { sq };
-                
-                let mg_idx = pst_base + table_sq;
-                let eg_idx = pst_base + 64 + table_sq;
-
-                trace.add(mg_idx, sign);
-                trace.add(eg_idx, sign);
-            }
-        }
-    }
-
-    // Return value doesn't matter much for trace generation, but we return HCE for consistency
-    evaluate_hce(state, -32000, 32000)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::{GameState, BLACK};
-
-    #[test]
-    fn test_king_hanging_bug() {
-        // Initialize globals
-        crate::zobrist::init_zobrist();
-        crate::bitboard::init_magic_tables();
-        crate::movegen::init_move_tables();
-        crate::eval::init_eval();
-        crate::threat::init_threat();
-
-        // Position: White King at e1, Black Rook at e2. King is in check.
-        // No other pieces. King is attacked by Rook.
-        // King square e1 is NOT defended by any white piece (no other pieces).
-        // Bug: King is marked as "hanging", penalty 20,000 applied.
-        let fen = "8/8/8/8/8/8/4r3/4K3 w - - 0 1";
-        let state = GameState::parse_fen(fen);
-
-        // Pass None for accumulator (no NNUE in HCE test)
-        let score = evaluate(&state, &None, -32000, 32000);
-        println!("Score: {}", score);
-
-        // Without fix, score should be roughly:
-        // Material: 0 vs 500 (Rook) -> -500
-        // Hanging King: -20,000
-        // Total: ~ -20,500
-        //
-        // With fix, score should be ~ -500 (plus/minus PST/positional).
-
-        assert!(
-            score > -10000,
-            "Score {} indicates King is treated as hanging (approx -20000)",
-            score
-        );
-    }
-
-    #[test]
-    fn test_hce_evaluation_perspective() {
-        // Initialize globals
-        crate::zobrist::init_zobrist();
-        crate::bitboard::init_magic_tables();
-        crate::movegen::init_move_tables();
-        crate::eval::init_eval();
-        crate::threat::init_threat();
-
-        // 1. Black Winning Position (Black King safe, White King in corner, Black Queen attacking)
-        // FEN: 7k/8/8/8/8/8/8/K6q b - - 0 1
-        // Black to move.
-        let fen = "7k/8/8/8/8/8/8/K6q b - - 0 1";
-        let state = GameState::parse_fen(fen);
-
-        assert_eq!(state.side_to_move, BLACK);
-
-        // Ensure NNUE is NOT used
-        assert!(crate::nnue::NETWORK.get().is_none());
-
-        let score = evaluate(&state, &None, -32000, 32000);
-
-        println!("Score for Black (Winning): {}", score);
-
-        // Score should be positive because it is relative to side to move (Black).
-        // Since Black is winning, score > 0.
-        // If bug exists, it returns absolute score (negative), so score < 0.
-        assert!(
-            score > 0,
-            "Score should be positive for winning side (Black), got {}",
-            score
-        );
-    }
 }
