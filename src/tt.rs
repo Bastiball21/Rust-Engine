@@ -530,52 +530,7 @@ impl TranspositionTable {
 
 
     pub fn is_pseudo_legal(&self, state: &crate::state::GameState, mv: Move) -> bool {
-        let from = mv.source();
-        let to = mv.target();
-        let side = state.side_to_move;
-
-        // 1. Valid Squares
-        if from >= 64 || to >= 64 || from == to {
-            return false;
-        }
-
-        // 2. Source Piece Exists
-        let piece_type = state.board[from as usize] as usize;
-        if piece_type == 12 {
-            return false;
-        }
-
-        // 3. Piece Belongs to Side to Move
-        if side == WHITE {
-            if piece_type > K {
-                return false;
-            }
-        } else {
-            if piece_type < p || piece_type > k {
-                return false;
-            }
-        }
-
-        // 4. Target Square Check (Not Own Piece)
-        let target_piece = state.board[to as usize] as usize;
-        if target_piece != 12 {
-            // Check if target is friendly
-            let is_friendly = if side == WHITE {
-                target_piece <= K
-            } else {
-                target_piece >= p && target_piece <= k
-            };
-
-            if is_friendly {
-                // EXCEPTION: Castling (King takes own Rook)
-                let is_castling = (piece_type == K && target_piece == R) || (piece_type == k && target_piece == r);
-                if !is_castling {
-                    return false;
-                }
-            }
-        }
-
-        true
+        crate::movegen::is_move_pseudo_legal(state, mv)
     }
 
     pub fn hashfull(&self) -> usize {

@@ -261,8 +261,8 @@ impl GameState {
         }
 
         state.castling_rook_files = [[7, 0], [7, 0]];
-        let wk_sq = state.bitboards[K].get_lsb_index() as u8;
-        let bk_sq = state.bitboards[k].get_lsb_index() as u8;
+        let wk_sq = if state.bitboards[K].0 != 0 { state.bitboards[K].get_lsb_index() as u8 } else { 64 };
+        let bk_sq = if state.bitboards[k].0 != 0 { state.bitboards[k].get_lsb_index() as u8 } else { 64 };
         let wk_file = wk_sq % 8;
         let bk_file = bk_sq % 8;
 
@@ -306,49 +306,58 @@ impl GameState {
             }
         }
 
-        if (state.castling_rights & 1) != 0 {
-            let default_f = state.castling_rook_files[WHITE][0];
-            let r_sq = (rank_of(wk_sq) * 8) + default_f;
-            if !state.bitboards[R].get_bit(r_sq) {
-                if let Some(f) = find_outermost_rook(&state, WHITE, true, wk_file) {
-                    state.castling_rook_files[WHITE][0] = f;
-                } else {
-                    state.castling_rights &= !1;
+        if wk_sq != 64 {
+            if (state.castling_rights & 1) != 0 {
+                let default_f = state.castling_rook_files[WHITE][0];
+                let r_sq = (rank_of(wk_sq) * 8) + default_f;
+                if !state.bitboards[R].get_bit(r_sq) {
+                    if let Some(f) = find_outermost_rook(&state, WHITE, true, wk_file) {
+                        state.castling_rook_files[WHITE][0] = f;
+                    } else {
+                        state.castling_rights &= !1;
+                    }
                 }
             }
+            if (state.castling_rights & 2) != 0 {
+                let default_f = state.castling_rook_files[WHITE][1];
+                let r_sq = (rank_of(wk_sq) * 8) + default_f;
+                if !state.bitboards[R].get_bit(r_sq) {
+                    if let Some(f) = find_outermost_rook(&state, WHITE, false, wk_file) {
+                        state.castling_rook_files[WHITE][1] = f;
+                    } else {
+                        state.castling_rights &= !2;
+                    }
+                }
+            }
+        } else {
+            state.castling_rights &= !3;
         }
-        if (state.castling_rights & 2) != 0 {
-            let default_f = state.castling_rook_files[WHITE][1];
-            let r_sq = (rank_of(wk_sq) * 8) + default_f;
-            if !state.bitboards[R].get_bit(r_sq) {
-                if let Some(f) = find_outermost_rook(&state, WHITE, false, wk_file) {
-                    state.castling_rook_files[WHITE][1] = f;
-                } else {
-                    state.castling_rights &= !2;
+
+        if bk_sq != 64 {
+            if (state.castling_rights & 4) != 0 {
+                let default_f = state.castling_rook_files[BLACK][0];
+                let r_sq = (rank_of(bk_sq) * 8) + default_f;
+                if !state.bitboards[r].get_bit(r_sq) {
+                    if let Some(f) = find_outermost_rook(&state, BLACK, true, bk_file) {
+                        state.castling_rook_files[BLACK][0] = f;
+                    } else {
+                        state.castling_rights &= !4;
+                    }
                 }
             }
-        }
-        if (state.castling_rights & 4) != 0 {
-            let default_f = state.castling_rook_files[BLACK][0];
-            let r_sq = (rank_of(bk_sq) * 8) + default_f;
-            if !state.bitboards[r].get_bit(r_sq) {
-                if let Some(f) = find_outermost_rook(&state, BLACK, true, bk_file) {
-                    state.castling_rook_files[BLACK][0] = f;
-                } else {
-                    state.castling_rights &= !4;
+            if (state.castling_rights & 8) != 0 {
+                let default_f = state.castling_rook_files[BLACK][1];
+                let r_sq = (rank_of(bk_sq) * 8) + default_f;
+                if !state.bitboards[r].get_bit(r_sq) {
+                    if let Some(f) = find_outermost_rook(&state, BLACK, false, bk_file) {
+                        state.castling_rook_files[BLACK][1] = f;
+                    } else {
+                        state.castling_rights &= !8;
+                    }
                 }
             }
-        }
-        if (state.castling_rights & 8) != 0 {
-            let default_f = state.castling_rook_files[BLACK][1];
-            let r_sq = (rank_of(bk_sq) * 8) + default_f;
-            if !state.bitboards[r].get_bit(r_sq) {
-                if let Some(f) = find_outermost_rook(&state, BLACK, false, bk_file) {
-                    state.castling_rook_files[BLACK][1] = f;
-                } else {
-                    state.castling_rights &= !8;
-                }
-            }
+        } else {
+            state.castling_rights &= !12;
         }
 
         if parts.len() > 3 && parts[3] != "-" {
