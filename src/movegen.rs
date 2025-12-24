@@ -530,6 +530,11 @@ pub fn is_move_pseudo_legal(state: &GameState, mv: Move) -> bool {
         if is_friendly && !is_castling {
             return false;
         }
+        if !is_friendly && !is_castling {
+            if !is_capture {
+                return false;
+            }
+        }
     } else {
         // Target is empty.
         // If move flag says capture, it MUST be En Passant.
