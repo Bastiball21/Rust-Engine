@@ -59,7 +59,11 @@ impl TTEntryTrait for TTEntry {
                 Some(N) | Some(n) => 4,
                 _ => 0,
             };
-            ((m.source() as u16) << 6) | (m.target() as u16) | (promo_bits << 12)
+            let mut bits = ((m.source() as u16) << 6) | (m.target() as u16) | (promo_bits << 12);
+            if m.is_capture() {
+                bits |= 0x8000;
+            }
+            bits
         } else {
             0
         };
@@ -107,13 +111,9 @@ impl TTEntryTrait for TTEntry {
                 4 => Some(N),
                 _ => None,
             };
+            let is_capture = (move_u16 & 0x8000) != 0;
             if from != to {
-                Some(Move::new(
-                    from as u8,
-                    to as u8,
-                    promotion,
-                    false,
-                ))
+                Some(Move::new(from as u8, to as u8, promotion, is_capture))
             } else {
                 None
             }
@@ -159,7 +159,11 @@ impl TTEntryTrait for TTEntry {
                 Some(N) | Some(n) => 4,
                 _ => 0,
             };
-            ((m.source() as u16) << 6) | (m.target() as u16) | (promo_bits << 12)
+            let mut bits = ((m.source() as u16) << 6) | (m.target() as u16) | (promo_bits << 12);
+            if m.is_capture() {
+                bits |= 0x8000;
+            }
+            bits
         } else {
             0
         };
@@ -168,10 +172,10 @@ impl TTEntryTrait for TTEntry {
         let gen_bound = ((age & 0x3F) << 2) | (flag & 0x3);
 
         let data = (key16 as u64)
-                 | ((move_u16 as u64) << 16)
-                 | ((score_u16 as u64) << 32)
-                 | ((depth as u64) << 48)
-                 | ((gen_bound as u64) << 56);
+            | ((move_u16 as u64) << 16)
+            | ((score_u16 as u64) << 32)
+            | ((depth as u64) << 48)
+            | ((gen_bound as u64) << 56);
 
         self.data.store(data, Ordering::Release);
     }
@@ -199,13 +203,9 @@ impl TTEntryTrait for TTEntry {
                 4 => Some(N),
                 _ => None,
             };
+            let is_capture = (move_u16 & 0x8000) != 0;
             if from != to {
-                Some(Move::new(
-                    from as u8,
-                    to as u8,
-                    promotion,
-                    false,
-                ))
+                Some(Move::new(from as u8, to as u8, promotion, is_capture))
             } else {
                 None
             }
@@ -491,18 +491,16 @@ impl TranspositionTable {
                 #[cfg(feature = "packed-tt")]
                 {
                     if entry.key() == (hash & 0xFFFF_0000_0000_0000) {
-                         if let Some((score, depth, flag, _, mut mv)) = entry.probe(hash) {
-                             if let Some(ref mut m) = mv { Self::fix_move(m, state); }
-                             return Some((score, depth, flag, mv));
-                         }
+                        if let Some((score, depth, flag, _, mv)) = entry.probe(hash) {
+                            return Some((score, depth, flag, mv));
+                        }
                     }
                 }
 
                 #[cfg(not(feature = "packed-tt"))]
                 {
                     // entry.probe() handles the XOR decoding internally
-                    if let Some((score, depth, flag, _, mut mv)) = entry.probe(hash) {
-                        if let Some(ref mut m) = mv { Self::fix_move(m, state); }
+                    if let Some((score, depth, flag, _, mv)) = entry.probe(hash) {
                         return Some((score, depth, flag, mv));
                     }
                 }
@@ -515,47 +513,6 @@ impl TranspositionTable {
         self.probe_data(hash, state, thread_id).and_then(|(_, _, _, m)| m)
     }
 
-    fn fix_move(mv: &mut Move, state: &GameState) {
-        let to = mv.target() as usize;
-        let from = mv.source() as usize;
-        let captured = state.board[to];
-        let mut is_capture = false;
-
-        if captured != NO_PIECE as u8 {
-            is_capture = true;
-        } else if mv.target() == state.en_passant {
-            let piece = state.board[from];
-            if piece == P as u8 || piece == p as u8 {
-                is_capture = true;
-            }
-        }
-
-        // Fix: Castling is not a capture!
-        // If King captures friendly Rook, it's castling, so set is_capture = false.
-        // BUT we must be careful: King capturing Friendly QUEEN is NOT castling.
-        // It must be a Rook.
-        if is_capture {
-            let piece_type = state.board[from] as usize;
-            let captured_type = state.board[to] as usize;
-
-            let rook_type = if state.side_to_move == WHITE { R } else { r };
-
-            // Only convert to Quiet if target is actually a Rook
-            if (piece_type == K || piece_type == k) && captured_type == rook_type {
-                let is_friendly = if state.side_to_move == WHITE {
-                     captured_type <= K
-                } else {
-                     captured_type >= p
-                };
-
-                if is_friendly {
-                    is_capture = false;
-                }
-            }
-        }
-
-        *mv = Move::new(mv.source(), mv.target(), mv.promotion(), is_capture);
-    }
 
     pub fn is_pseudo_legal(&self, state: &crate::state::GameState, mv: Move) -> bool {
         let from = mv.source();
