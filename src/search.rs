@@ -1513,6 +1513,14 @@ fn negamax(
 
         state.unmake_move(mv, unmake_info, &mut Some(&mut info.data.accumulators));
 
+        // Validation
+        if let Err(e) = state.validate_consistency() {
+             eprintln!("CRITICAL: Consistency failure after unmake move {:?}", mv);
+             eprintln!("Error: {}", e);
+             state.dump_diagnostics(mv, "Unmake Failure");
+             panic!("Consistency Check Failed");
+        }
+
         if info.stopped {
             info.path.pop();
             return 0;

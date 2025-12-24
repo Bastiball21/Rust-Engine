@@ -629,6 +629,13 @@ impl GameState {
 
         let mut piece_type = self.board[source as usize] as usize;
 
+        // Strict Check: Source must be occupied in bitboards too
+        if piece_type != NO_PIECE {
+            if !self.bitboards[piece_type].get_bit(source) {
+                 panic!("CRITICAL: Source square {} has piece {} in mailbox but not in bitboards! Move: {:?}", source, piece_type, mv);
+            }
+        }
+
         if piece_type == NO_PIECE {
              let start_range = if side == WHITE { P } else { p };
              let end_range = if side == WHITE { K } else { k };
@@ -646,6 +653,27 @@ impl GameState {
                 mv,
                 self.to_fen()
             );
+        }
+
+        // Strict Check: Quiet moves must not target occupied squares (in Bitboards)
+        if !is_capture {
+            let target_occ = self.occupancies[BOTH].get_bit(target);
+            // Allow Castling (King -> Rook)
+            let mut is_castling_attempt = false;
+            if piece_type == K || piece_type == k {
+                let rook_type = if side == WHITE { R } else { r };
+                // If target has Rook bit, it's potentially castling.
+                // Note: We check `target_piece` later for real castling logic,
+                // but here we just want to avoid panic on valid castling.
+                if self.bitboards[rook_type].get_bit(target) {
+                    is_castling_attempt = true;
+                }
+            }
+
+            if target_occ && !is_castling_attempt {
+                 self.dump_diagnostics(mv, "Quiet Move to Occupied Square");
+                 panic!("CRITICAL: Quiet move to occupied square! Target: {}, Move: {:?}", target, mv);
+            }
         }
 
         let mut is_castling = false;
@@ -702,6 +730,10 @@ impl GameState {
             let k_dst = rank_base + king_file_dst;
             let r_dst = rank_base + rook_file_dst;
 
+            // Ensure destinations are clean (Ghost Busting)
+            self.clear_square(k_dst);
+            self.clear_square(r_dst);
+
             self.bitboards[piece_type].set_bit(k_dst);
             self.board[k_dst as usize] = piece_type as u8;
             self.hash ^= zobrist::piece_key(piece_type, k_dst as usize);
@@ -744,6 +776,10 @@ impl GameState {
                 self.bitboards[actual_piece].set_bit(target);
                 self.hash ^= zobrist::piece_key(actual_piece, target as usize);
             } else {
+                // Ensure target is clean before setting (Ghost Busting for Quiet Moves)
+                if !is_capture {
+                     self.clear_square(target);
+                }
                 self.bitboards[piece_type].set_bit(target);
                 self.hash ^= zobrist::piece_key(piece_type, target as usize);
             }
@@ -1036,9 +1072,26 @@ impl GameState {
              added.push((r_piece, target as usize));
 
         } else {
-             let moved_piece = self.board[target as usize] as usize;
+             let mut moved_piece = self.board[target as usize] as usize;
 
-             self.bitboards[moved_piece].pop_bit(target);
+             // Robustness: If board says NO_PIECE (Desync), try to find it in bitboards
+             if moved_piece == NO_PIECE {
+                 for p_idx in 0..12 {
+                     if self.bitboards[p_idx].get_bit(target) {
+                         moved_piece = p_idx;
+                         break;
+                     }
+                 }
+             }
+
+             // If still NO_PIECE, we have a critical failure, but we must avoid index panic.
+             // We can't do much if we don't know what piece moved.
+             // But usually bitboard scan should find it.
+             if moved_piece != NO_PIECE {
+                 self.bitboards[moved_piece].pop_bit(target);
+                 removed.push((moved_piece, target as usize));
+             }
+
              self.board[target as usize] = NO_PIECE as u8;
              self.occupancies[side].pop_bit(target);
              self.occupancies[BOTH].pop_bit(target);
@@ -1204,6 +1257,18 @@ impl GameState {
 
     pub fn is_consistent(&self) -> bool {
         self.validate_consistency().is_ok()
+    }
+
+    // Helper to clear a square completely (Ghost busting)
+    fn clear_square(&mut self, sq: u8) {
+        for p_idx in 0..12 {
+            if self.bitboards[p_idx].get_bit(sq) {
+                self.bitboards[p_idx].pop_bit(sq);
+            }
+        }
+        self.occupancies[WHITE].pop_bit(sq);
+        self.occupancies[BLACK].pop_bit(sq);
+        self.occupancies[BOTH].pop_bit(sq);
     }
 
     pub fn is_move_consistent(&self, mv: Move) -> bool {
