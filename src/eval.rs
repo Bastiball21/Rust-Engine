@@ -518,7 +518,7 @@ fn evaluate_complex_terms(
             0
         };
         king_sqs[side] = k_sq;
-        king_rings[side] = crate::movegen::get_king_attacks(k_sq as u8);
+        king_rings[side] = crate::bitboard::get_king_attacks(k_sq as u8);
     }
 
     let mut attacks_by_side = [Bitboard(0); 2];
@@ -554,11 +554,11 @@ fn evaluate_complex_terms(
                 bb.pop_bit(sq as u8);
 
                 let attacks = match piece_type {
-                    N => crate::movegen::get_knight_attacks(sq as u8),
+                    N => crate::bitboard::get_knight_attacks(sq as u8),
                     B => bitboard::get_bishop_attacks(sq as u8, occ),
                     R => bitboard::get_rook_attacks(sq as u8, occ),
                     Q => bitboard::get_queen_attacks(sq as u8, occ),
-                    K => crate::movegen::get_king_attacks(sq as u8),
+                    K => crate::bitboard::get_king_attacks(sq as u8),
                     P => bitboard::pawn_attacks(Bitboard(1 << sq), us),
                     _ => Bitboard(0),
                 };

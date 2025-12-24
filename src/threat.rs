@@ -53,7 +53,7 @@ pub fn init_threat() {
         for sq in 0..64 {
             let b_sq = Bitboard(1 << sq);
             // 3x3 Ring (King moves)
-            table[sq][0] = movegen::get_king_attacks(sq as u8);
+            table[sq][0] = crate::bitboard::get_king_attacks(sq as u8);
 
             // 5x5 Ring (approximate by expanding 3x3 or manual)
             // A simple way: King attacks of the King attacks
@@ -62,7 +62,7 @@ pub fn init_threat() {
             while iter.0 != 0 {
                 let s = iter.get_lsb_index() as u8;
                 iter.pop_bit(s);
-                ring5 = ring5 | movegen::get_king_attacks(s);
+                ring5 = ring5 | crate::bitboard::get_king_attacks(s);
             }
             // Exclude the king square itself
             ring5 = ring5 & !b_sq;
@@ -344,12 +344,12 @@ fn estimate_threat_creation(state: &GameState, mv: Move) -> i32 {
     new_occ.set_bit(mv.target());
 
     let attacks = match piece_type {
-        N => movegen::get_knight_attacks(mv.target()),
+        N => crate::bitboard::get_knight_attacks(mv.target()),
         B => bitboard::get_bishop_attacks(mv.target(), new_occ),
         R => bitboard::get_rook_attacks(mv.target(), new_occ),
         Q => bitboard::get_queen_attacks(mv.target(), new_occ),
         P => bitboard::pawn_attacks(Bitboard(1 << mv.target()), us), // Pawn attacks from new square
-        K => movegen::get_king_attacks(mv.target()),
+        K => crate::bitboard::get_king_attacks(mv.target()),
         _ => Bitboard(0),
     };
 
@@ -378,7 +378,7 @@ fn estimate_threat_creation(state: &GameState, mv: Move) -> i32 {
     // We can't access `threat_info` here easily without recomputing.
     // Use precomputed mask if possible, or just distance.
     // Let's use `movegen::get_king_attacks` as 3x3 ring.
-    let ring = movegen::get_king_attacks(king_sq);
+    let ring = crate::bitboard::get_king_attacks(king_sq);
     if (attacks & ring).0 != 0 {
         score += 60; // Direct hit on king ring
     }
@@ -467,7 +467,7 @@ fn compute_attacks_and_rings(state: &GameState, info: &mut ThreatInfo) {
         while knights.0 != 0 {
             let sq = knights.get_lsb_index() as u8;
             knights.pop_bit(sq);
-            attacks = attacks | movegen::get_knight_attacks(sq);
+            attacks = attacks | crate::bitboard::get_knight_attacks(sq);
         }
 
         // King
@@ -478,7 +478,7 @@ fn compute_attacks_and_rings(state: &GameState, info: &mut ThreatInfo) {
         } else {
             0 // Fallback if no king (shouldn't happen in valid FEN)
         };
-        attacks = attacks | movegen::get_king_attacks(king_sq);
+        attacks = attacks | crate::bitboard::get_king_attacks(king_sq);
 
         // Sliders (B/R/Q)
         let bishop_type = if side == WHITE { B } else { b };
@@ -582,7 +582,7 @@ fn compute_static_threats(state: &GameState, info: &mut ThreatInfo) {
         while knights.0 != 0 {
             let sq = knights.get_lsb_index() as u8;
             knights.pop_bit(sq);
-            if (movegen::get_knight_attacks(sq) & ring_3).0 != 0 {
+            if (crate::bitboard::get_knight_attacks(sq) & ring_3).0 != 0 {
                 attacker_count += 1;
                 attacker_weight += 25;
             }
@@ -702,7 +702,7 @@ fn count_attackers(state: &GameState, sq: u8, side: usize) -> i32 {
     }
 
     let knights = state.bitboards[if side == WHITE { N } else { n }];
-    let k_att = movegen::get_knight_attacks(sq) & knights;
+    let k_att = crate::bitboard::get_knight_attacks(sq) & knights;
     count += k_att.count_bits() as i32;
 
     let occ = state.occupancies[BOTH];

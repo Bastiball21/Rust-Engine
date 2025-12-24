@@ -18,12 +18,22 @@ pub const FLAG_EXACT: u8 = 1;
 pub const FLAG_ALPHA: u8 = 2;
 pub const FLAG_BETA: u8 = 3;
 
+#[cfg(feature = "packed-tt")]
+compile_error!("packed-tt uses a 16-bit key and is unsafe. Do not enable unless key size is increased.");
+
 /// Trait abstracting TT Entry operations.
 pub trait TTEntryTrait {
     fn new() -> Self;
     fn key(&self) -> u64;
     fn save(&self, key: u64, score: i32, depth: u8, flag: u8, age: u8, mv: Option<Move>);
     fn probe(&self, key: u64) -> Option<(i32, u8, u8, u8, Option<Move>)>;
+}
+
+#[inline(always)]
+fn unpack_depth_age(data: u64) -> (u8, u8) {
+    let depth = ((data >> 32) & 0xFF) as u8;
+    let age = ((data >> 48) & 0xFF) as u8;
+    (depth, age)
 }
 
 // --------------------------------------------------------------------------------
@@ -81,13 +91,13 @@ impl TTEntryTrait for TTEntry {
         // This ensures that if we read a mismatched key/data pair, the XOR check will fail.
         let stored_key = key ^ data;
 
+        self.key.store(stored_key, Ordering::Relaxed);
         self.data.store(data, Ordering::Release);
-        self.key.store(stored_key, Ordering::Release);
     }
 
     fn probe(&self, key: u64) -> Option<(i32, u8, u8, u8, Option<Move>)> {
-        let data = self.data.load(Ordering::Relaxed);
-        let stored_key = self.key.load(Ordering::Acquire);
+        let data = self.data.load(Ordering::Acquire);
+        let stored_key = self.key.load(Ordering::Relaxed);
 
         // Verify integrity
         if (stored_key ^ data) != key {
@@ -429,26 +439,39 @@ impl TranspositionTable {
                 let entry = &cluster.entries[i];
 
                 #[cfg(feature = "packed-tt")]
-                let (match_found, is_empty) = {
-                    let entry_key = entry.key();
-                    (
-                        (entry_key == (hash & 0xFFFF_0000_0000_0000)) && (entry_key != 0),
-                        entry_key == 0
-                    )
-                };
+                let (match_found, is_empty, replace_score) = (false, false, 0); // Packed TT disabled
 
                 #[cfg(not(feature = "packed-tt"))]
-                let (match_found, is_empty) = {
+                let (match_found, is_empty, replace_score) = {
                     let data = entry.data.load(Ordering::Relaxed);
-                    let stored_key = entry.key.load(Ordering::Acquire);
-                    let recovered_key = stored_key ^ data;
-                    // data != 0 ensures we don't match empty slots if hash happens to be 0
-                    (recovered_key == hash && data != 0, data == 0)
+                    // Fast path: if data is 0, it's empty
+                    if data == 0 {
+                        (false, true, i32::MIN)
+                    } else {
+                        // Check key
+                        let stored_key = entry.key.load(Ordering::Relaxed); // Key can be relaxed as we verify with XOR
+                        let recovered_key = stored_key ^ data;
+                        if recovered_key == hash {
+                             (true, false, 0)
+                        } else {
+                            // Replacement score
+                            let (d, age) = unpack_depth_age(data);
+                            let age_diff = current_gen.wrapping_sub(age);
+                            let score = (d as i32) - (age_diff as i32 * 2);
+                            (false, false, score)
+                        }
+                    }
                 };
 
                 if match_found {
-                    let (_, _, _, _, old_move) = entry.probe(hash).unwrap_or((0,0,0,0,None));
-                    let final_move = if best_move.is_none() { old_move } else { best_move };
+                    // Update existing entry
+                    // We need to retrieve the old move if the new move is None
+                    let old_move = if best_move.is_none() {
+                         entry.probe(hash).and_then(|(_,_,_,_,m)| m)
+                    } else {
+                         None
+                    };
+                    let final_move = best_move.or(old_move);
                     entry.save(hash, score, depth, flag, current_gen, final_move);
                     return;
                 }
@@ -457,14 +480,6 @@ impl TranspositionTable {
                     entry.save(hash, score, depth, flag, current_gen, best_move);
                     return;
                 }
-
-                let (_, d, _, age, _) = entry.probe(hash).unwrap_or((0,0,0,0,None));
-                let age_diff = current_gen.wrapping_sub(age);
-
-                // Replacement Strategy: Prefer replacing shallow entries, then old entries.
-                // Score = Depth - AgePenalty. Lower is better candidate to replace.
-                // If entry is ancient (age_diff large), score drops significantly.
-                let replace_score = (d as i32) - (age_diff as i32 * 4);
 
                 if replace_score < min_score {
                     min_score = replace_score;
@@ -519,127 +534,48 @@ impl TranspositionTable {
         let to = mv.target();
         let side = state.side_to_move;
 
-        if from >= 64 || to >= 64 || from == to { return false; }
+        // 1. Valid Squares
+        if from >= 64 || to >= 64 || from == to {
+            return false;
+        }
 
+        // 2. Source Piece Exists
         let piece_type = state.board[from as usize] as usize;
-        if piece_type == 12 || !state.bitboards[piece_type].get_bit(from) { return false; }
+        if piece_type == 12 {
+            return false;
+        }
 
+        // 3. Piece Belongs to Side to Move
         if side == WHITE {
-             if piece_type > K { return false; }
+            if piece_type > K {
+                return false;
+            }
         } else {
-             if piece_type < p || piece_type > k { return false; }
-        }
-
-        let target_piece = state.board[to as usize] as usize;
-        if target_piece != 12 {
-             if side == WHITE {
-                  if target_piece <= K {
-                    // Allow King moves to friendly rook for castling
-                    if (piece_type == K) && (target_piece == R) {
-                         // Check castling rights?
-                         // Ideally we should check if this specific rook is valid for castling,
-                         // but for pseudo-legal check, just knowing it's a rook and we have *some* rights is often enough,
-                         // or we can rely on movegen to filter.
-                         // But for TT retrieval validation, we should be slightly permissive or check rights.
-                         // The safest is to return true here and let make_move handle validity, OR check rights.
-                         if state.castling_rights & 3 != 0 { return true; }
-                    }
-                    return false;
-                  }
-             } else {
-                  if target_piece >= p && target_piece <= k {
-                    // Allow King moves to friendly rook for castling
-                    if (piece_type == k) && (target_piece == r) {
-                         if state.castling_rights & 12 != 0 { return true; }
-                    }
-                    return false;
-                  }
-             }
-        }
-
-        let is_occupied = target_piece != 12;
-        if is_occupied && !state.bitboards[target_piece].get_bit(to) { return false; }
-
-        let is_ep = to == state.en_passant && (piece_type == P || piece_type == p);
-
-        if mv.is_capture() {
-            if !is_occupied && !is_ep { return false; }
-        } else {
-            // Check if target is occupied in BITBOARDS to prevent "Quiet" moves to "Ghost" squares.
-            // If board says empty (is_occupied=false) but bitboard says occupied, it's a desync/ghost -> Reject.
-            if state.occupancies[crate::state::BOTH].get_bit(to) {
-                if !is_occupied { return false; }
-
-                // If occupied (in both), it must be a Castling attempt (King -> Own Rook)
-                // Any other quiet move to an occupied square is illegal (capture flag missing).
-                let is_castling_attempt = (piece_type == K && target_piece == R) || (piece_type == k && target_piece == r);
-
-                if !is_castling_attempt {
-                     return false;
-                }
-
-                if is_castling_attempt {
-                    return true;
-                }
+            if piece_type < p || piece_type > k {
                 return false;
             }
         }
 
-        match piece_type {
-            N | n => bitboard::mask_knight_attacks(from).get_bit(to),
-            K | k => {
-                let attacks = bitboard::mask_king_attacks(from);
-                if attacks.get_bit(to) { return true; }
-                if (from as i8 - to as i8).abs() == 2 { return true; }
-                false
+        // 4. Target Square Check (Not Own Piece)
+        let target_piece = state.board[to as usize] as usize;
+        if target_piece != 12 {
+            // Check if target is friendly
+            let is_friendly = if side == WHITE {
+                target_piece <= K
+            } else {
+                target_piece >= p && target_piece <= k
+            };
+
+            if is_friendly {
+                // EXCEPTION: Castling (King takes own Rook)
+                let is_castling = (piece_type == K && target_piece == R) || (piece_type == k && target_piece == r);
+                if !is_castling {
+                    return false;
+                }
             }
-            P => {
-                let file_from = from % 8;
-                let file_to = to % 8;
-                if to == from + 8 && !is_occupied {
-                    return true;
-                }
-                if from >= 8
-                    && from <= 15
-                    && to == from + 16
-                    && !state.occupancies[2].get_bit(from + 8)
-                    && !is_occupied
-                {
-                    return true;
-                }
-                if (to == from + 7 || to == from + 9)
-                    && (is_occupied || to == state.en_passant)
-                {
-                    return (file_from as i8 - file_to as i8).abs() == 1;
-                }
-                false
-            }
-            p => {
-                let file_from = from % 8;
-                let file_to = to % 8;
-                if to == from.wrapping_sub(8) && !is_occupied {
-                    return true;
-                }
-                if from >= 48
-                    && from <= 55
-                    && to == from.wrapping_sub(16)
-                    && !state.occupancies[2].get_bit(from.wrapping_sub(8))
-                    && !is_occupied
-                {
-                    return true;
-                }
-                if (to == from.wrapping_sub(7) || to == from.wrapping_sub(9))
-                    && (is_occupied || to == state.en_passant)
-                {
-                    return (file_from as i8 - file_to as i8).abs() == 1;
-                }
-                false
-            }
-            R | r => bitboard::get_rook_attacks(from, state.occupancies[2]).get_bit(to),
-            B | b => bitboard::get_bishop_attacks(from, state.occupancies[2]).get_bit(to),
-            Q | q => bitboard::get_queen_attacks(from, state.occupancies[2]).get_bit(to),
-            _ => false,
         }
+
+        true
     }
 
     pub fn hashfull(&self) -> usize {
