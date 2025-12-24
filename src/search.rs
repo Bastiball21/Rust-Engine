@@ -23,6 +23,9 @@ const MATE_SCORE: i32 = 30000;
 pub const WINNING_CAPTURE_BONUS: i32 = 10_000_000;
 pub const MIN_WINNING_SEE_SCORE: i32 = WINNING_CAPTURE_BONUS - 16384;
 
+static START_PLY: [i16; 20] = [0, 1, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 6, 7];
+static SKIP_SIZE: [i16; 20] = [1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4];
+
 // Continuation History
 type ContHistTable = [[[i32; 64]; 12]; 768];
 
@@ -232,6 +235,12 @@ impl<'a> MovePicker<'a> {
                                     if !is_ep {
                                         continue;
                                     }
+                                }
+                            } else {
+                                // Explicitly reject quiet moves to occupied squares (double safety)
+                                let target_piece = get_piece_type_safe(state, mv.target());
+                                if target_piece != NO_PIECE {
+                                    continue;
                                 }
                             }
                             return Some(mv);
@@ -949,7 +958,15 @@ pub fn search(
 
     let mut root_state = *state;
 
-    for depth in 1..=max_depth {
+    // --- THREAD DISTRIBUTION LOGIC START ---
+    let tid = thread_id.unwrap_or(0);
+    let idx = tid % 20;
+    let start_ply = START_PLY[idx] as u8;
+    let skip_size = SKIP_SIZE[idx] as u8;
+
+    let mut depth = start_ply + 1;
+
+    while depth <= max_depth {
         info.seldepth = 0;
         let mut alpha = -INFINITY;
         let mut beta = INFINITY;
@@ -1066,7 +1083,10 @@ pub fn search(
                 pv_line
             );
         }
+
+        depth += skip_size;
     }
+    // --- THREAD DISTRIBUTION LOGIC END ---
 
     let mut final_move = best_move;
     let mut generator = movegen::MoveGenerator::new();
