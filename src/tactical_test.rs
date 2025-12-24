@@ -2,6 +2,7 @@
 mod tests {
     use crate::movegen::{self, MoveGenerator};
     use crate::state::{GameState, Move, B, K, N, P, Q, R};
+    use std::sync::Arc;
 
     #[test]
     fn test_tactical_move_ordering() {
@@ -9,7 +10,8 @@ mod tests {
         let state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         // Start position
 
-        let search_data = crate::search::SearchData::new();
+        let correction_history = Arc::new(crate::search::CorrectionTable::new());
+        let search_data = crate::search::SearchData::new(correction_history);
         // search_data needs to be initialized.
 
         // This is a placeholder test.
