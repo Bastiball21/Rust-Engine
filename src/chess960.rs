@@ -96,11 +96,17 @@ pub fn generate_chess960_position(index: u16) -> GameState {
         let piece = board[i];
         if piece != 12 {
             state.bitboards[piece].set_bit(i as u8); // White backrank
+            state.board[i] = piece as u8;
+
             state.bitboards[piece + 6].set_bit((i + 56) as u8); // Black backrank (mirrored file)
+            state.board[i + 56] = (piece + 6) as u8;
         }
         // Pawns
         state.bitboards[P].set_bit((i + 8) as u8);
+        state.board[i + 8] = P as u8;
+
         state.bitboards[p].set_bit((i + 48) as u8);
+        state.board[i + 48] = p as u8;
     }
 
     // Update Occupancies
