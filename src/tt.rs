@@ -517,17 +517,34 @@ impl TranspositionTable {
 
     fn fix_move(mv: &mut Move, state: &GameState) {
         let to = mv.target() as usize;
+        let from = mv.source() as usize;
         let captured = state.board[to];
         let mut is_capture = false;
 
         if captured != NO_PIECE as u8 {
             is_capture = true;
         } else if mv.target() == state.en_passant {
-            let piece = state.board[mv.source() as usize];
+            let piece = state.board[from];
             if piece == P as u8 || piece == p as u8 {
                 is_capture = true;
             }
         }
+
+        // Fix: Castling is not a capture!
+        // If King captures friendly Rook, it's castling, so set is_capture = false.
+        if is_capture {
+            let piece_type = state.board[from] as usize;
+            let captured_type = state.board[to] as usize;
+            let is_friendly = if state.side_to_move == WHITE {
+                 captured_type <= K
+            } else {
+                 captured_type >= p
+            };
+            if (piece_type == K || piece_type == k) && is_friendly {
+                is_capture = false;
+            }
+        }
+
         *mv = Move::new(mv.source(), mv.target(), mv.promotion(), is_capture);
     }
 

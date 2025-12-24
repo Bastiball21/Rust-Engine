@@ -571,6 +571,11 @@ impl GameState {
     pub fn make_move_inplace(&mut self, mv: Move, accumulators: &mut Option<&mut [Accumulator; 2]>) -> UnmakeInfo {
         #[cfg(debug_assertions)]
         {
+            if let Err(e) = self.validate_consistency() {
+                self.dump_diagnostics(mv, &format!("Pre-Make Consistency Failure: {}", e));
+                panic!("State corrupted before move {:?}: {}", mv, e);
+            }
+
             debug_assert!(
                 self.board[mv.source() as usize] != NO_PIECE as u8,
                 "No piece on source: {:?}, FEN: {}",
@@ -945,7 +950,7 @@ impl GameState {
         {
             if let Err(e) = self.validate_consistency() {
                 self.dump_diagnostics(mv, &format!("Post-Make Consistency Failure: {}", e));
-                panic!("State corrupted after move {:?}", mv);
+                panic!("State corrupted after move {:?}: {}", mv, e);
             }
         }
 
