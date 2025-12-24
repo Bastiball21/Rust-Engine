@@ -75,7 +75,7 @@ pub fn uci_loop() {
             "uci" => {
                 println!("id name Aether 1.0.0");
                 println!("id author Basti Dangca");
-                println!("option name Hash type spin default 64 min 1 max 1024");
+                println!("option name Hash type spin default 64 min 1 max 65536");
                 println!("option name Threads type spin default 1 min 1 max 64");
                 println!("option name SyzygyPath type string default <empty>");
                 println!("option name Move Overhead type spin default 10 min 0 max 5000");
