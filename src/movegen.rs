@@ -1,6 +1,6 @@
 #![allow(non_upper_case_globals)]
 use crate::bitboard::{self, Bitboard};
-use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
+use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE, NO_PIECE};
 use std::cmp::{max, min};
 
 pub fn init_move_tables() {
@@ -290,10 +290,10 @@ impl MoveGenerator {
                 let k_dst = rank_base + k_dst_file;
                 let r_dst = rank_base + r_dst_file;
 
-                if !self.is_path_clear(state, king_sq, k_dst, king_sq, rook_sq) {
+                if !is_path_clear(state, king_sq, k_dst, king_sq, rook_sq) {
                     continue;
                 }
-                if !self.is_path_clear(state, rook_sq, r_dst, king_sq, rook_sq) {
+                if !is_path_clear(state, rook_sq, r_dst, king_sq, rook_sq) {
                     continue;
                 }
 
@@ -321,28 +321,27 @@ impl MoveGenerator {
             }
         }
     }
+}
 
-    fn is_path_clear(
-        &self,
-        state: &GameState,
-        from: u8,
-        to: u8,
-        ignore_k: u8,
-        ignore_r: u8,
-    ) -> bool {
-        let start = min(from, to);
-        let end = max(from, to);
+pub fn is_path_clear(
+    state: &GameState,
+    from: u8,
+    to: u8,
+    ignore_k: u8,
+    ignore_r: u8,
+) -> bool {
+    let start = min(from, to);
+    let end = max(from, to);
 
-        for sq in start..=end {
-            if sq == ignore_k || sq == ignore_r {
-                continue;
-            }
-            if state.occupancies[BOTH].get_bit(sq) {
-                return false;
-            }
+    for sq in start..=end {
+        if sq == ignore_k || sq == ignore_r {
+            continue;
         }
-        true
+        if state.occupancies[BOTH].get_bit(sq) {
+            return false;
+        }
     }
+    true
 }
 
 pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -> bool {
@@ -491,4 +490,169 @@ fn slow_gives_check(state: &GameState, mv: Move) -> bool {
     let king_sq =
         next_state.bitboards[if state.side_to_move == WHITE { k } else { K }].get_lsb_index() as u8;
     is_square_attacked(&next_state, king_sq, next_state.side_to_move)
+}
+
+/// Strictly validates if a move is pseudo-legal according to the rules of chess.
+/// This checks geometric validity, piece ownership, capture rules, and castling prerequisites (rights/occupancy).
+/// It does NOT check if the King is left in check (full legality).
+pub fn is_move_pseudo_legal(state: &GameState, mv: Move) -> bool {
+    let from = mv.source();
+    let to = mv.target();
+    let side = state.side_to_move;
+
+    // 1. Basic Validity
+    if from >= 64 || to >= 64 || from == to {
+        return false;
+    }
+
+    // 2. Source Piece Existence & Ownership
+    // Use mailbox for speed, but rely on bitboards for strictness if desired.
+    // Here we trust mailbox consistent with bitboards as checked by `validate_consistency` in debug.
+    let piece_type = state.board[from as usize] as usize;
+    if piece_type == NO_PIECE {
+        return false;
+    }
+
+    if side == WHITE {
+        if piece_type > K { return false; }
+    } else {
+        if piece_type < p || piece_type > k { return false; }
+    }
+
+    // 3. Target Validity
+    let target_piece = state.board[to as usize] as usize;
+    let is_capture = mv.is_capture();
+    let is_castling = (piece_type == K || piece_type == k)
+        && (target_piece == if side == WHITE { R } else { r });
+
+    if target_piece != NO_PIECE {
+        let is_friendly = if side == WHITE { target_piece <= K } else { target_piece >= p && target_piece <= k };
+        if is_friendly && !is_castling {
+            return false;
+        }
+    } else {
+        // Target is empty.
+        // If move flag says capture, it MUST be En Passant.
+        // If it's not EP, and flag is capture -> Invalid.
+        if is_capture {
+            let is_ep = (piece_type == P || piece_type == p) && to == state.en_passant;
+            if !is_ep {
+                return false;
+            }
+        }
+    }
+
+    // 4. Geometric & Rule Validation
+    let occupancy = state.occupancies[BOTH];
+
+    match piece_type {
+        P | p => {
+             let (direction, start_rank, promo_rank) = if side == WHITE { (1, 1, 7) } else { (-1, 6, 0) };
+             let rank = from / 8;
+             let is_promo = (to / 8) == promo_rank;
+
+             // Check Promotion Flag matches geometry
+             if is_promo != mv.promotion().is_some() {
+                 return false;
+             }
+
+             if is_capture {
+                 // Capture Logic: Diagonals
+                 let diff = (to as i8) - (from as i8);
+                 if diff == 8 * direction - 1 || diff == 8 * direction + 1 {
+                     // Must be occupied by enemy OR En Passant square
+                     if target_piece == NO_PIECE && to != state.en_passant {
+                         return false;
+                     }
+                     return true;
+                 }
+                 return false;
+             } else {
+                 // Push Logic
+                 if target_piece != NO_PIECE { return false; } // Must be empty
+
+                 let diff = (to as i8) - (from as i8);
+
+                 // Single Push
+                 if diff == 8 * direction {
+                     return true;
+                 }
+
+                 // Double Push
+                 if diff == 16 * direction {
+                     if rank != start_rank { return false; }
+                     // Path must be clear
+                     let mid = (from as i8 + 8 * direction) as u8;
+                     if state.board[mid as usize] != NO_PIECE as u8 { return false; }
+                     return true;
+                 }
+
+                 return false;
+             }
+        },
+        N | n => {
+            let attacks = bitboard::get_knight_attacks(from);
+            attacks.get_bit(to)
+        },
+        B | b => {
+            let attacks = bitboard::get_bishop_attacks(from, occupancy);
+            attacks.get_bit(to)
+        },
+        R | r => {
+            let attacks = bitboard::get_rook_attacks(from, occupancy);
+            attacks.get_bit(to)
+        },
+        Q | q => {
+            let attacks = bitboard::get_queen_attacks(from, occupancy);
+            attacks.get_bit(to)
+        },
+        K | k => {
+            if is_castling {
+                 // Castling Logic
+                 // King moves to own Rook
+                 // 1. Rights
+                 // 2. Path Clear
+                 // 3. Not in Check (Start, Path, End) - This is mostly "Legal" not "Pseudo",
+                 //    but strict pseudo-legal usually includes path clearance and rights.
+
+                 // Find which side (King or Queen side) based on Rook position
+                 let rook_file = to % 8;
+                 let rank_base = if side == WHITE { 0 } else { 56 };
+
+                 let mut side_idx = 2; // Invalid
+                 if state.castling_rook_files[side][0] == rook_file { side_idx = 0; }
+                 else if state.castling_rook_files[side][1] == rook_file { side_idx = 1; }
+
+                 if side_idx == 2 { return false; } // Rook not tracked for castling
+
+                 // Check Rights bitmask
+                 let mask = if side == WHITE {
+                     if side_idx == 0 { 1 } else { 2 }
+                 } else {
+                     if side_idx == 0 { 4 } else { 8 }
+                 };
+
+                 if (state.castling_rights & mask) == 0 {
+                     return false;
+                 }
+
+                 // Map to standard King/Rook dests
+                 let (k_dst_file, r_dst_file) = if side_idx == 0 { (6, 5) } else { (2, 3) };
+                 let k_dst = rank_base + k_dst_file;
+                 let r_dst = rank_base + r_dst_file;
+
+                 // Path Clear
+                 if !is_path_clear(state, from, k_dst, from, to) { return false; }
+                 if !is_path_clear(state, to, r_dst, from, to) { return false; }
+
+                 // Note: We skip "Safe from Check" here as that's full legality.
+                 // We only check structural possibility.
+                 return true;
+            } else {
+                let attacks = bitboard::get_king_attacks(from);
+                attacks.get_bit(to)
+            }
+        },
+        _ => false
+    }
 }
