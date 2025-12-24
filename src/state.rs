@@ -948,7 +948,13 @@ impl GameState {
         }
 
         #[cfg(debug_assertions)]
-        crate::debug::validate_board_consistency(self);
+        {
+            crate::debug::validate_board_consistency(self);
+            if let Err(e) = self.validate_consistency() {
+                self.dump_diagnostics(mv, &format!("Post-Make Consistency Failure: {}", e));
+                panic!("State corrupted after move {:?}", mv);
+            }
+        }
 
         UnmakeInfo {
             captured: captured_piece,
@@ -1088,41 +1094,123 @@ impl GameState {
         }
 
         #[cfg(debug_assertions)]
-        crate::debug::validate_board_consistency(self);
+        {
+            crate::debug::validate_board_consistency(self);
+            if let Err(e) = self.validate_consistency() {
+                self.dump_diagnostics(mv, &format!("Post-Unmake Consistency Failure: {}", e));
+                panic!("State corrupted after UNMAKE move {:?}: {}", mv, e);
+            }
+        }
     }
 
-    pub fn is_consistent(&self) -> bool {
-        let mut occ_both = Bitboard(0);
-        let mut occ_white = Bitboard(0);
-        let mut occ_black = Bitboard(0);
+    pub fn validate_consistency(&self) -> Result<(), String> {
+        // 1. Check King Counts
+        if self.bitboards[K].count_bits() != 1 {
+            return Err(format!(
+                "White King count is {}",
+                self.bitboards[K].count_bits()
+            ));
+        }
+        if self.bitboards[k].count_bits() != 1 {
+            return Err(format!(
+                "Black King count is {}",
+                self.bitboards[k].count_bits()
+            ));
+        }
+
+        // 2. Validate Board vs Bitboards & Reconstruct Occupancies
+        let mut expected_occ_white = Bitboard(0);
+        let mut expected_occ_black = Bitboard(0);
 
         for sq in 0..64 {
-            let piece = self.board[sq] as usize;
-            if piece != NO_PIECE {
-                if !self.bitboards[piece].get_bit(sq as u8) {
-                    return false;
+            let piece_on_board = self.board[sq] as usize;
+
+            // Check if piece in mailbox exists in exactly one bitboard
+            let mut found_in_bitboards = NO_PIECE;
+            for p_idx in 0..12 {
+                if self.bitboards[p_idx].get_bit(sq as u8) {
+                    if found_in_bitboards != NO_PIECE {
+                        return Err(format!(
+                            "Square {}: Multiple pieces in bitboards ({} and {})",
+                            sq, found_in_bitboards, p_idx
+                        ));
+                    }
+                    found_in_bitboards = p_idx;
                 }
+            }
+
+            if piece_on_board != found_in_bitboards {
+                return Err(format!(
+                    "DESYNC at square {}: Mailbox says piece {}, but Bitboards say {}",
+                    sq, piece_on_board, found_in_bitboards
+                ));
+            }
+
+            // Accumulate expected occupancies
+            if piece_on_board != NO_PIECE {
                 let mask = Bitboard(1u64 << sq);
-                occ_both = occ_both | mask;
-                if piece < 6 {
-                    occ_white = occ_white | mask;
+                if piece_on_board <= K {
+                    expected_occ_white = expected_occ_white | mask;
                 } else {
-                    occ_black = occ_black | mask;
+                    expected_occ_black = expected_occ_black | mask;
                 }
             }
         }
 
-        if occ_both != self.occupancies[BOTH] {
-            return false;
+        // 3. Check Occupancies
+        if self.occupancies[WHITE] != expected_occ_white {
+            return Err(format!(
+                "White occupancy mismatch. stored: {:x}, calc: {:x}",
+                self.occupancies[WHITE].0, expected_occ_white.0
+            ));
         }
-        if occ_white != self.occupancies[WHITE] {
-            return false;
+        if self.occupancies[BLACK] != expected_occ_black {
+            return Err(format!(
+                "Black occupancy mismatch. stored: {:x}, calc: {:x}",
+                self.occupancies[BLACK].0, expected_occ_black.0
+            ));
         }
-        if occ_black != self.occupancies[BLACK] {
-            return false;
+        if self.occupancies[BOTH] != (expected_occ_white | expected_occ_black) {
+            return Err("Both occupancy mismatch".to_string());
         }
 
-        true
+        // 4. Check En Passant Validity
+        if self.en_passant != 64 {
+            let ep_rank = self.en_passant / 8;
+            let ep_file = self.en_passant % 8;
+
+            // Valid ranks for EP square are 2 (index 2, rank 3) and 5 (index 5, rank 6)
+            // If side to move is White, EP square must be rank 5 (behind black pawn)
+            // If side to move is Black, EP square must be rank 2 (behind white pawn)
+
+            let (valid_rank, pawn_rank, enemy_pawn) = if self.side_to_move == WHITE {
+                (
+                    5, 4, p,
+                ) // White to move, capture Black pawn. EP sq on rank 6 (index 5). Pawn on rank 5 (index 4).
+            } else {
+                (
+                    2, 3, P,
+                ) // Black to move, capture White pawn. EP sq on rank 3 (index 2). Pawn on rank 4 (index 3).
+            };
+
+            if ep_rank != valid_rank {
+                return Err(format!(
+                    "Invalid En Passant rank: {}. Side to move: {}",
+                    ep_rank, self.side_to_move
+                ));
+            }
+
+            let pawn_sq = pawn_rank * 8 + ep_file;
+            if self.board[pawn_sq as usize] as usize != enemy_pawn {
+                return Err(format!("No enemy pawn for En Passant at square {}", pawn_sq));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn is_consistent(&self) -> bool {
+        self.validate_consistency().is_ok()
     }
 
     pub fn is_move_consistent(&self, mv: Move) -> bool {

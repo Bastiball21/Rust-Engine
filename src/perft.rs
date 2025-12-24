@@ -82,7 +82,7 @@ pub fn run_perft_suite() {
 }
 
 // Recursive perft function
-pub fn perft(state: &GameState, depth: u8) -> u64 {
+pub fn perft(state: &mut GameState, depth: u8) -> u64 {
     if depth == 0 {
         return 1;
     }
@@ -94,22 +94,28 @@ pub fn perft(state: &GameState, depth: u8) -> u64 {
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
 
-        // Use your engine's existing "make-then-check" logic
-        let next_state = state.make_move(mv);
+        let info = state.make_move_inplace(mv, &mut None);
 
         // Verify Legality
-        let our_king = if state.side_to_move == WHITE { K } else { k };
-        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
+        let side_that_just_moved = 1 - state.side_to_move;
+        let our_king = if side_that_just_moved == WHITE {
+            K
+        } else {
+            k
+        };
+        let king_sq = state.bitboards[our_king].get_lsb_index() as u8;
 
-        if !is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
-            nodes += perft(&next_state, depth - 1);
+        if !is_square_attacked(state, king_sq, state.side_to_move) {
+            nodes += perft(state, depth - 1);
         }
+
+        state.unmake_move(mv, info, &mut None);
     }
     nodes
 }
 
 // Debugging tool: Prints move counts for the first ply
-pub fn perft_divide(state: &GameState, depth: u8) {
+pub fn perft_divide(state: &mut GameState, depth: u8) {
     println!("--- Perft Divide Depth {} ---", depth);
     let mut generator = MoveGenerator::new();
     generator.generate_moves(state);
@@ -118,13 +124,14 @@ pub fn perft_divide(state: &GameState, depth: u8) {
 
     for i in 0..generator.list.count {
         let mv = generator.list.moves[i];
-        let next_state = state.make_move(mv);
+        let mut next_state = state.make_move(mv);
 
-        let our_king = if state.side_to_move == WHITE { K } else { k };
+        let side_that_just_moved = 1 - state.side_to_move;
+        let our_king = if side_that_just_moved == WHITE { K } else { k };
         let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
 
         if !is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
-            let count = perft(&next_state, depth - 1);
+            let count = perft(&mut next_state, depth - 1);
             println!(
                 "{}{}: {}",
                 crate::search::square_to_coord(mv.source()),
@@ -147,11 +154,11 @@ mod tests {
         crate::zobrist::init_zobrist();
         crate::bitboard::init_magic_tables();
         crate::movegen::init_move_tables();
-        let state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert_eq!(perft(&state, 1), 20);
-        assert_eq!(perft(&state, 2), 400);
-        assert_eq!(perft(&state, 3), 8902);
-        // assert_eq!(perft(&state, 4), 197281); // Takes ~0.5s
+        let mut state = GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(perft(&mut state, 1), 20);
+        assert_eq!(perft(&mut state, 2), 400);
+        assert_eq!(perft(&mut state, 3), 8902);
+        // assert_eq!(perft(&mut state, 4), 197281); // Takes ~0.5s
     }
 
     #[test]
@@ -159,10 +166,10 @@ mod tests {
         crate::zobrist::init_zobrist();
         crate::bitboard::init_magic_tables();
         crate::movegen::init_move_tables();
-        let state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
-        assert_eq!(perft(&state, 1), 48);
-        assert_eq!(perft(&state, 2), 2039);
-        assert_eq!(perft(&state, 3), 97862);
+        let mut state = GameState::parse_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        assert_eq!(perft(&mut state, 1), 48);
+        assert_eq!(perft(&mut state, 2), 2039);
+        assert_eq!(perft(&mut state, 3), 97862);
     }
 
     #[test]
@@ -170,8 +177,8 @@ mod tests {
         crate::zobrist::init_zobrist();
         crate::bitboard::init_magic_tables();
         crate::movegen::init_move_tables();
-        let state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
-        assert_eq!(perft(&state, 1), 26);
+        let mut state = GameState::parse_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        assert_eq!(perft(&mut state, 1), 26);
     }
 
     #[test]
