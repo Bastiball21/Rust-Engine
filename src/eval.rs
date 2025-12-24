@@ -446,6 +446,8 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
         let sq = iter.get_lsb_index() as u8;
         iter.pop_bit(sq);
 
+        // Exclude the King from hanging piece logic.
+        // A "hanging" King is handled via check/mate logic, not material penalty.
         if sq == king_sqs[us] as u8 {
             continue;
         }
