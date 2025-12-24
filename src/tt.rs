@@ -532,16 +532,25 @@ impl TranspositionTable {
 
         // Fix: Castling is not a capture!
         // If King captures friendly Rook, it's castling, so set is_capture = false.
+        // BUT we must be careful: King capturing Friendly QUEEN is NOT castling.
+        // It must be a Rook.
         if is_capture {
             let piece_type = state.board[from] as usize;
             let captured_type = state.board[to] as usize;
-            let is_friendly = if state.side_to_move == WHITE {
-                 captured_type <= K
-            } else {
-                 captured_type >= p
-            };
-            if (piece_type == K || piece_type == k) && is_friendly {
-                is_capture = false;
+
+            let rook_type = if state.side_to_move == WHITE { R } else { r };
+
+            // Only convert to Quiet if target is actually a Rook
+            if (piece_type == K || piece_type == k) && captured_type == rook_type {
+                let is_friendly = if state.side_to_move == WHITE {
+                     captured_type <= K
+                } else {
+                     captured_type >= p
+                };
+
+                if is_friendly {
+                    is_capture = false;
+                }
             }
         }
 
@@ -599,34 +608,19 @@ impl TranspositionTable {
         if mv.is_capture() {
             if !is_occupied && !is_ep { return false; }
         } else {
-            // Castling moves (King to Rook) are QUIET moves in terms of capture flag in some engines,
-            // but in Aether Move struct `is_capture` is a bit.
-            // The Move struct doesn't have a specific Castling flag, it uses the move coordinates.
-            // If the user's movegen generates castling as "King captures Rook" internally?
-            // "Castling moves are internally represented and processed as 'King captures Rook' (King moves to the rook's current square)..."
-            // Wait, if it's processed as King Captures Rook, then `is_capture` might be true?
-            // Let's check `state.rs`: `is_castling` logic relies on `piece_type == K` and `target_piece == R`.
-            // But does the `Move` object have `is_capture` set?
-            // In `state.rs`: `if is_castling { captured_piece = NO_PIECE ... }`.
-            // The Move generation usually sets `is_capture` based on target occupancy.
-            // If King moves to Rook, target is occupied. So `is_capture` would be true?
-            // `Move::new` sets capture bit if `is_capture` arg is true.
-            // Let's check `movegen.rs` (I can't see it right now but I can infer).
-            // Actually, in `state.rs`, `make_move_inplace`:
-            // `if piece_type == K ... if target_piece == R ... is_castling = true`.
-            // It doesn't check `mv.is_capture()`.
-            // However, `is_pseudo_legal` checks `mv.is_capture()`.
+            // Check if target is occupied in BITBOARDS to prevent "Quiet" moves to "Ghost" squares.
+            // If board says empty (is_occupied=false) but bitboard says occupied, it's a desync/ghost -> Reject.
+            if state.occupancies[crate::state::BOTH].get_bit(to) {
+                if !is_occupied { return false; }
 
-            // If target is occupied (Rook), `is_occupied` is true.
-            // If `mv.is_capture()` is false, but `is_occupied` is true, it returns false.
-            // So if castling moves come from TT as "Quiet" (is_capture=false), we must handle that.
-            // If they come as "Capture" (is_capture=true), we must handle that too.
-            // Usually castling is stored as a special move or encoded.
-            // But here it seems to use coordinate encoding.
-
-            if is_occupied {
-                // Special case for Castling: King moves to own Rook
+                // If occupied (in both), it must be a Castling attempt (King -> Own Rook)
+                // Any other quiet move to an occupied square is illegal (capture flag missing).
                 let is_castling_attempt = (piece_type == K && target_piece == R) || (piece_type == k && target_piece == r);
+
+                if !is_castling_attempt {
+                     return false;
+                }
+
                 if is_castling_attempt {
                     return true;
                 }
