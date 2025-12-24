@@ -79,7 +79,7 @@ pub fn uci_loop() {
                 println!("option name Threads type spin default 1 min 1 max 64");
                 println!("option name SyzygyPath type string default <empty>");
                 println!("option name Move Overhead type spin default 10 min 0 max 5000");
-                println!("option name EvalFile type string default <empty>");
+                println!("option name EvalFile type string default nn-aether.nnue");
                 println!("option name UCI_Chess960 type check default false");
                 println!("option name TTShards type spin default 1 min 1 max 64");
                 println!("uciok");
