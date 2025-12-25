@@ -41,6 +41,8 @@ Then send UCI commands (e.g., `uci`, `isready`, `go depth 10`).
 *   **EvalFile**: Path to the NNUE network file. The engine attempts to load `nn-aether.nnue` from the working directory by default.
 *   **UCI_Chess960**: Enable Chess960 (Fischer Random) mode.
 *   **SyzygyPath**: Path to Syzygy endgame tablebases.
+*   **TTShards**: Number of Transposition Table shards (Range: 1-64, Default: 1).
+*   **Move Overhead**: Time buffer in milliseconds to compensate for network/GUI latency (Range: 0-5000, Default: 10).
 
 ### Evaluation Fallback
 If no NNUE network is loaded, Aether falls back to a Hand-Crafted Evaluation (HCE). This allows the engine to function without a network file, though playing strength will be significantly lower.
