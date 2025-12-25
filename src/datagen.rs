@@ -194,7 +194,8 @@ pub fn run_datagen(config: DatagenConfig) {
             .open(filename)
             .expect("Unable to open output file");
 
-        let mut writer = BufWriter::new(file);
+        // massive I/O Buffer: 32MB
+        let mut writer = BufWriter::with_capacity(32 * 1024 * 1024, file);
         let mut games_written = 0;
         let mut positions_written = 0;
         let mut seen_hashes: HashSet<u64> = HashSet::new();
@@ -350,30 +351,33 @@ pub fn run_datagen(config: DatagenConfig) {
                                 break;
                             }
 
-                            let mut legal_moves = Vec::with_capacity(64);
-                            for i in 0..moves.list.count {
-                                let m = moves.list.moves[i];
+                            // Lazy Validation
+                            let mut picked_move = None;
+                            while moves.list.count > 0 {
+                                let idx = rng.range(0, moves.list.count);
+                                let m = moves.list.moves[idx];
                                 let next_state = state.make_move(m);
                                 if !crate::search::is_check(&next_state, state.side_to_move) {
-                                    legal_moves.push(m);
+                                    picked_move = Some(m);
+                                    state = next_state;
+                                    break;
+                                } else {
+                                    // Swap-remove
+                                    moves.list.moves[idx] = moves.list.moves[moves.list.count - 1];
+                                    moves.list.count -= 1;
                                 }
                             }
 
-                            if legal_moves.is_empty() {
-                                abort_game = true;
-                                break;
-                            }
+                            if let Some(m) = picked_move {
+                                game_ply += 1;
+                                *rep_history.entry(state.hash).or_insert(0) += 1;
+                                history_vec.push(state.hash);
 
-                            let idx = rng.range(0, legal_moves.len());
-                            let m = legal_moves[idx];
-
-                            state = state.make_move(m);
-                            game_ply += 1;
-
-                            *rep_history.entry(state.hash).or_insert(0) += 1;
-                            history_vec.push(state.hash);
-
-                            if state.halfmove_clock >= 100 || is_trivial_endgame(&state) {
+                                if state.halfmove_clock >= 100 || is_trivial_endgame(&state) {
+                                    abort_game = true;
+                                    break;
+                                }
+                            } else {
                                 abort_game = true;
                                 break;
                             }
@@ -391,6 +395,7 @@ pub fn run_datagen(config: DatagenConfig) {
                     let mut finished = false;
                     let mut mercy_counter = 0;
                     let mut draw_counter = 0;
+                    let mut last_score: i32 = 0; // For Adaptive Depth
 
                     loop {
                         // Repetition / 50-move
@@ -402,6 +407,31 @@ pub fn run_datagen(config: DatagenConfig) {
                             }
                         }
                         if state.halfmove_clock >= 100 {
+                            result_val = 0.5;
+                            finished = true;
+                            break;
+                        }
+
+                        // Syzygy Adjudication
+                        if state.occupancies[crate::state::BOTH].0.count_ones() <= 6 {
+                             if let Some(score) = crate::syzygy::probe_wdl(&state) {
+                                 if score > 0 {
+                                     // Win for side to move
+                                     result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
+                                 } else if score < 0 {
+                                     // Loss for side to move
+                                     result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
+                                 } else {
+                                     // Draw
+                                     result_val = 0.5;
+                                 }
+                                 finished = true;
+                                 break;
+                             }
+                        }
+
+                        // Insufficient Material Adjudication
+                        if is_trivial_endgame(&state) {
                             result_val = 0.5;
                             finished = true;
                             break;
@@ -420,25 +450,13 @@ pub fn run_datagen(config: DatagenConfig) {
                             break;
                         }
 
-                        if is_trivial_endgame(&state) {
-                            result_val = 0.5;
-                            finished = true;
-                            break;
-                        }
-
-                        // Determine Search Depth
+                        // Determine Search Depth (Adaptive)
                         let mut search_depth = 8;
-                        let mut is_decided = false;
-
-                        // Quick check for decided game using TT
-                        if let Some((score, _, _, _)) = tt.probe_data(state.hash, &state, None) {
-                            if score <= LOSING_SCORE_CP || score >= HIGH_SCORE_CP {
-                                is_decided = true;
-                            }
-                        }
-
-                        if is_decided {
-                            search_depth = 6;
+                        let abs_score = last_score.abs();
+                        if abs_score > 600 {
+                            search_depth -= 2;
+                        } else if abs_score > 300 {
+                            search_depth -= 1;
                         }
 
                         // Search
@@ -477,6 +495,8 @@ pub fn run_datagen(config: DatagenConfig) {
                             search_score = s;
                             best_move = m;
                         }
+
+                        last_score = search_score;
 
                         // Mercy Rule
                         if search_score.abs() >= MERCY_CP {

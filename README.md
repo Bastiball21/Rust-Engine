@@ -87,3 +87,45 @@ The trainer crate requires `nvcc` and CUDA libraries to build. If CUDA is not av
 ./train.sh my_data.bin
 ```
 Checkpoints are saved to `trainer/checkpoints`.
+
+## 🧬 Adaptive Data Generation Strategy
+
+🧬 What “Adaptation” Means Here (No Buzzwords)
+In our datagen context, adaptation = the engine changes how it generates games based on what it’s learning.
+
+Not just: “Play 1M games at depth 8 and dump positions.”
+
+But: “Notice patterns → adjust behavior → generate better data next.”
+
+🔥 4 Levels of Adaptation (From Easy to Spicy)
+🟢 LEVEL 1 — Curriculum Adaptation (High ROI) Train in phases, where each phase feeds the next.
+
+Phase 1: Shallow depth, high randomness, wide eval range.
+
+Phase 2: Medium depth, reduced randomness.
+
+Phase 3: Deeper depth, near-deterministic, high-quality positions.
+
+Implementation: Run datagen in multiple passes, mixing datasets.
+
+🟢 LEVEL 2 — Eval-Range Feedback (Implemented) Bias generation toward uncertain positions.
+
+Problem: Self-play drifts into boring +10 eval stomps.
+
+Solution: We dynamically reduce search depth if the evaluation indicates a decided game (>300cp or >600cp), keeping resources focused on the critical path.
+
+🟡 LEVEL 3 — On-the-Fly Network Reloading Create a bootstrap loop: Engine → Data → Network → Stronger Engine → Better Data
+
+No MCTS or policy learning required. Just pure Alpha-Beta grinding with an evolving evaluation function.
+
+🟡 LEVEL 4 — Opponent Diversity Prevent style collapse by randomizing opponents.
+
+Example: Randomly pair "Aggressive Config" vs "Conservative Config" during self-play to force the network to handle different playing styles.
+
+🧠 Anti-Goals (What we DO NOT do)
+
+❌ Full AlphaZero RL loop (too complex/slow)
+
+❌ MCTS policy targets
+
+❌ Online gradient updates mid-search
