@@ -3,7 +3,7 @@ My first chess engine
 
 ## Features
 *   **Search**: Alpha-Beta with Principal Variation Search, Transposition Table, Iterative Deepening.
-*   **Evaluation**: NNUE (Efficiently Updatable Neural Network) with Hand-Crafted Evaluation (HCE) fallback.
+*   **Evaluation**: Hybrid 5-Layer NNUE (768 → 256 → 32 → 32 → 32 → 1) with Hand-Crafted Evaluation (HCE) fallback.
 *   **Protocol**: Universal Chess Interface (UCI).
 *   **Training**: CUDA-accelerated NNUE trainer using `bullet`.
 
@@ -41,28 +41,35 @@ Then send UCI commands (e.g., `uci`, `isready`, `go depth 10`).
 *   **EvalFile**: Path to the NNUE network file. The engine attempts to load `nn-aether.nnue` from the working directory by default.
 *   **UCI_Chess960**: Enable Chess960 (Fischer Random) mode.
 *   **SyzygyPath**: Path to Syzygy endgame tablebases.
+*   **TTShards**: Number of Transposition Table shards (Range: 1-64, Default: 1).
+*   **Move Overhead**: Time buffer in milliseconds to compensate for network/GUI latency (Range: 0-5000, Default: 10).
 
 ### Evaluation Fallback
 If no NNUE network is loaded, Aether falls back to a Hand-Crafted Evaluation (HCE). This allows the engine to function without a network file, though playing strength will be significantly lower.
 
 ## Data Generation
 
-Generate self-play games for training using the `datagen` command.
+Generate self-play games for training using the `datagen` command. This mode uses Pure Self-Play with random walk openings (Zero Knowledge/No Book).
+
+**New Features:**
+*   **Duplicate Game Prevention**: Ensures unique games.
+*   **Fixed Depth**: Uses fixed search depth instead of node limits.
+*   **Mercy Rule Adjudication**: Early termination for decisive games.
 
 **Command:**
 ```bash
-cargo run --release -- datagen <games> <threads> <depth> <filename> [book_path] [book_ply]
+cargo run --release -- datagen <games> <threads> <depth> <filename> <seed>
 ```
 
 **Example:**
 ```bash
-# Generate 1000 games on 1 thread, depth 6, saving to data.bin
-cargo run --release -- datagen 1000 1 6 data.bin /path/to/book.epd 16
+# Generate 1000 games on 1 thread, depth 8, saving to data.bin with seed 12345
+cargo run --release -- datagen 1000 1 8 data.bin 12345
 ```
 
 ## Training
 
-To train the NNUE network, you need a training dataset (generated via the `datagen` command) and a CUDA-capable GPU.
+To train the NNUE network, you need a training dataset (generated via the `datagen` command) and a CUDA-capable GPU. The trainer is configured for the Hybrid 5-Layer Architecture.
 
 **Command:**
 ```bash
