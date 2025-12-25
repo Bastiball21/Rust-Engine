@@ -8,8 +8,9 @@ use bulletformat::BulletFormat;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::BufWriter;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -143,9 +144,13 @@ pub fn run_datagen(config: DatagenConfig) {
     // Channel now carries (GameHash, Data)
     let (tx, rx) = mpsc::sync_channel::<(u64, Vec<bulletformat::ChessBoard>)>(1000);
 
+    let global_games_written = Arc::new(AtomicUsize::new(0));
+
     // Writer Thread
     let filename = config.filename.clone();
     let total_games = config.num_games;
+    let writer_counter = global_games_written.clone();
+
     let writer_handle = thread::spawn(move || {
         let file = OpenOptions::new()
             .create(true)
@@ -170,6 +175,7 @@ pub fn run_datagen(config: DatagenConfig) {
 
             bulletformat::ChessBoard::write_to_bin(&mut writer, &game_data).unwrap();
             games_written += 1;
+            writer_counter.fetch_add(1, Ordering::Relaxed);
             positions_written += game_data.len();
 
             if games_written % 100 == 0 {
@@ -213,18 +219,13 @@ pub fn run_datagen(config: DatagenConfig) {
 
     // Worker Threads
     let mut handles = vec![];
-    let games_per_thread = config.num_games / config.num_threads; // Approximate target
-    // Note: Since we discard duplicates, we might need to run longer, but for now we stick to fixed loop
-    // or we could loop until globally enough games are written.
-    // The current architecture counts generated games, not written games for termination.
-    // We will just let it run for the requested iterations and accept some loss due to duplicates.
-    let remainder = config.num_games % config.num_threads;
-
+    // Note: We use a global counter to ensure we meet the target despite discarded duplicates.
+    let target_games = config.num_games;
     let default_params = SearchParameters::default();
 
     for t_id in 0..config.num_threads {
         let tx = tx.clone();
-        let my_games = games_per_thread + if t_id < remainder { 1 } else { 0 };
+        let global_counter = global_games_written.clone();
         let params_clone = default_params.clone();
 
         let builder = thread::Builder::new()
@@ -246,7 +247,7 @@ pub fn run_datagen(config: DatagenConfig) {
                 let mut history_vec: Vec<u64> = Vec::with_capacity(300);
                 let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
 
-                for _ in 0..my_games {
+                while global_counter.load(Ordering::Relaxed) < target_games {
                     tt.clear();
                     search_data.clear();
                     rep_history.clear();
