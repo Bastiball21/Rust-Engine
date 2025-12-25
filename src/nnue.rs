@@ -228,34 +228,65 @@ pub fn make_index(perspective: usize, piece: usize, sq: usize, king_bucket: usiz
 }
 
 // --------------------------------------------------------
-// Evaluation
+// SIMD Helpers
 // --------------------------------------------------------
 
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
-unsafe fn affine_tx_simd(input: &[i8], weights: &[i8], bias: &[i32], output: &mut [i8], in_size: usize, out_size: usize) {
-    // Weights layout: [Output][Input] (row major) - BUT typical NNUE is [Input][Output] (column major).
-    // The trainer usually exports column major for efficiency? Or row major?
-    // Bullet usually exports: Input 0 -> All Outputs, Input 1 -> All Outputs.
-    // Wait, let's check how we read it.
-    // read_i16_slice simply reads bytes.
-    // Standard affine layer matrix mult: O = I * W + B
-    // In SIMD, if weights are column-major (Input-major), we broadcast input and multiply by weight row.
-    // If weights are row-major (Output-major), we dot product input with weight row.
-    // Assuming standard Linear layer export: [InputDim x OutputDim]
-    //
-    // Actually, for small layers (32x32), we can just do naive loop or specialized SIMD.
-    // Let's stick to a robust implementation first, then optimize.
-    //
-    // However, our weights are quantized to i8 (actually loaded as i16 in struct, but conceptually i8 for calculation?)
-    // Wait, the plan says weights +/- 64. So they fit in i8.
-    // But our struct uses Vec<i16> for everything to keep it simple.
-    // Let's use i16 everywhere for safety and AVX2 _mm256_madd_epi16.
+#[target_feature(enable = "avx2")]
+unsafe fn screlu_calc_avx2(val: __m256i, scale: __m256) -> __m256i {
+    let lo_lane = _mm256_castsi256_si128(val);
+    let lo_epi32 = _mm256_cvtepu16_epi32(lo_lane);
+    let lo_ps = _mm256_cvtepi32_ps(lo_epi32);
+    let lo_sq = _mm256_mul_ps(lo_ps, lo_ps);
+    let lo_res = _mm256_mul_ps(lo_sq, scale);
+    let lo_int = _mm256_cvttps_epi32(lo_res);
 
-    // Fallback to scalar for complex layers for now to avoid layout bugs.
-    // The accumulator part (feature transformer) is the bottleneck anyway.
-    panic!("SIMD path not fully implemented for deep layers yet");
+    let hi_lane = _mm256_extracti128_si256::<1>(val);
+    let hi_epi32 = _mm256_cvtepu16_epi32(hi_lane);
+    let hi_ps = _mm256_cvtepi32_ps(hi_epi32);
+    let hi_sq = _mm256_mul_ps(hi_ps, hi_ps);
+    let hi_res = _mm256_mul_ps(hi_sq, scale);
+    let hi_int = _mm256_cvttps_epi32(hi_res);
+
+    let packed = _mm256_packus_epi32(lo_int, hi_int);
+    _mm256_permute4x64_epi64::<0b11_01_10_00>(packed)
 }
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i16], output: &mut [i16], in_size: usize, out_size: usize) {
+    let qb = QB as i32;
+
+    for i in 0..out_size {
+        let mut sum_vec = _mm256_setzero_si256();
+        let w_row_offset = i * in_size;
+
+        for j in (0..in_size).step_by(16) {
+            let in_ptr = input.as_ptr().add(j);
+            let w_ptr = weights.as_ptr().add(w_row_offset + j);
+
+            let v_in = _mm256_loadu_si256(in_ptr as *const __m256i);
+            let v_w = _mm256_loadu_si256(w_ptr as *const __m256i);
+
+            let prod = _mm256_madd_epi16(v_in, v_w);
+            sum_vec = _mm256_add_epi32(sum_vec, prod);
+        }
+
+        let v_lo = _mm256_castsi256_si128(sum_vec);
+        let v_hi = _mm256_extracti128_si256::<1>(sum_vec);
+        let v_sum = _mm_add_epi32(v_lo, v_hi);
+        let v_sum2 = _mm_hadd_epi32(v_sum, v_sum);
+        let v_sum3 = _mm_hadd_epi32(v_sum2, v_sum2);
+        let sum_part = _mm_cvtsi128_si32(v_sum3);
+
+        let total_sum = sum_part + biases[i] as i32;
+        output[i] = (total_sum / qb) as i16;
+    }
+}
+
+// --------------------------------------------------------
+// Evaluation
+// --------------------------------------------------------
 
 pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
     if let Some(net) = NETWORK.get() {
@@ -263,162 +294,107 @@ pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
             panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid...");
         }
 
-        // 1. Feature Transformer Output (L1 Input)
-        // Concatenate SCReLU(STM) + SCReLU(NTM) -> 256 + 256 = 512
-        let mut l1_input = [0i8; 512]; // Quantized activations [0, 127]
-
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            let zero = _mm256_setzero_si256();
-            let qa = _mm256_set1_epi16(QA as i16);
-
-            // STM -> First 256
-            for i in (0..L1_SIZE).step_by(16) {
-                let v_ptr = stm_acc.v.as_ptr().add(i);
-                let val = _mm256_loadu_si256(v_ptr as *const __m256i);
-                let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
-                let sq = _mm256_mullo_epi16(clamped, clamped);
-                // Divide by 255 -> mulhi with reciprocal approx?
-                // x^2 / 255 ~= (x^2 * 257) >> 16
-                let activation = _mm256_mulhi_epu16(sq, _mm256_set1_epi16(257));
-
-                // Pack to i8 (0..127 range expected? No, SCReLU output is 0..255)
-                // Wait, L1 input expects quantized range.
-                // Trainer: SavedFormat::id("l1w").round().quantise::<i16>(64)
-                // The input to L1 is the output of L0.
-                // L0 Output is SCReLU -> 0..255.
-                // We store it as i8? i8 is -128..127. 255 doesn't fit in i8!
-                // We need u8 or i16.
-                // Let's look at `l1_input`. If we define it as i16, we are safe.
-
-                // Correction: `l1_input` should be `i16` to hold 0..255.
-                // But later layers use ClippedReLU which is 0..127 (fits in i8).
-                // Let's use `i16` for intermediate buffers to be safe and compatible with our `Network` struct (Vec<i16>).
-            }
-        }
-
         let mut hidden_512 = [0i16; 512];
 
-        // STM
-        for i in 0..L1_SIZE {
-            let val = stm_acc.v[i].clamp(0, 255);
-            hidden_512[i] = SCRELU[val as usize];
-        }
-        // NTM
-        for i in 0..L1_SIZE {
-            let val = ntm_acc.v[i].clamp(0, 255);
-            hidden_512[L1_SIZE + i] = SCRELU[val as usize];
+        // L1 Input generation
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let zero = _mm256_setzero_si256();
+                let qa = _mm256_set1_epi16(QA as i16);
+                let scale = _mm256_set1_ps(1.0 / 255.0);
+
+                // STM
+                for i in (0..L1_SIZE).step_by(16) {
+                    let ptr = stm_acc.v.as_ptr().add(i);
+                    let val = _mm256_loadu_si256(ptr as *const __m256i);
+                    let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+                    let res = screlu_calc_avx2(clamped, scale);
+                    _mm256_storeu_si256(hidden_512.as_mut_ptr().add(i) as *mut __m256i, res);
+                }
+                // NTM
+                for i in (0..L1_SIZE).step_by(16) {
+                    let ptr = ntm_acc.v.as_ptr().add(i);
+                    let val = _mm256_loadu_si256(ptr as *const __m256i);
+                    let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+                    let res = screlu_calc_avx2(clamped, scale);
+                    _mm256_storeu_si256(hidden_512.as_mut_ptr().add(L1_SIZE + i) as *mut __m256i, res);
+                }
+            }
+        } else {
+             evaluate_l1_scalar(stm_acc, ntm_acc, &mut hidden_512);
         }
 
-        // 2. Layer 1: 512 -> 32
+        #[cfg(not(target_arch = "x86_64"))]
+        evaluate_l1_scalar(stm_acc, ntm_acc, &mut hidden_512);
+
+        // Layer 1: 512 -> 32
         let mut l2_out = [0i16; L2_SIZE];
-        layer_affine(&hidden_512, &net.l1_weights, &net.l1_biases, &mut l2_out, 512, L2_SIZE);
-        // Activation: ClippedReLU (0..127)
-        for x in l2_out.iter_mut() {
-            *x = (*x).clamp(0, Q_ACTIVATION as i16);
-        }
+        affine_layer_wrapper(&hidden_512, &net.l1_weights, &net.l1_biases, &mut l2_out, 512, L2_SIZE);
+        clamp_activations_wrapper(&mut l2_out);
 
-        // 3. Layer 2: 32 -> 32
+        // Layer 2: 32 -> 32
         let mut l3_out = [0i16; L3_SIZE];
-        layer_affine(&l2_out, &net.l2_weights, &net.l2_biases, &mut l3_out, L2_SIZE, L3_SIZE);
-        // Activation: ClippedReLU (0..127)
-        for x in l3_out.iter_mut() {
-            *x = (*x).clamp(0, Q_ACTIVATION as i16);
-        }
+        affine_layer_wrapper(&l2_out, &net.l2_weights, &net.l2_biases, &mut l3_out, L2_SIZE, L3_SIZE);
+        clamp_activations_wrapper(&mut l3_out);
 
-        // 4. Layer 3: 32 -> 32
+        // Layer 3: 32 -> 32
         let mut l4_out = [0i16; L4_SIZE];
-        layer_affine(&l3_out, &net.l3_weights, &net.l3_biases, &mut l4_out, L3_SIZE, L4_SIZE);
-        // Activation: ClippedReLU (0..127)
-        for x in l4_out.iter_mut() {
-            *x = (*x).clamp(0, Q_ACTIVATION as i16);
-        }
+        affine_layer_wrapper(&l3_out, &net.l3_weights, &net.l3_biases, &mut l4_out, L3_SIZE, L4_SIZE);
+        clamp_activations_wrapper(&mut l4_out);
 
-        // 5. Output Layer: 32 -> 1
+        // Output Layer: 32 -> 1
         let mut final_out = [0i16; 1];
-        layer_affine(&l4_out, &net.l4_weights, &net.l4_biases, &mut final_out, L4_SIZE, 1);
+        affine_layer_wrapper(&l4_out, &net.l4_weights, &net.l4_biases, &mut final_out, L4_SIZE, 1);
 
-        // Result
         let output = final_out[0] as i32;
-
-        // Scale back?
-        // Trainer scale: 400.
-        // Quantization:
-        // L0(255) * L1(64) * L2(64) * L3(64) * L4(64) ?
-        // The trainer handles the quantization scaling in the output bias/weights usually?
-        // Bullet output is raw sum.
-        // We usually divide by (QA * QB...)
-        // Let's assume standard behavior:
-        // Output = Sum / (QA * QB) * SCALE
-        // Here we have multiple layers.
-        // If we strictly follow the quantized integer arithmetic:
-        // L1_out = (Input * W1 + B1) >> Shift?
-        // Bullet `quantise` helper usually just clamps the float weights to int range.
-        // It does NOT automatically add bitshifts to the network file.
-        // We need to divide by the quantization factor accumulated.
-        //
-        // Factors:
-        // Input: 0..255 (QA=255)
-        // L1 Weights: 64 (QB=64)
-        // L1 Out (Accum): 255 * 64 * 512 ~= 8M. Fits in i32.
-        // We clamp L1 Out to 0..127 (ClippedReLU).
-        // Effectively we implicitly divide by (AccumMax / 127)?
-        // No, `bullet` training trains the weights such that the activations fall in range.
-        // But for *inference*, we normally just sum.
-        // If we sum integers, the values grow.
-        //
-        // 1. Input: u8 (0..255)
-        // 2. L1: Input * i8(64). Sum can be large.
-        //    We need to right-shift to bring it back to activation range (0..127)?
-        //    Or does the bias handle it?
-        //    Usually: (Sum + Bias) / QuantFactor
-        //
-        //    Let's check the quantisation params in trainer again.
-        //    L1W: 64. L1B: 64*127.
-        //    This implies the "1" in this layer corresponds to 64*127 raw value?
-        //
-        //    Actually, simple integer inference usually works like this:
-        //    Layer Output = (Sum) / Shift
-        //    where Shift brings it back to next layer's input scale.
-        //    Next layer input scale is 0..127.
-        //
-        //    Let's try a standard heuristic:
-        //    L1_Out = (Sum) / 64
-        //    L2_Out = (Sum) / 64
-        //    ...
-        //
-        //    Wait, `(val * val) / 255` is SCReLU. That returns 0..255.
-        //
-        //    Let's assume the divisor is roughly QB (64) for each layer.
-
-        let final_val = output;
-
-        // We need to descale the total accumulation of quantization factors.
-        // Input (255) * W1(64) -> / 64 -> 255? No, target is 127. / 128?
-        // Let's assume we simply divide by QB=64 at each step to normalize?
-        //
-        // Actually, let's look at `evaluate` in `src/nnue.rs` before I overwrote it.
-        // It did `(sum * SCALE) / (QA * QB)`.
-        // That was for 1 layer.
-        //
-        // For deep networks, we typically just perform the matmul and rely on the fact that
-        // weights are small. But we clamp to 127.
-        // If we don't divide, the sum will instantly exceed 127.
-        // So yes, division is required.
-        //
-        // Divisor = WeightQuantization (64).
-        //
-        // Let's refine `layer_affine`:
-
-        (final_val * SCALE) / (QB * Q_ACTIVATION)
+        (output * SCALE) / (QB * Q_ACTIVATION)
     } else {
         0
     }
 }
 
-// Simple scalar affine layer: Out = In * W + B
-// DIVIDES by 64 (QB) after summation to normalize.
-fn layer_affine(input: &[i16], weights: &[i16], biases: &[i16], output: &mut [i16], in_size: usize, out_size: usize) {
+fn evaluate_l1_scalar(stm: &Accumulator, ntm: &Accumulator, output: &mut [i16]) {
+    for i in 0..L1_SIZE {
+        let val = stm.v[i].clamp(0, 255);
+        output[i] = SCRELU[val as usize];
+    }
+    for i in 0..L1_SIZE {
+        let val = ntm.v[i].clamp(0, 255);
+        output[L1_SIZE + i] = SCRELU[val as usize];
+    }
+}
+
+fn affine_layer_wrapper(input: &[i16], weights: &[i16], biases: &[i16], output: &mut [i16], in_size: usize, out_size: usize) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        unsafe { layer_affine_avx2(input, weights, biases, output, in_size, out_size); }
+        return;
+    }
+    layer_affine_scalar(input, weights, biases, output, in_size, out_size);
+}
+
+fn clamp_activations_wrapper(buffer: &mut [i16]) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let max = _mm256_set1_epi16(Q_ACTIVATION as i16);
+            for i in (0..buffer.len()).step_by(16) {
+                 let ptr = buffer.as_mut_ptr().add(i);
+                 let v = _mm256_loadu_si256(ptr as *const __m256i);
+                 let res = _mm256_min_epi16(_mm256_max_epi16(v, zero), max);
+                 _mm256_storeu_si256(ptr as *mut __m256i, res);
+            }
+        }
+        return;
+    }
+    for x in buffer.iter_mut() {
+        *x = (*x).clamp(0, Q_ACTIVATION as i16);
+    }
+}
+
+fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i16], output: &mut [i16], in_size: usize, out_size: usize) {
     for i in 0..out_size {
         let mut sum: i32 = biases[i] as i32;
         for j in 0..in_size {
@@ -428,7 +404,6 @@ fn layer_affine(input: &[i16], weights: &[i16], biases: &[i16], output: &mut [i1
         output[i] = (sum / QB) as i16;
     }
 }
-
 
 // --------------------------------------------------------
 // Network & Loading
