@@ -26,6 +26,8 @@ const HIGH_SCORE_CP: i32 = 600;
 // Losing Side Threshold
 const LOSING_SCORE_CP: i32 = -500;
 
+static STOP_FLAG: AtomicBool = AtomicBool::new(false);
+
 pub struct DatagenConfig {
     pub num_games: usize,
     pub num_threads: usize,
@@ -133,6 +135,9 @@ fn is_trivial_endgame(state: &GameState) -> bool {
 }
 
 pub fn run_datagen(config: DatagenConfig) {
+    // Reset the flag in case this function is called multiple times
+    STOP_FLAG.store(false, Ordering::Relaxed);
+
     println!("Starting Datagen (Aether Zero)");
     println!("  Games:    {}", config.num_games);
     println!("  Threads:  {}", config.num_threads);
@@ -178,6 +183,11 @@ pub fn run_datagen(config: DatagenConfig) {
             writer_counter.fetch_add(1, Ordering::Relaxed);
             positions_written += game_data.len();
 
+            if games_written >= total_games {
+                STOP_FLAG.store(true, Ordering::Relaxed);
+                break;
+            }
+
             if games_written % 100 == 0 {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let games_per_sec = games_written as f64 / elapsed;
@@ -219,13 +229,10 @@ pub fn run_datagen(config: DatagenConfig) {
 
     // Worker Threads
     let mut handles = vec![];
-    // Note: We use a global counter to ensure we meet the target despite discarded duplicates.
-    let target_games = config.num_games;
     let default_params = SearchParameters::default();
 
     for t_id in 0..config.num_threads {
         let tx = tx.clone();
-        let global_counter = global_games_written.clone();
         let params_clone = default_params.clone();
 
         let builder = thread::Builder::new()
@@ -247,7 +254,11 @@ pub fn run_datagen(config: DatagenConfig) {
                 let mut history_vec: Vec<u64> = Vec::with_capacity(300);
                 let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
 
-                while global_counter.load(Ordering::Relaxed) < target_games {
+                loop {
+                    if STOP_FLAG.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     tt.clear();
                     search_data.clear();
                     rep_history.clear();
@@ -499,7 +510,9 @@ pub fn run_datagen(config: DatagenConfig) {
 
                         if !game_data.is_empty() {
                             // Send GameID + Data
-                            tx.send((game_id, game_data)).unwrap();
+                            if tx.send((game_id, game_data)).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
