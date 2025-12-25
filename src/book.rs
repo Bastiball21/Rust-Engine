@@ -110,7 +110,7 @@ impl Book {
     }
 }
 
-fn process_pgn_game(move_text: &str, stop_ply: usize) -> Option<GameState> {
+pub fn process_pgn_game(move_text: &str, stop_ply: usize) -> Option<GameState> {
     let mut state =
         GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
@@ -183,7 +183,7 @@ fn process_pgn_game(move_text: &str, stop_ply: usize) -> Option<GameState> {
     Some(state)
 }
 
-fn parse_san(state: &GameState, san: &str) -> Option<Move> {
+pub fn parse_san(state: &GameState, san: &str) -> Option<Move> {
     // Clean SAN (remove +, #, etc)
     let san = san.trim_matches(|c| c == '+' || c == '#' || c == '!' || c == '?');
 

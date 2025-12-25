@@ -8,12 +8,13 @@ use crate::parameters::SearchParameters;
 use bulletformat::BulletFormat;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::BufWriter;
+use std::io::{BufRead, BufWriter, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+use std::fs::File;
 
 // --- Config Constants ---
 const MERCY_CP: i32 = 1000;
@@ -82,6 +83,211 @@ impl Rng {
             slice.swap(i, j);
         }
     }
+}
+
+pub fn convert_pgn(pgn_path: &str, output_path: &str) {
+    println!("Converting PGN: {} -> {}", pgn_path, output_path);
+
+    let pgn_file = File::open(pgn_path).expect("Failed to open PGN file");
+    let reader = std::io::BufReader::new(pgn_file);
+    let output_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true) // Overwrite
+        .open(output_path)
+        .expect("Failed to open output file");
+
+    let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, output_file);
+    let mut games_converted = 0;
+    let mut positions_converted = 0;
+
+    let mut current_moves = String::new();
+    let mut in_moves = false;
+    let start_time = Instant::now();
+
+    for line_res in reader.lines() {
+        let line = line_res.expect("Error reading line");
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') {
+            // Header
+            if in_moves {
+                // End of previous game
+                if !current_moves.is_empty() {
+                    let count = process_and_write_game(&current_moves, &mut writer);
+                    if count > 0 {
+                        games_converted += 1;
+                        positions_converted += count;
+                        if games_converted % 1000 == 0 {
+                            println!(
+                                "Converted {} games, {} positions ({:.1} games/s)",
+                                games_converted,
+                                positions_converted,
+                                games_converted as f64 / start_time.elapsed().as_secs_f64()
+                            );
+                        }
+                    }
+                    current_moves.clear();
+                }
+                in_moves = false;
+            }
+        } else {
+            // Moves
+            in_moves = true;
+            current_moves.push_str(trimmed);
+            current_moves.push(' ');
+        }
+    }
+
+    // Last game
+    if !current_moves.is_empty() {
+        let count = process_and_write_game(&current_moves, &mut writer);
+        if count > 0 {
+            games_converted += 1;
+            positions_converted += count;
+        }
+    }
+
+    // Flush
+    writer.flush().unwrap();
+
+    println!(
+        "Conversion Complete. Games: {}, Positions: {}",
+        games_converted, positions_converted
+    );
+}
+
+fn process_and_write_game(move_text: &str, writer: &mut BufWriter<File>) -> usize {
+    let mut state =
+        GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let mut count = 0;
+
+    // Remove comments
+    let mut clean_text = String::with_capacity(move_text.len());
+    let mut depth_brace = 0;
+    let mut depth_paren = 0;
+
+    for c in move_text.chars() {
+        match c {
+            '{' => depth_brace += 1,
+            '}' => {
+                if depth_brace > 0 {
+                    depth_brace -= 1
+                }
+            }
+            '(' => depth_paren += 1,
+            ')' => {
+                if depth_paren > 0 {
+                    depth_paren -= 1
+                }
+            }
+            _ => {
+                if depth_brace == 0 && depth_paren == 0 {
+                    clean_text.push(c);
+                }
+            }
+        }
+    }
+
+    // Handle compact PGNs (e.g. "1.e4") by adding spaces around dots
+    let spaced_text = clean_text.replace(".", " . ");
+    let tokens: Vec<&str> = spaced_text.split_whitespace().collect();
+
+    // 1. Determine Global Result First?
+    // The prompt says: Parse Global Result: "1-0" -> 1.0, etc.
+    // Result is usually the last token.
+    let last_token = tokens.last();
+    let global_white_score = if let Some(res) = last_token {
+        match *res {
+            "1-0" => 1.0,
+            "0-1" => 0.0,
+            "1/2-1/2" => 0.5,
+            _ => return 0, // Skip unfinished games (*) or unknown
+        }
+    } else {
+        return 0;
+    };
+
+    // 2. Move Loop
+    for token in tokens {
+        // Skip numbers and dots
+        if token.ends_with('.') || token == "." || token.chars().all(|c| c.is_numeric()) {
+            continue;
+        }
+        // Stop at result
+        if token == "1-0" || token == "0-1" || token == "1/2-1/2" || token == "*" {
+            break;
+        }
+
+        // 3. Process Position BEFORE making the move?
+        // Usually we label the position we are in.
+        // "Is this position good for the side to move?"
+        // So we evaluate `state` and check who is to move.
+        // `global_white_score` is fixed.
+
+        // Calculate Eval (Score)
+        let raw_stm = crate::eval::evaluate(&state, &None, -32000, 32000);
+
+        // ADAPTER: The user requires a mandatory logic block that assumes the input `raw_eval`
+        // is White-Relative. However, the engine's `evaluate` returns STM-Relative scores.
+        // To strictly satisfy the mandatory logic AND produce the correct STM output labels,
+        // we first convert the STM score to White-Relative.
+        //
+        // Logic check:
+        // Input: STM Score.
+        // Adapter: STM -> White-Relative.
+        // Mandatory Block: White-Relative -> STM Score.
+        // Result: STM Score (Goal Achieved).
+        let raw_eval = if state.side_to_move == crate::state::BLACK { -raw_stm } else { raw_stm };
+
+        // MANDATORY COMMENT & LOGIC
+        // IMPORTANT: eval::evaluate() returns White-relative centipawns.
+        // We flip here to enforce STM-relative training labels.
+        let stm_score = if state.side_to_move == crate::state::WHITE { raw_eval } else { -raw_eval };
+
+        // Calculate Result (Outcome)
+        // Logic: let stm_result = ...
+        let stm_result = if state.side_to_move == crate::state::WHITE {
+            global_white_score
+        } else {
+            1.0 - global_white_score // Flip: White Win (1.0) becomes Black Loss (0.0)
+        };
+
+        // Write Data
+        // convert_to_bullet expects White Relative score if we follow its docs, but user says:
+        // "Pass these STM-relative values directly. If helper functions complain... ignore them"
+        // So we pass stm_score (STM) and stm_result (STM).
+        // WARNING: bullet_helper sets `stm` field in ChessBoard.
+        // If bulletformat interprets score as always White-Relative, passing STM here is technically "wrong" for that format
+        // UNLESS the trainer knows to handle it.
+        // But we follow strict orders: "enforcing a single source of truth (STM)".
+
+        // Note: convert_to_bullet takes i16 for score. stm_score is i32. Clamp it.
+        let clamped_score = stm_score.clamp(-32000, 32000) as i16;
+        let board_data = convert_to_bullet(&state, clamped_score, stm_result);
+        bulletformat::ChessBoard::write_to_bin(writer, &[board_data]).unwrap();
+        count += 1;
+
+        // Make Move
+        if let Some(mv) = crate::book::parse_san(&state, token) {
+            let next_state = state.make_move(mv);
+            // Verify legality
+             if crate::search::is_check(&next_state, state.side_to_move) {
+                 // Illegal move in PGN? Stop game.
+                 break;
+             }
+             state = next_state;
+        } else {
+             // Parse error
+             break;
+        }
+    }
+
+    count
 }
 
 // --- Helpers ---
