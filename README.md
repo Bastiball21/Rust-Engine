@@ -67,6 +67,17 @@ cargo run --release -- datagen <games> <threads> <depth> <filename> <seed>
 cargo run --release -- datagen 1000 1 8 data.bin 12345
 ```
 
+### Convert PGN to Training Data
+Convert existing PGN files into binary training data.
+
+**Command:**
+```bash
+# Convert PGN to training data (STM-Relative Labels enforced)
+cargo run --release -- convert grandmaster.pgn data.bin
+```
+
+**Explicit Note:** "The converter enforces Side-to-Move (STM) relative labels for both Score and Result. This prevents label inversion (e.g., Black to move in a losing position is correctly labeled 0.0, even if White eventually won)."
+
 ## Training
 
 To train the NNUE network, you need a training dataset (generated via the `datagen` command) and a CUDA-capable GPU. The trainer is configured for the Hybrid 5-Layer Architecture.

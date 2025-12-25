@@ -84,6 +84,17 @@ pub fn run_cli() {
             return;
         }
 
+        if args[1] == "convert" {
+            if args.len() < 4 {
+                println!("Usage: cargo run --release -- convert <pgn_file> <output_bin>");
+                return;
+            }
+            let pgn_path = args[2].clone();
+            let output_path = args[3].clone();
+            datagen::convert_pgn(&pgn_path, &output_path);
+            return;
+        }
+
         if args[1] == "datagen" {
             // Usage: "Aether datagen <games> <threads> <depth> <filename> <seed> [book_path] [book_ply]"
             // Index: 0      1        2        3          4        5          6       7           8
