@@ -1,4 +1,5 @@
 // src/datagen.rs
+use crate::book::Book;
 use crate::bullet_helper::convert_to_bullet;
 use crate::search;
 use crate::state::{GameState, WHITE};
@@ -33,6 +34,8 @@ pub struct DatagenConfig {
     pub num_threads: usize,
     pub filename: String,
     pub seed: u64,
+    pub book_path: Option<String>,
+    pub book_ply: usize,
 }
 
 // --- SplitMix64 RNG ---
@@ -71,6 +74,13 @@ impl Rng {
             }
         }
         (m >> 64) as usize + min
+    }
+
+    fn shuffle<T>(&mut self, slice: &mut [T]) {
+        for i in (1..slice.len()).rev() {
+            let j = self.range(0, i + 1);
+            slice.swap(i, j);
+        }
     }
 }
 
@@ -143,7 +153,28 @@ pub fn run_datagen(config: DatagenConfig) {
     println!("  Threads:  {}", config.num_threads);
     println!("  Output:   {}", config.filename);
     println!("  Seed:     {}", config.seed);
-    println!("  Strategy: Random Walk (8-9 plies) -> Fixed Depth 8 (Adaptive 6)");
+
+    let book = if let Some(path) = &config.book_path {
+        println!("  Book:     {} (ply: {})", path, config.book_ply);
+        match Book::load_from_file(path, config.book_ply) {
+            Ok(b) => {
+                 if b.positions.is_empty() {
+                     println!("Warning: Book is empty. Falling back to Random Walk.");
+                     None
+                 } else {
+                     Some(Arc::new(b))
+                 }
+            },
+            Err(e) => {
+                println!("Error loading book: {}. Falling back to Random Walk.", e);
+                None
+            }
+        }
+    } else {
+        println!("  Strategy: Random Walk (8-9 plies)");
+        None
+    };
+
     println!("  Guards:   Mercy Rule, Early Draw, Duplicate Game Prevention");
 
     // Channel now carries (GameHash, Data)
@@ -234,6 +265,7 @@ pub fn run_datagen(config: DatagenConfig) {
     for t_id in 0..config.num_threads {
         let tx = tx.clone();
         let params_clone = default_params.clone();
+        let book_arc = book.clone();
 
         let builder = thread::Builder::new()
             .name(format!("datagen_worker_{}", t_id))
@@ -254,6 +286,15 @@ pub fn run_datagen(config: DatagenConfig) {
                 let mut history_vec: Vec<u64> = Vec::with_capacity(300);
                 let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
 
+                // Book Shuffle Bag
+                let mut book_indices: Vec<usize> = Vec::new();
+                let mut book_cursor = 0;
+
+                if let Some(book_ref) = &book_arc {
+                    book_indices = (0..book_ref.positions.len()).collect();
+                    rng.shuffle(&mut book_indices);
+                }
+
                 loop {
                     if STOP_FLAG.load(Ordering::Relaxed) {
                         break;
@@ -265,54 +306,77 @@ pub fn run_datagen(config: DatagenConfig) {
                     history_vec.clear();
                     positions.clear();
 
-                    // 1. Start from Startpos
-                    let mut state = GameState::parse_fen(
-                        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                    );
-
-                    // 2. Random Walk (8-9 plies)
-                    let random_plies = 8 + rng.range(0, 2);
+                    // 1. Setup Board
+                    let mut state;
                     let mut game_ply = 0;
                     let mut abort_game = false;
 
-                    rep_history.insert(state.hash, 1);
-                    history_vec.push(state.hash);
+                    if let Some(book_ref) = &book_arc {
+                        if book_cursor >= book_indices.len() {
+                            // Refill / Reshuffle
+                            rng.shuffle(&mut book_indices);
+                            book_cursor = 0;
+                        }
+                        let idx = book_indices[book_cursor];
+                        book_cursor += 1;
 
-                    for _ in 0..random_plies {
-                        let mut moves = crate::movegen::MoveGenerator::new();
-                        moves.generate_moves(&state);
+                        state = book_ref.positions[idx].clone();
 
-                        if moves.list.count == 0 {
-                            abort_game = true;
-                            break;
+                        // If state is inconsistent, skip
+                        if !state.is_consistent() {
+                            continue;
                         }
 
-                        let mut legal_moves = Vec::with_capacity(64);
-                        for i in 0..moves.list.count {
-                            let m = moves.list.moves[i];
-                            let next_state = state.make_move(m);
-                            if !crate::search::is_check(&next_state, state.side_to_move) {
-                                legal_moves.push(m);
-                            }
-                        }
-
-                        if legal_moves.is_empty() {
-                            abort_game = true;
-                            break;
-                        }
-
-                        let idx = rng.range(0, legal_moves.len());
-                        let m = legal_moves[idx];
-
-                        state = state.make_move(m);
-                        game_ply += 1;
-
-                        *rep_history.entry(state.hash).or_insert(0) += 1;
+                        rep_history.insert(state.hash, 1);
                         history_vec.push(state.hash);
 
-                        if state.halfmove_clock >= 100 || is_trivial_endgame(&state) {
-                            abort_game = true;
-                            break;
+                    } else {
+                        state = GameState::parse_fen(
+                            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                        );
+
+                        // 2. Random Walk (8-9 plies)
+                        let random_plies = 8 + rng.range(0, 2);
+
+                        rep_history.insert(state.hash, 1);
+                        history_vec.push(state.hash);
+
+                        for _ in 0..random_plies {
+                            let mut moves = crate::movegen::MoveGenerator::new();
+                            moves.generate_moves(&state);
+
+                            if moves.list.count == 0 {
+                                abort_game = true;
+                                break;
+                            }
+
+                            let mut legal_moves = Vec::with_capacity(64);
+                            for i in 0..moves.list.count {
+                                let m = moves.list.moves[i];
+                                let next_state = state.make_move(m);
+                                if !crate::search::is_check(&next_state, state.side_to_move) {
+                                    legal_moves.push(m);
+                                }
+                            }
+
+                            if legal_moves.is_empty() {
+                                abort_game = true;
+                                break;
+                            }
+
+                            let idx = rng.range(0, legal_moves.len());
+                            let m = legal_moves[idx];
+
+                            state = state.make_move(m);
+                            game_ply += 1;
+
+                            *rep_history.entry(state.hash).or_insert(0) += 1;
+                            history_vec.push(state.hash);
+
+                            if state.halfmove_clock >= 100 || is_trivial_endgame(&state) {
+                                abort_game = true;
+                                break;
+                            }
                         }
                     }
 
