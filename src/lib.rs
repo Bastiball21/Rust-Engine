@@ -98,10 +98,10 @@ pub fn run_cli() {
                 1
             };
 
-            let depth = if args.len() > 4 {
-                args[4].parse().unwrap_or(6)
+            let _depth = if args.len() > 4 {
+                args[4].parse().unwrap_or(8)
             } else {
-                6
+                8
             };
 
             let filename = if args.len() > 5 {
@@ -110,26 +110,10 @@ pub fn run_cli() {
                 "aether_data.bin".to_string()
             };
 
-            // Optional Book
-            let book_path = if args.len() > 6 {
-                let s = args[6].clone();
-                if s == "none" || s == "-" {
-                    None
-                } else {
-                    Some(s)
-                }
-            } else {
-                None
-            };
+            // Removed Book Args processing
 
-            let book_ply = if args.len() > 7 {
-                args[7].parse().unwrap_or(16)
-            } else {
-                16
-            };
-
-            let seed = if args.len() > 8 {
-                args[8].parse().unwrap_or_else(|_| {
+            let seed = if args.len() > 6 { // Shifted
+                args[6].parse().unwrap_or_else(|_| {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -145,10 +129,7 @@ pub fn run_cli() {
             let config = datagen::DatagenConfig {
                 num_games: games,
                 num_threads: threads,
-                depth,
                 filename,
-                book_path,
-                book_ply,
                 seed,
             };
 
