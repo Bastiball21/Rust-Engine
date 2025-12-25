@@ -85,7 +85,9 @@ pub fn run_cli() {
         }
 
         if args[1] == "datagen" {
-            // Usage: "Aether datagen <games> <threads> <depth> <filename> [book_path] [book_ply]"
+            // Usage: "Aether datagen <games> <threads> <depth> <filename> <seed> [book_path] [book_ply]"
+            // Index: 0      1        2        3          4        5          6       7           8
+
             let games = if args.len() > 2 {
                 args[2].parse().unwrap_or(100)
             } else {
@@ -110,9 +112,7 @@ pub fn run_cli() {
                 "aether_data.bin".to_string()
             };
 
-            // Removed Book Args processing
-
-            let seed = if args.len() > 6 { // Shifted
+            let seed = if args.len() > 6 {
                 args[6].parse().unwrap_or_else(|_| {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -126,11 +126,25 @@ pub fn run_cli() {
                     .as_nanos() as u64
             };
 
+            let book_path = if args.len() > 7 {
+                Some(args[7].clone())
+            } else {
+                None
+            };
+
+            let book_ply = if args.len() > 8 {
+                args[8].parse().unwrap_or(0)
+            } else {
+                0
+            };
+
             let config = datagen::DatagenConfig {
                 num_games: games,
                 num_threads: threads,
                 filename,
                 seed,
+                book_path,
+                book_ply,
             };
 
             datagen::run_datagen(config);
