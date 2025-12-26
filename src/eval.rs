@@ -179,8 +179,7 @@ fn evaluate_lazy(state: &GameState) -> i32 {
             let base_eg = EG_VALS[piece_type].val();
 
             while bb.0 != 0 {
-                let sq = bb.get_lsb_index() as usize;
-                bb.pop_bit(sq as u8);
+                let sq = bb.pop_lsb() as usize;
                 mg += (base_mg + get_pst(piece_type, sq, side, true)) * us_sign;
                 eg += (base_eg + get_pst(piece_type, sq, side, false)) * us_sign;
             }
@@ -222,8 +221,7 @@ pub fn evaluate_hce(state: &GameState, alpha: i32, beta: i32) -> i32 {
             let base_eg = EG_VALS[piece_type].val();
 
             while bb.0 != 0 {
-                let sq = bb.get_lsb_index() as usize;
-                bb.pop_bit(sq as u8);
+                let sq = bb.pop_lsb() as usize;
 
                 mg += (base_mg + get_pst(piece_type, sq, side, true)) * us_sign;
                 eg += (base_eg + get_pst(piece_type, sq, side, false)) * us_sign;
@@ -373,8 +371,7 @@ pub fn trace_evaluate(state: &GameState, trace: &mut Trace) -> i32 {
             let sign = if side == crate::state::WHITE { 1 } else { -1 };
 
             while bb.0 != 0 {
-                let sq = bb.get_lsb_index() as usize;
-                bb.pop_bit(sq as u8);
+                let sq = bb.pop_lsb() as usize;
 
                 // --- A. Material Term ---
                 // Material MG index: 0..5
@@ -571,8 +568,7 @@ fn evaluate_complex_terms(
             let mut bb = state.bitboards[piece_idx];
 
             while bb.0 != 0 {
-                let sq = bb.get_lsb_index() as usize;
-                bb.pop_bit(sq as u8);
+                let sq = bb.pop_lsb() as usize;
 
                 let attacks = match piece_type {
                     N => crate::bitboard::get_knight_attacks(sq as u8),
@@ -634,8 +630,7 @@ fn evaluate_complex_terms(
 
                         let mut iter = att_on_ring;
                         while iter.0 != 0 {
-                            let s = iter.get_lsb_index();
-                            iter.pop_bit(s as u8);
+                            let s = iter.pop_lsb();
                             ring_attack_counts[them][s as usize] += 1;
                         }
                     }
@@ -706,8 +701,7 @@ fn evaluate_complex_terms(
         let mut cluster_pen = 0;
         let mut r_iter = ring;
         while r_iter.0 != 0 {
-            let s = r_iter.get_lsb_index();
-            r_iter.pop_bit(s as u8);
+            let s = r_iter.pop_lsb();
             let c = ring_attack_counts[side][s as usize];
             if c >= 2 {
                 cluster_pen += (c as i32 - 1) * 20;
@@ -735,8 +729,7 @@ fn evaluate_complex_terms(
         let attacked_by_them = us_occ & attacks_by_side[them];
         let mut iter = attacked_by_them;
         while iter.0 != 0 {
-            let sq = iter.get_lsb_index() as u8;
-            iter.pop_bit(sq);
+            let sq = iter.pop_lsb();
 
             // OPTIMIZATION: Use mailbox to get piece ID
             let piece = state.board[sq as usize];

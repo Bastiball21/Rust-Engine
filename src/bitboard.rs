@@ -35,6 +35,8 @@ static RANK_MASKS: OnceLock<[Bitboard; 64]> = OnceLock::new();
 static PASSED_PAWN_MASKS: OnceLock<[[Bitboard; 64]; 2]> = OnceLock::new();
 static KING_ZONE_MASKS: OnceLock<[Bitboard; 64]> = OnceLock::new();
 
+static BETWEEN_MASKS: OnceLock<Box<[Bitboard; 4096]>> = OnceLock::new();
+
 // --- SAFE ACCESSORS ---
 #[inline(always)]
 pub fn get_knight_attacks(sq: u8) -> Bitboard {
@@ -66,6 +68,12 @@ pub fn king_zone_mask(sq: usize) -> Bitboard {
     KING_ZONE_MASKS.get().expect("Tables not init")[sq]
 }
 
+#[inline(always)]
+pub fn between(sq1: u8, sq2: u8) -> Bitboard {
+    let idx = (sq1 as usize) * 64 + (sq2 as usize);
+    BETWEEN_MASKS.get().expect("Tables not init")[idx]
+}
+
 impl Bitboard {
     pub fn new() -> Self {
         Bitboard(0)
@@ -82,6 +90,17 @@ impl Bitboard {
     pub fn pop_bit(&mut self, square: u8) {
         self.0 &= !(1u64 << square);
     }
+
+    /// Returns the index of the Least Significant Bit and clears it.
+    /// This combines `get_lsb_index` and `pop_bit` for efficient iteration.
+    #[inline(always)]
+    pub fn pop_lsb(&mut self) -> u8 {
+        debug_assert!(self.0 != 0);
+        let idx = self.0.trailing_zeros();
+        self.0 &= self.0.wrapping_sub(1);
+        idx as u8
+    }
+
     #[inline(always)]
     pub fn count_bits(&self) -> u32 {
         self.0.count_ones()
@@ -146,6 +165,7 @@ pub fn init_magic_tables() {
     }
 
     init_eval_masks();
+    init_between_masks();
 
     println!("Initializing PEXT Bitboards...");
 
@@ -245,6 +265,43 @@ pub fn init_magic_tables() {
     if BISHOP_OFFSETS.get().is_none() {
         let _ = BISHOP_OFFSETS.set(b_offsets);
     }
+}
+
+#[cold]
+fn init_between_masks() {
+    let mut table = Box::new([Bitboard(0); 4096]);
+    for s1 in 0..64 {
+        for s2 in 0..64 {
+            if s1 == s2 { continue; }
+            let mut bb = Bitboard(0);
+
+            let f1 = s1 % 8;
+            let r1 = s1 / 8;
+            let f2 = s2 % 8;
+            let r2 = s2 / 8;
+
+            let dx = f2 as i32 - f1 as i32;
+            let dy = r2 as i32 - r1 as i32;
+
+            if dx == 0 || dy == 0 || dx.abs() == dy.abs() {
+                let steps = dx.abs().max(dy.abs());
+                let sx = dx / steps;
+                let sy = dy / steps;
+
+                let mut x = f1 as i32 + sx;
+                let mut y = r1 as i32 + sy;
+
+                while x != f2 as i32 || y != r2 as i32 {
+                    let sq = y * 8 + x;
+                    bb.set_bit(sq as u8);
+                    x += sx;
+                    y += sy;
+                }
+            }
+            table[s1 * 64 + s2] = bb;
+        }
+    }
+    let _ = BETWEEN_MASKS.set(table);
 }
 
 #[cold]

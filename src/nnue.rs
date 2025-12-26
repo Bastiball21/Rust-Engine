@@ -38,6 +38,19 @@ const SCRELU: [i16; 256] = {
     table
 };
 
+// --- AVX2 DETECTION ---
+static USE_AVX2: OnceLock<bool> = OnceLock::new();
+
+#[inline(always)]
+fn use_avx2() -> bool {
+    *USE_AVX2.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        { is_x86_feature_detected!("avx2") }
+        #[cfg(not(target_arch = "x86_64"))]
+        { false }
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 #[repr(align(64))]
 pub struct Accumulator {
@@ -82,8 +95,7 @@ impl Accumulator {
                 for piece in start_pc..end_pc {
                     let mut bb = bitboards[piece];
                     while bb.0 != 0 {
-                        let sq = bb.get_lsb_index() as usize;
-                        bb.pop_bit(sq as u8);
+                        let sq = bb.pop_lsb() as usize;
 
                         let idx = make_index(perspective, piece, sq, king_bucket);
                         self.add_feature(idx, net);
@@ -124,23 +136,25 @@ impl Accumulator {
         let weights = &net.l0_weights[offset..offset + L1_SIZE];
 
         #[cfg(target_arch = "x86_64")]
-        unsafe {
-            let mut i = 0;
-            while i < L1_SIZE {
-                let v_ptr = self.v.as_mut_ptr().add(i);
-                let w_ptr = weights.as_ptr().add(i);
+        if use_avx2() {
+            unsafe {
+                 let mut i = 0;
+                 while i < L1_SIZE {
+                     let v_ptr = self.v.as_mut_ptr().add(i);
+                     let w_ptr = weights.as_ptr().add(i);
 
-                let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
-                let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
+                     let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
+                     let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
 
-                let res = _mm256_add_epi16(v_vec, w_vec);
-                _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
+                     let res = _mm256_add_epi16(v_vec, w_vec);
+                     _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
 
-                i += 16;
+                     i += 16;
+                 }
             }
+            return;
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
         for i in 0..L1_SIZE {
             self.v[i] = self.v[i].wrapping_add(weights[i]);
         }
@@ -152,23 +166,25 @@ impl Accumulator {
         let weights = &net.l0_weights[offset..offset + L1_SIZE];
 
         #[cfg(target_arch = "x86_64")]
-        unsafe {
-            let mut i = 0;
-            while i < L1_SIZE {
-                let v_ptr = self.v.as_mut_ptr().add(i);
-                let w_ptr = weights.as_ptr().add(i);
+        if use_avx2() {
+            unsafe {
+                 let mut i = 0;
+                 while i < L1_SIZE {
+                     let v_ptr = self.v.as_mut_ptr().add(i);
+                     let w_ptr = weights.as_ptr().add(i);
 
-                let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
-                let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
+                     let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
+                     let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
 
-                let res = _mm256_sub_epi16(v_vec, w_vec);
-                _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
+                     let res = _mm256_sub_epi16(v_vec, w_vec);
+                     _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
 
-                i += 16;
+                     i += 16;
+                 }
             }
+            return;
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
         for i in 0..L1_SIZE {
             self.v[i] = self.v[i].wrapping_sub(weights[i]);
         }
@@ -284,74 +300,118 @@ unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i16], outp
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn clamp_activations_avx2(buffer: &mut [i16]) {
+    let zero = _mm256_setzero_si256();
+    let max = _mm256_set1_epi16(Q_ACTIVATION as i16);
+    for i in (0..buffer.len()).step_by(16) {
+         let ptr = buffer.as_mut_ptr().add(i);
+         let v = _mm256_loadu_si256(ptr as *const __m256i);
+         let res = _mm256_min_epi16(_mm256_max_epi16(v, zero), max);
+         _mm256_storeu_si256(ptr as *mut __m256i, res);
+    }
+}
+
 // --------------------------------------------------------
-// Evaluation
+// Evaluation Logic (Duplicated for Dispatch)
 // --------------------------------------------------------
 
 pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
-    if let Some(net) = NETWORK.get() {
-        if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
-            panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid...");
-        }
+    let net = match NETWORK.get() {
+        Some(n) => n,
+        None => return 0,
+    };
 
-        let mut hidden_512 = [0i16; 512];
-
-        // L1 Input generation
-        #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                let zero = _mm256_setzero_si256();
-                let qa = _mm256_set1_epi16(QA as i16);
-                let scale = _mm256_set1_ps(1.0 / 255.0);
-
-                // STM
-                for i in (0..L1_SIZE).step_by(16) {
-                    let ptr = stm_acc.v.as_ptr().add(i);
-                    let val = _mm256_loadu_si256(ptr as *const __m256i);
-                    let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
-                    let res = screlu_calc_avx2(clamped, scale);
-                    _mm256_storeu_si256(hidden_512.as_mut_ptr().add(i) as *mut __m256i, res);
-                }
-                // NTM
-                for i in (0..L1_SIZE).step_by(16) {
-                    let ptr = ntm_acc.v.as_ptr().add(i);
-                    let val = _mm256_loadu_si256(ptr as *const __m256i);
-                    let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
-                    let res = screlu_calc_avx2(clamped, scale);
-                    _mm256_storeu_si256(hidden_512.as_mut_ptr().add(L1_SIZE + i) as *mut __m256i, res);
-                }
-            }
-        } else {
-             evaluate_l1_scalar(stm_acc, ntm_acc, &mut hidden_512);
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        evaluate_l1_scalar(stm_acc, ntm_acc, &mut hidden_512);
-
-        // Layer 1: 512 -> 32
-        let mut l2_out = [0i16; L2_SIZE];
-        affine_layer_wrapper(&hidden_512, &net.l1_weights, &net.l1_biases, &mut l2_out, 512, L2_SIZE);
-        clamp_activations_wrapper(&mut l2_out);
-
-        // Layer 2: 32 -> 32
-        let mut l3_out = [0i16; L3_SIZE];
-        affine_layer_wrapper(&l2_out, &net.l2_weights, &net.l2_biases, &mut l3_out, L2_SIZE, L3_SIZE);
-        clamp_activations_wrapper(&mut l3_out);
-
-        // Layer 3: 32 -> 32
-        let mut l4_out = [0i16; L4_SIZE];
-        affine_layer_wrapper(&l3_out, &net.l3_weights, &net.l3_biases, &mut l4_out, L3_SIZE, L4_SIZE);
-        clamp_activations_wrapper(&mut l4_out);
-
-        // Output Layer: 32 -> 1
-        let mut final_out = [0i16; 1];
-        affine_layer_wrapper(&l4_out, &net.l4_weights, &net.l4_biases, &mut final_out, L4_SIZE, 1);
-
-        let output = final_out[0] as i32;
-        (output * SCALE) / (QB * Q_ACTIVATION)
-    } else {
-        0
+    if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
+        panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid...");
     }
+
+    // Dispatch
+    #[cfg(target_arch = "x86_64")]
+    if use_avx2() {
+        return unsafe { evaluate_avx2(stm_acc, ntm_acc, net) };
+    }
+
+    evaluate_scalar(stm_acc, ntm_acc, net)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network) -> i32 {
+    let mut hidden_512 = [0i16; 512];
+
+    // L1 Input generation (AVX2)
+    let zero = _mm256_setzero_si256();
+    let qa = _mm256_set1_epi16(QA as i16);
+    let scale = _mm256_set1_ps(1.0 / 255.0);
+
+    // STM
+    for i in (0..L1_SIZE).step_by(16) {
+        let ptr = stm_acc.v.as_ptr().add(i);
+        let val = _mm256_loadu_si256(ptr as *const __m256i);
+        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+        let res = screlu_calc_avx2(clamped, scale);
+        _mm256_storeu_si256(hidden_512.as_mut_ptr().add(i) as *mut __m256i, res);
+    }
+    // NTM
+    for i in (0..L1_SIZE).step_by(16) {
+        let ptr = ntm_acc.v.as_ptr().add(i);
+        let val = _mm256_loadu_si256(ptr as *const __m256i);
+        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
+        let res = screlu_calc_avx2(clamped, scale);
+        _mm256_storeu_si256(hidden_512.as_mut_ptr().add(L1_SIZE + i) as *mut __m256i, res);
+    }
+
+    // Layer 1: 512 -> 32
+    let mut l2_out = [0i16; L2_SIZE];
+    layer_affine_avx2(&hidden_512, &net.l1_weights, &net.l1_biases, &mut l2_out, 512, L2_SIZE);
+    clamp_activations_avx2(&mut l2_out);
+
+    // Layer 2: 32 -> 32
+    let mut l3_out = [0i16; L3_SIZE];
+    layer_affine_avx2(&l2_out, &net.l2_weights, &net.l2_biases, &mut l3_out, L2_SIZE, L3_SIZE);
+    clamp_activations_avx2(&mut l3_out);
+
+    // Layer 3: 32 -> 32
+    let mut l4_out = [0i16; L4_SIZE];
+    layer_affine_avx2(&l3_out, &net.l3_weights, &net.l3_biases, &mut l4_out, L3_SIZE, L4_SIZE);
+    clamp_activations_avx2(&mut l4_out);
+
+    // Output Layer: 32 -> 1
+    let mut final_out = [0i16; 1];
+    layer_affine_avx2(&l4_out, &net.l4_weights, &net.l4_biases, &mut final_out, L4_SIZE, 1);
+
+    let output = final_out[0] as i32;
+    (output * SCALE) / (QB * Q_ACTIVATION)
+}
+
+fn evaluate_scalar(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network) -> i32 {
+    let mut hidden_512 = [0i16; 512];
+
+    evaluate_l1_scalar(stm_acc, ntm_acc, &mut hidden_512);
+
+    // Layer 1: 512 -> 32
+    let mut l2_out = [0i16; L2_SIZE];
+    layer_affine_scalar(&hidden_512, &net.l1_weights, &net.l1_biases, &mut l2_out, 512, L2_SIZE);
+    clamp_activations_scalar(&mut l2_out);
+
+    // Layer 2: 32 -> 32
+    let mut l3_out = [0i16; L3_SIZE];
+    layer_affine_scalar(&l2_out, &net.l2_weights, &net.l2_biases, &mut l3_out, L2_SIZE, L3_SIZE);
+    clamp_activations_scalar(&mut l3_out);
+
+    // Layer 3: 32 -> 32
+    let mut l4_out = [0i16; L4_SIZE];
+    layer_affine_scalar(&l3_out, &net.l3_weights, &net.l3_biases, &mut l4_out, L3_SIZE, L4_SIZE);
+    clamp_activations_scalar(&mut l4_out);
+
+    // Output Layer: 32 -> 1
+    let mut final_out = [0i16; 1];
+    layer_affine_scalar(&l4_out, &net.l4_weights, &net.l4_biases, &mut final_out, L4_SIZE, 1);
+
+    let output = final_out[0] as i32;
+    (output * SCALE) / (QB * Q_ACTIVATION)
 }
 
 fn evaluate_l1_scalar(stm: &Accumulator, ntm: &Accumulator, output: &mut [i16]) {
@@ -365,30 +425,7 @@ fn evaluate_l1_scalar(stm: &Accumulator, ntm: &Accumulator, output: &mut [i16]) 
     }
 }
 
-fn affine_layer_wrapper(input: &[i16], weights: &[i16], biases: &[i16], output: &mut [i16], in_size: usize, out_size: usize) {
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") {
-        unsafe { layer_affine_avx2(input, weights, biases, output, in_size, out_size); }
-        return;
-    }
-    layer_affine_scalar(input, weights, biases, output, in_size, out_size);
-}
-
-fn clamp_activations_wrapper(buffer: &mut [i16]) {
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") {
-        unsafe {
-            let zero = _mm256_setzero_si256();
-            let max = _mm256_set1_epi16(Q_ACTIVATION as i16);
-            for i in (0..buffer.len()).step_by(16) {
-                 let ptr = buffer.as_mut_ptr().add(i);
-                 let v = _mm256_loadu_si256(ptr as *const __m256i);
-                 let res = _mm256_min_epi16(_mm256_max_epi16(v, zero), max);
-                 _mm256_storeu_si256(ptr as *mut __m256i, res);
-            }
-        }
-        return;
-    }
+fn clamp_activations_scalar(buffer: &mut [i16]) {
     for x in buffer.iter_mut() {
         *x = (*x).clamp(0, Q_ACTIVATION as i16);
     }

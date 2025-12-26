@@ -1,22 +1,81 @@
 // src/pawn.rs
 use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
 use crate::state::{p, GameState, BLACK, P, WHITE};
+use std::cell::RefCell;
 
-#[derive(Clone, Copy, Default)]
+// --- PAWN HASH TABLE ---
+const PAWN_HASH_SIZE: usize = 16384; // 16K entries, Power of two
+
+#[derive(Clone, Copy, Default, Debug)]
+struct PawnHashEntry {
+    key: u64,
+    pawn_entry: PawnEntry,
+}
+
+struct PawnHashTable {
+    table: Box<[PawnHashEntry; PAWN_HASH_SIZE]>,
+}
+
+impl PawnHashTable {
+    fn new() -> Self {
+        PawnHashTable {
+            table: vec![PawnHashEntry::default(); PAWN_HASH_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, key: u64) -> Option<PawnEntry> {
+        let idx = (key as usize) & (PAWN_HASH_SIZE - 1);
+        let entry = &self.table[idx];
+        if entry.key == key {
+            Some(entry.pawn_entry)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn put(&mut self, key: u64, entry: PawnEntry) {
+        let idx = (key as usize) & (PAWN_HASH_SIZE - 1);
+        self.table[idx] = PawnHashEntry {
+            key,
+            pawn_entry: entry,
+        };
+    }
+}
+
+// Thread-Local Pawn Hash
+thread_local! {
+    static PAWN_TABLE: RefCell<PawnHashTable> = RefCell::new(PawnHashTable::new());
+}
+
+#[derive(Clone, Copy, Default, Debug)]
 pub struct PawnEntry {
-    pub key: u64,
     pub score_mg: i32,
     pub score_eg: i32,
     pub passed_pawns: [Bitboard; 2],
     pub pawn_attacks: [Bitboard; 2],
-    pub king_safety_scores: [i32; 2], // Cached shelter/storm scores
+    // Removed large king_safety_scores array if unused to save space/copy
 }
 
 pub fn evaluate_pawns(state: &GameState) -> PawnEntry {
-    let mut entry = PawnEntry {
-        key: state.hash,
-        ..Default::default()
-    };
+    let key = state.pawn_key;
+
+    // Probe Cache
+    // We use a block to scope the borrow
+    let cached = PAWN_TABLE.with(|pt| {
+        pt.borrow().get(key)
+    });
+
+    if let Some(entry) = cached {
+        return entry;
+    }
+
+    // Compute
+    let mut entry = PawnEntry::default();
     let w_pawns = state.bitboards[P];
     let b_pawns = state.bitboards[p];
 
@@ -26,8 +85,7 @@ pub fn evaluate_pawns(state: &GameState) -> PawnEntry {
     // --- WHITE PAWNS ---
     let mut bb = w_pawns;
     while bb.0 != 0 {
-        let sq = bb.get_lsb_index() as usize;
-        bb.pop_bit(sq as u8);
+        let sq = bb.pop_lsb() as usize; // Use fast pop_lsb
         let rank = sq / 8;
 
         // Connected
@@ -63,8 +121,7 @@ pub fn evaluate_pawns(state: &GameState) -> PawnEntry {
     // --- BLACK PAWNS ---
     let mut bb = b_pawns;
     while bb.0 != 0 {
-        let sq = bb.get_lsb_index() as usize;
-        bb.pop_bit(sq as u8);
+        let sq = bb.pop_lsb() as usize; // Use fast pop_lsb
         let rank = sq / 8;
         let rel_rank = 7 - rank;
 
@@ -94,8 +151,10 @@ pub fn evaluate_pawns(state: &GameState) -> PawnEntry {
         }
     }
 
-    // Compute King Safety / Shelter data here if desired,
-    // or just leave it for the main eval to use the pawn bitboards.
+    // Save to Cache
+    PAWN_TABLE.with(|pt| {
+        pt.borrow_mut().put(key, entry);
+    });
 
     entry
 }
