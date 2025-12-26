@@ -13,6 +13,28 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicI16, Ordering};
 use std::sync::{Arc, OnceLock};
 use smallvec::SmallVec;
 
+// --- FEATURE TOGGLES ---
+pub const ENABLE_ASPIRATION: bool = true;
+pub const ENABLE_NULL_MOVE: bool = true;
+pub const ENABLE_LMR: bool = true;
+pub const ENABLE_LMP: bool = true;
+pub const ENABLE_SEE_GATE_MAIN: bool = true;
+pub const ENABLE_SEE_GATE_QS: bool = true;
+
+// --- TUNING CONSTANTS ---
+pub const ASP_WINDOW_CP: i32 = 25;
+pub const ASP_WIDEN_1: i32 = 75;
+pub const ASP_WIDEN_2: i32 = 200;
+
+pub const LMR_MIN_DEPTH: u8 = 3;
+pub const LMR_MIN_MOVE_INDEX: usize = 4;
+
+pub const LMP_DEPTH_MAX: u8 = 3;
+
+pub const FUTILITY_MARGIN_PER_PLY: i32 = 100;
+
+pub const NULL_MIN_DEPTH: u8 = 3;
+
 const MAX_PLY: usize = 128;
 // Max game length we support in search path
 const MAX_GAME_PLY: usize = 1024;
@@ -857,6 +879,15 @@ fn quiescence(
             }
         }
 
+        // SEE Gating for QSearch
+        if ENABLE_SEE_GATE_QS && mv.is_capture() && mv.promotion().is_none() && !in_check {
+             if !gives_check_fast(state, mv) {
+                 if !see_ge(state, mv, 0) {
+                     continue;
+                 }
+             }
+        }
+
         let unmake_info = state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
 
         let our_side = state.side_to_move;
@@ -971,13 +1002,13 @@ pub fn search(
         let mut alpha = -INFINITY;
         let mut beta = INFINITY;
 
-        if depth >= 5 && main_thread {
-            alpha = last_score - 100;
-            beta = last_score + 100;
+        if ENABLE_ASPIRATION && depth >= 5 && main_thread {
+            alpha = last_score - ASP_WINDOW_CP;
+            beta = last_score + ASP_WINDOW_CP;
         }
 
         let mut score;
-        let mut delta = 20;
+        let mut delta = ASP_WIDEN_1;
 
         loop {
             if alpha < -3000 {
@@ -1000,10 +1031,18 @@ pub fn search(
                 }
                 beta = (alpha + beta) / 2;
                 alpha = (-INFINITY).max(alpha - delta);
-                delta += delta / 2 + delta / 4;
+                if delta == ASP_WIDEN_1 {
+                     delta = ASP_WIDEN_2;
+                } else {
+                     delta = 2000;
+                }
             } else if score >= beta {
                 beta = (INFINITY).min(beta + delta);
-                delta += delta / 2 + delta / 4;
+                if delta == ASP_WIDEN_1 {
+                     delta = ASP_WIDEN_2;
+                } else {
+                     delta = 2000;
+                }
             } else {
                 break;
             }
@@ -1286,7 +1325,8 @@ fn negamax(
         return static_eval;
     }
 
-    if new_depth >= 3
+    if ENABLE_NULL_MOVE
+        && new_depth >= NULL_MIN_DEPTH
         && ply > 0
         && !in_check
         && !is_pv
@@ -1437,14 +1477,16 @@ fn negamax(
 
         let is_quiet = !mv.is_capture() && mv.promotion().is_none();
 
-        if new_depth < 5 && !in_check && !is_pv && is_quiet {
-            let futility_margin = 150 * new_depth as i32;
+        // Futility Pruning
+        if ENABLE_LMP && new_depth < 5 && !in_check && !is_pv && is_quiet {
+            let futility_margin = FUTILITY_MARGIN_PER_PLY * new_depth as i32;
             if static_eval + futility_margin <= alpha {
                 quiets_checked += 1;
                 continue;
             }
         }
 
+        // History Pruning
         if new_depth < 8 && !in_check && !is_pv && is_quiet {
             let history = info.data.history[mv.source() as usize][mv.target() as usize];
             if history < -4000 * (new_depth as i32) {
@@ -1453,10 +1495,18 @@ fn negamax(
             }
         }
 
-        if !is_pv && !in_check && new_depth <= 8 && is_quiet {
+        // Late Move Pruning
+        if ENABLE_LMP && !is_pv && !in_check && new_depth <= LMP_DEPTH_MAX && is_quiet {
             if quiets_checked >= info.params.lmp_table[new_depth as usize] {
                 continue;
             }
+        }
+
+        // SEE Gating for Captures (Main Search)
+        if ENABLE_SEE_GATE_MAIN && mv.is_capture() && moves_searched >= 6 && new_depth <= 8 && !in_check {
+             if !gives_check_fast(state, mv) && !see_ge(state, mv, 0) {
+                 continue;
+             }
         }
 
         // SEE Pruning for Quiet Moves
@@ -1509,8 +1559,9 @@ fn negamax(
             let gives_check = is_in_check(state);
             let mut reduction = 0;
 
-            if new_depth >= 3
-                && moves_searched > 3
+            if ENABLE_LMR
+                && new_depth >= LMR_MIN_DEPTH
+                && moves_searched >= LMR_MIN_MOVE_INDEX
                 && is_quiet
                 && !gives_check
                 && !in_check

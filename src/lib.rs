@@ -95,6 +95,30 @@ pub fn run_cli() {
             return;
         }
 
+        if args[1] == "bench" {
+             // Basic benchmark: Fixed depth search from startpos
+             let state = state::GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+             let tt = std::sync::Arc::new(tt::TranspositionTable::new(16, 1)); // 16MB
+             let mut data = search::SearchData::new(std::sync::Arc::new(search::CorrectionTable::new()));
+             let params = parameters::SearchParameters::default();
+             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+             println!("Running Benchmark: Startpos Depth 14");
+             search::search(
+                 &state,
+                 search::Limits::FixedDepth(14),
+                 &tt,
+                 stop,
+                 true,
+                 vec![],
+                 &mut data,
+                 &params,
+                 None,
+                 Some(0)
+             );
+             return;
+        }
+
         if args[1] == "datagen" {
             // Usage: "Aether datagen <games> <threads> <depth> <filename> <seed> [book_path] [book_ply]"
             // Index: 0      1        2        3          4        5          6       7           8
