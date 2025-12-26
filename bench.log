@@ -1,8 +1,0 @@
-Zobrist Keys Initialized.
-Initializing PEXT Bitboards...
-info string Failed to allocate large pages, falling back to standard pages
-TT: 64 MB / 1048576 Clusters / 4-Way Associative
-info depth 1 seldepth 1 score cp 72 nodes 0 nps 0 hashfull 0 time 0 pv e2e4
-info depth 2 seldepth 4 score cp -1 nodes 0 nps 0 hashfull 0 time 0 pv d2d4 e7e6
-info depth 3 seldepth 7 score cp 62 nodes 0 nps 0 hashfull 0 time 0 pv d2d4 d7d5 e2e3
-bestmove d2d4 ponder d7d5
