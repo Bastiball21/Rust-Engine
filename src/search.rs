@@ -932,7 +932,7 @@ pub fn search(
     tt: &TranspositionTable,
     stop_signal: Arc<AtomicBool>,
     main_thread: bool,
-    history: Vec<u64>,
+    history: &[u64],
     search_data: &mut SearchData,
     params: &SearchParameters,
     global_nodes: Option<&AtomicU64>,
@@ -981,7 +981,7 @@ pub fn search(
     ));
 
     // Copy history to stack-based SearchPath
-    info.path.load_from(&history);
+    info.path.load_from(history);
 
     let mut last_score = 0;
 

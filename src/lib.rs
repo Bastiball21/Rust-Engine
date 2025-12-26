@@ -110,7 +110,7 @@ pub fn run_cli() {
                  &tt,
                  stop,
                  true,
-                 vec![],
+                 &[],
                  &mut data,
                  &params,
                  None,

@@ -19,14 +19,13 @@ use std::fs::File;
 // --- Config Constants ---
 const MERCY_CP: i32 = 1000;
 const MERCY_PLIES: usize = 8;
+const WIN_CP: i32 = 700;
+const WIN_STABLE_PLIES: usize = 6;
 const DRAW_CP: i32 = 50;
 const DRAW_PLIES: usize = 20;
 const DRAW_START_PLY: usize = 30;
-
-// High Score Threshold (Decided Game)
-const HIGH_SCORE_CP: i32 = 600;
-// Losing Side Threshold
-const LOSING_SCORE_CP: i32 = -500;
+const MAX_PLIES: usize = 200;
+const OPENING_SKIP_PLIES: usize = 10;
 
 static STOP_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -82,6 +81,14 @@ impl Rng {
             let j = self.range(0, i + 1);
             slice.swap(i, j);
         }
+    }
+
+    // For rolling hash
+    fn splitmix(&mut self, v: u64) -> u64 {
+        let mut z = v.wrapping_add(0x9e3779b97f4a7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
     }
 }
 
@@ -197,9 +204,7 @@ fn process_and_write_game(move_text: &str, writer: &mut BufWriter<File>) -> usiz
     let spaced_text = clean_text.replace(".", " . ");
     let tokens: Vec<&str> = spaced_text.split_whitespace().collect();
 
-    // 1. Determine Global Result First?
-    // The prompt says: Parse Global Result: "1-0" -> 1.0, etc.
-    // Result is usually the last token.
+    // 1. Determine Global Result First
     let last_token = tokens.last();
     let global_white_score = if let Some(res) = last_token {
         match *res {
@@ -223,52 +228,12 @@ fn process_and_write_game(move_text: &str, writer: &mut BufWriter<File>) -> usiz
             break;
         }
 
-        // 3. Process Position BEFORE making the move?
-        // Usually we label the position we are in.
-        // "Is this position good for the side to move?"
-        // So we evaluate `state` and check who is to move.
-        // `global_white_score` is fixed.
-
-        // Calculate Eval (Score)
+        // Calculate Eval (Score) - White Relative for BulletFormat
         let raw_stm = crate::eval::evaluate(&state, &None, -32000, 32000);
+        let score_white = if state.side_to_move == WHITE { raw_stm } else { -raw_stm };
+        let clamped_score = score_white.clamp(-32000, 32000) as i16;
 
-        // ADAPTER: The user requires a mandatory logic block that assumes the input `raw_eval`
-        // is White-Relative. However, the engine's `evaluate` returns STM-Relative scores.
-        // To strictly satisfy the mandatory logic AND produce the correct STM output labels,
-        // we first convert the STM score to White-Relative.
-        //
-        // Logic check:
-        // Input: STM Score.
-        // Adapter: STM -> White-Relative.
-        // Mandatory Block: White-Relative -> STM Score.
-        // Result: STM Score (Goal Achieved).
-        let raw_eval = if state.side_to_move == crate::state::BLACK { -raw_stm } else { raw_stm };
-
-        // MANDATORY COMMENT & LOGIC
-        // IMPORTANT: eval::evaluate() returns White-relative centipawns.
-        // We flip here to enforce STM-relative training labels.
-        let stm_score = if state.side_to_move == crate::state::WHITE { raw_eval } else { -raw_eval };
-
-        // Calculate Result (Outcome)
-        // Logic: let stm_result = ...
-        let stm_result = if state.side_to_move == crate::state::WHITE {
-            global_white_score
-        } else {
-            1.0 - global_white_score // Flip: White Win (1.0) becomes Black Loss (0.0)
-        };
-
-        // Write Data
-        // convert_to_bullet expects White Relative score if we follow its docs, but user says:
-        // "Pass these STM-relative values directly. If helper functions complain... ignore them"
-        // So we pass stm_score (STM) and stm_result (STM).
-        // WARNING: bullet_helper sets `stm` field in ChessBoard.
-        // If bulletformat interprets score as always White-Relative, passing STM here is technically "wrong" for that format
-        // UNLESS the trainer knows to handle it.
-        // But we follow strict orders: "enforcing a single source of truth (STM)".
-
-        // Note: convert_to_bullet takes i16 for score. stm_score is i32. Clamp it.
-        let clamped_score = stm_score.clamp(-32000, 32000) as i16;
-        let board_data = convert_to_bullet(&state, clamped_score, stm_result);
+        let board_data = convert_to_bullet(&state, clamped_score, global_white_score);
         bulletformat::ChessBoard::write_to_bin(writer, &[board_data]).unwrap();
         count += 1;
 
@@ -309,6 +274,21 @@ fn is_trivial_endgame(state: &GameState) -> bool {
     use crate::state::{b, k, n, B, BLACK, K, N, WHITE};
     let w_pieces = state.occupancies[WHITE].0 & !state.bitboards[K].0;
     let b_pieces = state.occupancies[BLACK].0 & !state.bitboards[k].0;
+
+    // No pawns logic for datagen
+    // If no pawns and only minors, likely drawn or very long
+    use crate::state::{P, p};
+    let pawns = state.bitboards[P] | state.bitboards[p];
+    if pawns.0 == 0 {
+         // K vs K, KB vs K, KN vs K, etc already covered below but let's be aggressive
+         // If total pieces <= 3 (Kings + 1), it's a draw unless it's a Queen/Rook?
+         // User requested: "if no pawns and only minors remain => draw"
+         let w_majors = state.bitboards[crate::state::R] | state.bitboards[crate::state::Q];
+         let b_majors = state.bitboards[crate::state::r] | state.bitboards[crate::state::q];
+         if w_majors.0 == 0 && b_majors.0 == 0 {
+             return true;
+         }
+    }
 
     if w_pieces == 0 && b_pieces == 0 {
         return true;
@@ -381,7 +361,8 @@ pub fn run_datagen(config: DatagenConfig) {
         None
     };
 
-    println!("  Guards:   Mercy Rule, Early Draw, Duplicate Game Prevention");
+    println!("  Guards:   Mercy Rule ({}/{}), Stable Win ({}/{}), Max Plies {}, Opening Skip {}",
+             MERCY_CP, MERCY_PLIES, WIN_CP, WIN_STABLE_PLIES, MAX_PLIES, OPENING_SKIP_PLIES);
 
     // Channel now carries (GameHash, Data)
     let (tx, rx) = mpsc::sync_channel::<(u64, Vec<bulletformat::ChessBoard>)>(1000);
@@ -481,17 +462,21 @@ pub fn run_datagen(config: DatagenConfig) {
         let handle = builder
             .spawn(move || {
                 let mut tt = TranspositionTable::new(32, 1); // 32MB per thread
+                // Seed per thread to ensure unique streams
                 let mut rng = Rng::new(
                     config
                         .seed
                         .wrapping_add((t_id as u64).wrapping_mul(0xDEADBEEF)),
                 );
+
+                let local_stop = Arc::new(AtomicBool::new(false));
+
                 let correction_history = Arc::new(search::CorrectionTable::new());
                 let mut search_data = search::SearchData::new(correction_history.clone());
 
                 let mut rep_history: HashMap<u64, u8> = HashMap::with_capacity(300);
                 let mut history_vec: Vec<u64> = Vec::with_capacity(300);
-                let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(200);
+                let mut positions: Vec<(GameState, i16)> = Vec::with_capacity(300);
 
                 // Book Shuffle Bag
                 let mut book_indices: Vec<usize> = Vec::new();
@@ -517,6 +502,7 @@ pub fn run_datagen(config: DatagenConfig) {
                     let mut state;
                     let mut game_ply = 0;
                     let mut abort_game = false;
+                    let mut game_rolling_hash;
 
                     if let Some(book_ref) = &book_arc {
                         if book_cursor >= book_indices.len() {
@@ -536,11 +522,14 @@ pub fn run_datagen(config: DatagenConfig) {
 
                         rep_history.insert(state.hash, 1);
                         history_vec.push(state.hash);
+                        // Init rolling hash from seed ^ start_hash
+                        game_rolling_hash = rng.splitmix(config.seed ^ state.hash);
 
                     } else {
                         state = GameState::parse_fen(
                             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
                         );
+                        game_rolling_hash = rng.splitmix(config.seed ^ state.hash);
 
                         // 2. Random Walk (8-9 plies)
                         let random_plies = 8 + rng.range(0, 2);
@@ -579,6 +568,10 @@ pub fn run_datagen(config: DatagenConfig) {
                                 *rep_history.entry(state.hash).or_insert(0) += 1;
                                 history_vec.push(state.hash);
 
+                                // Update rolling hash
+                                let mixed_input = game_rolling_hash ^ state.hash.rotate_left(1) ^ (m.0 as u64);
+                                game_rolling_hash = rng.splitmix(mixed_input);
+
                                 if state.halfmove_clock >= 100 || is_trivial_endgame(&state) {
                                     abort_game = true;
                                     break;
@@ -593,13 +586,11 @@ pub fn run_datagen(config: DatagenConfig) {
                     if abort_game { continue; }
                     if is_trivial_endgame(&state) { continue; }
 
-                    // Capture Game ID (Start Hash)
-                    let game_id = state.hash;
-
                     // 3. Search Loop
                     let mut result_val = 0.5;
                     let mut finished = false;
                     let mut mercy_counter = 0;
+                    let mut win_stable_counter = 0;
                     let mut draw_counter = 0;
                     let mut last_score: i32 = 0; // For Adaptive Depth
 
@@ -690,9 +681,9 @@ pub fn run_datagen(config: DatagenConfig) {
                                 &state,
                                 limits,
                                 &tt,
-                                Arc::new(AtomicBool::new(false)),
+                                local_stop.clone(),
                                 false,
-                                history_vec.clone(),
+                                &history_vec,
                                 &mut search_data,
                                 &params_clone,
                                 None,
@@ -704,15 +695,30 @@ pub fn run_datagen(config: DatagenConfig) {
 
                         last_score = search_score;
 
-                        // Mercy Rule
+                        // Mercy Rule (Extreme stomp)
                         if search_score.abs() >= MERCY_CP {
                             mercy_counter += 1;
                         } else {
                             mercy_counter = 0;
                         }
-
                         if mercy_counter >= MERCY_PLIES {
                             if search_score > 0 {
+                                result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
+                            } else {
+                                result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
+                            }
+                            finished = true;
+                            break;
+                        }
+
+                        // Stable Win Adjudication
+                        if search_score.abs() >= WIN_CP {
+                            win_stable_counter += 1;
+                        } else {
+                            win_stable_counter = 0;
+                        }
+                        if win_stable_counter >= WIN_STABLE_PLIES {
+                             if search_score > 0 {
                                 result_val = if state.side_to_move == WHITE { 1.0 } else { 0.0 };
                             } else {
                                 result_val = if state.side_to_move == WHITE { 0.0 } else { 1.0 };
@@ -763,7 +769,30 @@ pub fn run_datagen(config: DatagenConfig) {
                         };
 
                         let clamped_score = search_score.clamp(-32000, 32000);
-                        positions.push((state.clone(), clamped_score as i16));
+
+                        // --- Data Sampling Logic ---
+                        let should_keep = if game_ply < OPENING_SKIP_PLIES {
+                            false
+                        } else {
+                             // "always keep if abs(score_white) <= 200"
+                             // "50% keep if 200 < abs <= 600"
+                             // "25% keep if abs > 600"
+                             // search_score is STM. But absolute value is same as white-relative absolute.
+                             let abs = clamped_score.abs();
+                             if abs <= 200 {
+                                 true
+                             } else if abs <= 600 {
+                                 rng.range(0, 100) < 50
+                             } else {
+                                 rng.range(0, 100) < 25
+                             }
+                        };
+
+                        if should_keep {
+                            // We store the STM-relative score here.
+                            // We will convert it to White-Relative before writing.
+                            positions.push((state.clone(), clamped_score as i16));
+                        }
 
                         // Consistency
                          if !state.is_consistent() || !state.is_move_consistent(final_move) {
@@ -782,7 +811,12 @@ pub fn run_datagen(config: DatagenConfig) {
                         *rep_history.entry(state.hash).or_insert(0) += 1;
                         history_vec.push(state.hash);
 
-                        if history_vec.len() > 600 {
+                        // Update Rolling Hash
+                        let mixed_input = game_rolling_hash ^ state.hash.rotate_left(1) ^ (final_move.0 as u64);
+                        game_rolling_hash = rng.splitmix(mixed_input);
+
+                        // MAX PLIES Hard Stop
+                        if history_vec.len() > MAX_PLIES {
                             result_val = 0.5;
                             finished = true;
                             break;
@@ -793,14 +827,17 @@ pub fn run_datagen(config: DatagenConfig) {
 
                     if finished {
                         let mut game_data = Vec::with_capacity(positions.len());
-                        for (pos_state, score) in positions.drain(..) {
-                            let board = convert_to_bullet(&pos_state, score, result_val);
+                        for (pos_state, score_stm) in positions.drain(..) {
+                            // Fix: Convert STM score to White Relative
+                            let score_white = if pos_state.side_to_move == WHITE { score_stm } else { -score_stm };
+
+                            let board = convert_to_bullet(&pos_state, score_white, result_val);
                             game_data.push(board);
                         }
 
                         if !game_data.is_empty() {
-                            // Send GameID + Data
-                            if tx.send((game_id, game_data)).is_err() {
+                            // Send GameHash (Rolling) + Data
+                            if tx.send((game_rolling_hash, game_data)).is_err() {
                                 break;
                             }
                         }

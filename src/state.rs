@@ -51,7 +51,7 @@ impl UpdateList {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct Move(u16);
+pub struct Move(pub u16);
 
 impl Move {
     pub fn new(source: u8, target: u8, promotion: Option<usize>, is_capture: bool) -> Self {

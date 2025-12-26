@@ -72,11 +72,13 @@ Convert existing PGN files into binary training data.
 
 **Command:**
 ```bash
-# Convert PGN to training data (STM-Relative Labels enforced)
+# Convert PGN to training data (BulletFormat Standard)
 cargo run --release -- convert grandmaster.pgn data.bin
 ```
 
-**Explicit Note:** "The converter enforces Side-to-Move (STM) relative labels for both Score and Result. This prevents label inversion (e.g., Black to move in a losing position is correctly labeled 0.0, even if White eventually won)."
+**Data Format Note:**
+*   **Score:** White-Relative Centipawns (standard for `bulletformat`).
+*   **Result:** Global White Outcome (1.0 = White Win, 0.0 = Black Win, 0.5 = Draw).
 
 ## Training
 

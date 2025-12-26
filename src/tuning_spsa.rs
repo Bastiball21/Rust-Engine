@@ -283,7 +283,7 @@ fn play_game(
             tt,
             stop.clone(),
             false,
-            history.clone(),
+            &history,
             &mut sd,
             params,
             None,
