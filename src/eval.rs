@@ -57,7 +57,8 @@ pub const SHIELD_MISSING_PENALTY: i32 = -20;
 pub const SHIELD_OPEN_FILE_PENALTY: i32 = -30;
 // pub const SAFE_CHECK_BONUS: i32 = 15;
 
-const LAZY_EVAL_MARGIN: i32 = 600;
+const LAZY_EVAL_MARGIN: i32 = 250;
+const ENABLE_HANGING_EVAL: bool = true;
 
 // Mobility Weights [Piece][SquareCount] -> (Offset, Weight)
 const MOBILITY_BONUS: [(i32, i32); 4] = [
@@ -315,6 +316,20 @@ fn get_piece_value(state: &GameState, sq: u8) -> i32 {
         }
     }
     0
+}
+
+#[inline(always)]
+fn piece_value_from_piece_id(piece: u8) -> i32 {
+    // piece is 0..11 for pieces, NO_PIECE for empty
+    match (piece as usize) % 6 {
+        0 => 100,   // Pawn
+        1 => 320,   // Knight
+        2 => 330,   // Bishop
+        3 => 500,   // Rook
+        4 => 900,   // Queen
+        5 => 20000, // King
+        _ => 0,
+    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -708,29 +723,39 @@ fn evaluate_complex_terms(
     let us_sign = if us == WHITE { 1 } else { -1 };
 
     let mut hanging_val = 0;
-    let us_occ = state.occupancies[us];
-    let attacked_by_them = us_occ & attacks_by_side[them];
-    let mut iter = attacked_by_them;
-    while iter.0 != 0 {
-        let sq = iter.get_lsb_index() as u8;
-        iter.pop_bit(sq);
 
-        // Exclude the King from hanging piece logic.
-        // A "hanging" King is handled via check/mate logic, not material penalty.
-        if sq == king_sqs[us] as u8 {
-            continue;
-        }
+    if ENABLE_HANGING_EVAL {
+        let us_occ = state.occupancies[us];
+        let attacked_by_them = us_occ & attacks_by_side[them];
+        let mut iter = attacked_by_them;
+        while iter.0 != 0 {
+            let sq = iter.get_lsb_index() as u8;
+            iter.pop_bit(sq);
 
-        let defended = attacks_by_side[us].get_bit(sq);
-        let val = get_piece_value(state, sq);
+            // OPTIMIZATION: Use mailbox to get piece ID
+            let piece = state.board[sq as usize];
+            if piece == crate::state::NO_PIECE as u8 {
+                continue; // Should not happen if occupancies are correct
+            }
 
-        if !defended {
-            hanging_val += val;
-        } else {
-            let pawn_attacks = bitboard::pawn_attacks(Bitboard(1 << sq), us);
-            if (pawn_attacks & state.bitboards[if them == WHITE { P } else { p }]).0 != 0 {
-                if val > 100 {
-                    hanging_val += val - 100;
+            // Exclude the King from hanging piece logic.
+            // A "hanging" King is handled via check/mate logic, not material penalty.
+            // piece % 6 == 5 handles both K (5) and k (11)
+            if (piece % 6) == 5 {
+                continue;
+            }
+
+            let defended = attacks_by_side[us].get_bit(sq);
+            let val = piece_value_from_piece_id(piece);
+
+            if !defended {
+                hanging_val += val;
+            } else {
+                // OPTIMIZATION: Use cached pawn attacks
+                if pawn_entry.pawn_attacks[them].get_bit(sq) {
+                    if val > 100 {
+                        hanging_val += val - 100;
+                    }
                 }
             }
         }
