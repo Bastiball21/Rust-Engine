@@ -157,7 +157,7 @@ pub fn uci_loop() {
                                 &tt_clone,
                                 stop_clone,
                                 is_main,
-                                history_clone,
+                                &history_clone,
                                 &mut search_data,
                                 &params_clone,
                                 Some(&global_nodes_clone),
