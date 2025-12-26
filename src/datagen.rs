@@ -674,6 +674,7 @@ pub fn run_datagen(config: DatagenConfig) {
                             tt.probe_data(state.hash, &state, None)
                         {
                             if tt_flag == FLAG_EXACT && tt_depth >= search_depth {
+                                // SAFETY CHECK: Ensure TT move is valid for current state to prevent collision crashes
                                 if let Some(mv) = tt_move {
                                     if tt.is_pseudo_legal(&state, mv) {
                                         search_score = tt_score;
