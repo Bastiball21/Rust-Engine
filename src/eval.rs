@@ -149,6 +149,12 @@ pub fn evaluate(state: &GameState, accumulators: &Option<&[crate::nnue::Accumula
     }
 }
 
+/// Lightweight evaluation for QSearch (Material + PST + Pawns only).
+/// Skips expensive HCE terms to improve NPS.
+pub fn evaluate_light(state: &GameState) -> i32 {
+    evaluate_lazy(state)
+}
+
 // Helper for Lazy Eval (Pass 1 of HCE)
 fn evaluate_lazy(state: &GameState) -> i32 {
     let mut mg = 0;
