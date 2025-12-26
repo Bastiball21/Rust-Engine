@@ -813,7 +813,7 @@ fn quiescence(
     }
 
     if ply >= MAX_PLY {
-        return eval::evaluate(state, &Some(&info.data.accumulators), alpha, beta);
+        return eval::evaluate_light(state);
     }
     info.nodes += 1;
     if info.nodes % 1024 == 0 {
@@ -826,7 +826,7 @@ fn quiescence(
     let in_check = is_in_check(state);
 
     if !in_check {
-        let stand_pat = eval::evaluate(state, &Some(&info.data.accumulators), alpha, beta);
+        let stand_pat = eval::evaluate_light(state);
         if stand_pat >= beta {
             return beta;
         }
