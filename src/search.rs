@@ -20,11 +20,12 @@ pub const ENABLE_LMR: bool = true;
 pub const ENABLE_LMP: bool = true;
 pub const ENABLE_SEE_GATE_MAIN: bool = true;
 pub const ENABLE_SEE_GATE_QS: bool = true;
+pub const ENABLE_IIR: bool = true;
 
 // --- TUNING CONSTANTS ---
-pub const ASP_WINDOW_CP: i32 = 25;
-pub const ASP_WIDEN_1: i32 = 75;
-pub const ASP_WIDEN_2: i32 = 200;
+pub const ASP_WINDOW_CP: i32 = 50;
+pub const ASP_WIDEN_1: i32 = 150;
+pub const ASP_WIDEN_2: i32 = 500;
 
 pub const LMR_MIN_DEPTH: u8 = 3;
 pub const LMR_MIN_MOVE_INDEX: usize = 4;
@@ -441,6 +442,13 @@ impl<'a> MovePicker<'a> {
         let enemy_pawns = state.bitboards[if us == WHITE { p } else { P }];
         let enemy_pawn_attacks = bitboard::pawn_attacks(enemy_pawns, 1 - us);
 
+        let jitter_base = if let Some(tid) = self.thread_id {
+            if tid > 0 {
+                // Pseudo-random seed from hash and thread id
+                state.hash.wrapping_add(tid as u64)
+            } else { 0 }
+        } else { 0 };
+
         for i in start_idx..self.move_count {
             let mv = self.move_list[i];
             let from = mv.source() as usize;
@@ -462,6 +470,11 @@ impl<'a> MovePicker<'a> {
             // Penalty for moving into pawn attack
             if enemy_pawn_attacks.get_bit(to as u8) {
                 score -= 1000;
+            }
+
+            if jitter_base != 0 {
+                let noise = (jitter_base.wrapping_add(mv.0 as u64) & 0x3FF) as i32;
+                score += noise;
             }
 
             self.move_scores[i] = score;
@@ -990,12 +1003,8 @@ pub fn search(
     let mut root_state = *state;
 
     // --- THREAD DISTRIBUTION LOGIC START ---
-    let tid = thread_id.unwrap_or(0);
-    let idx = tid % 20;
-    let start_ply = START_PLY[idx] as u8;
-    let skip_size = SKIP_SIZE[idx] as u8;
-
-    let mut depth = start_ply + 1;
+    // Option 1: Same depth for all threads + move ordering jitter
+    let mut depth = 1;
 
     while depth <= max_depth {
         info.seldepth = 0;
@@ -1034,14 +1043,14 @@ pub fn search(
                 if delta == ASP_WIDEN_1 {
                      delta = ASP_WIDEN_2;
                 } else {
-                     delta = 2000;
+                     delta = INFINITY;
                 }
             } else if score >= beta {
                 beta = (INFINITY).min(beta + delta);
                 if delta == ASP_WIDEN_1 {
                      delta = ASP_WIDEN_2;
                 } else {
-                     delta = 2000;
+                     delta = INFINITY;
                 }
             } else {
                 break;
@@ -1123,7 +1132,7 @@ pub fn search(
             );
         }
 
-        depth += skip_size;
+        depth += 1;
     }
     // --- THREAD DISTRIBUTION LOGIC END ---
 
@@ -1286,6 +1295,18 @@ fn negamax(
                 return beta;
             }
         }
+    }
+
+    // Internal Iterative Reduction (IIR)
+    if ENABLE_IIR
+        && ply > 0
+        && !is_pv
+        && !in_check
+        && excluded_move.is_none()
+        && tt_move.is_none()
+        && new_depth >= 6
+    {
+        new_depth -= 1;
     }
 
     let mut raw_eval = -INFINITY;
@@ -1470,6 +1491,12 @@ fn negamax(
 
     info.path.push(state.hash);
 
+    let pinned = if in_check {
+        Bitboard(0)
+    } else {
+        movegen::get_pinned_mask(state, state.side_to_move)
+    };
+
     while let Some(mv) = picker.next_move(state, info.data) {
         if Some(mv) == excluded_move {
             continue;
@@ -1521,14 +1548,49 @@ fn negamax(
 
         let unmake_info = state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
 
-        let our_side = state.side_to_move;
+        let our_side = state.side_to_move; // This is the side that just moved (opponent of current state side)
+        // Correct logic: state.side_to_move is flipped in make_move_inplace.
+        // So we want to check if the side that *just moved* (1 - state.side_to_move) is in check.
+        // Wait, make_move_inplace flips side.
+        // So state.side_to_move is now the opponent.
+        // We want to check if 'mover' is in check.
         let mover = 1 - our_side;
-        let mover_king = if mover == WHITE { K } else { k };
-        let king_sq = state.bitboards[mover_king].get_lsb_index() as u8;
+        let mover_king_type = if mover == WHITE { K } else { k };
+        let king_sq = state.bitboards[mover_king_type].get_lsb_index() as u8;
 
-        if movegen::is_square_attacked(state, king_sq, our_side) {
-            state.unmake_move(mv, unmake_info, &mut Some(&mut info.data.accumulators));
-            continue;
+        // Optimization: If not previously in check, and piece was not pinned, and not King move, and not En Passant...
+        // We can assume legality.
+        // We need 'from' square.
+        let from = mv.source();
+        let piece = state.board[mv.target() as usize] as usize; // Piece is now at target
+        // piece type can be retrieved from target.
+        // King type is 5 or 11.
+
+        let is_king = piece == K || piece == k;
+        let is_ep = unmake_info.en_passant != 64 && (piece == P || piece == p) && mv.target() == unmake_info.en_passant;
+        // Wait, unmake_info.en_passant is the OLD EP square.
+        // Logic: if move is EP capture.
+        // state.en_passant was cleared/changed.
+        // We can check if move is EP by looking at the move struct logic or reconstructed.
+        // Simpler: if mv.is_capture() and target is empty? No, target has piece now.
+        // In unmake_info, we know if it was EP? No.
+        // But we know from movegen logic: if it's EP, it's tricky.
+        // Let's rely on `mv.is_capture()` and `piece == P`.
+        // Actually, safer to just check `is_ep` properly or assume full check for EP.
+        // `is_move_pseudo_legal` logic for EP: target empty + capture flag.
+        // Here we already made the move.
+        // Let's just check if it was EP.
+        // In `make_move_inplace`: `if (piece_type == P || piece_type == p) && target == old_en_passant` -> EP.
+        // We have `unmake_info.en_passant` (old).
+        let was_ep = (piece == P || piece == p) && mv.target() == unmake_info.en_passant;
+
+        let needs_check = in_check || is_king || was_ep || pinned.get_bit(from);
+
+        if needs_check {
+            if movegen::is_square_attacked(state, king_sq, our_side) {
+                state.unmake_move(mv, unmake_info, &mut Some(&mut info.data.accumulators));
+                continue;
+            }
         }
 
         info.tt.prefetch(state.hash, info.thread_id);

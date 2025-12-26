@@ -7,6 +7,40 @@ My first chess engine
 *   **Protocol**: Universal Chess Interface (UCI).
 *   **Training**: CUDA-accelerated NNUE trainer using `bullet`.
 
+## Performance Optimization (Performance Build)
+
+For maximum performance, compile with native CPU optimizations. This enables SIMD instructions (AVX2/BMI2) specific to your processor.
+
+### Local Speed Build
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+### Profile-Guided Optimization (PGO)
+PGO can further improve performance by ~10-15% by optimizing the binary for typical usage patterns.
+
+**Steps:**
+1.  **Generate Profile Data:**
+    ```bash
+    RUSTFLAGS="-C target-cpu=native -C profile-generate=./pgo-data" cargo build --release
+    ```
+2.  **Run Benchmark (Training Run):**
+    Run the engine to generate profile data. A simple benchmark or game generation works.
+    ```bash
+    ./target/release/aether bench
+    ```
+3.  **Merge Data:**
+    Requires `llvm-profdata` (usually included with Rust or LLVM).
+    ```bash
+    llvm-profdata merge -o pgo-data/merged.profdata pgo-data
+    ```
+4.  **Use Profile:**
+    ```bash
+    RUSTFLAGS="-C target-cpu=native -C profile-use=./pgo-data/merged.profdata" cargo build --release
+    ```
+
+**Note:** Binaries built with `target-cpu=native` are **not portable** and may crash on other machines with different CPUs.
+
 ## Building and Testing
 
 ### Prerequisites

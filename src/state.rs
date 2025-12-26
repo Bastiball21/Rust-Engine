@@ -146,6 +146,7 @@ pub struct GameState {
     pub castling_rights: u8,
     pub en_passant: u8,
     pub hash: u64,
+    pub pawn_key: u64, // Pawn structure hash (Zobrist of pawns only)
     pub halfmove_clock: u8,
     pub fullmove_number: u16,
     // REMOVED: pub accumulator: [Accumulator; 2],
@@ -164,6 +165,7 @@ impl GameState {
             castling_rights: 0,
             en_passant: 64,
             hash: 0,
+            pawn_key: 0,
             halfmove_clock: 0,
             fullmove_number: 1,
             // accumulator removed
@@ -172,15 +174,21 @@ impl GameState {
     }
 
     pub fn compute_hash(&mut self) {
-        let mut h = 0;
+        let mut h: u64 = 0;
+        let mut ph: u64 = 0;
         for piece in 0..12 {
             let mut bb = self.bitboards[piece];
             while bb.0 != 0 {
                 let sq = bb.get_lsb_index();
                 bb.pop_bit(sq as u8);
-                h ^= zobrist::piece_key(piece, sq as usize);
+                let key_val = zobrist::piece_key(piece, sq as usize);
+                h ^= key_val;
+                if piece == P || piece == p {
+                    ph ^= key_val;
+                }
             }
         }
+        self.pawn_key = ph;
         h ^= zobrist::castling_key(self.castling_rights);
 
         if (self.castling_rights & 1) != 0 {
@@ -528,6 +536,7 @@ impl GameState {
         let old_en_passant = self.en_passant;
         let old_castling_rights = self.castling_rights;
         let old_halfmove_clock = self.halfmove_clock;
+        // Pawn key doesn't change on null move
 
         self.side_to_move = 1 - self.side_to_move;
         self.hash ^= zobrist::side_key();
@@ -618,6 +627,8 @@ impl GameState {
         let old_en_passant = self.en_passant;
         let old_castling_rights = self.castling_rights;
         let old_halfmove_clock = self.halfmove_clock;
+        // No need to backup pawn_key, we can re-derive it on unmake if strictly necessary,
+        // but since we modify it incrementally, we just reverse ops in unmake.
 
         let mut acc_backup = None;
 
@@ -703,6 +714,7 @@ impl GameState {
 
         if is_castling {
             captured_piece = NO_PIECE as u8;
+            // King
             self.hash ^= zobrist::piece_key(piece_type, source as usize);
             self.bitboards[piece_type].pop_bit(source);
             self.board[source as usize] = NO_PIECE as u8;
@@ -711,6 +723,7 @@ impl GameState {
             self.occupancies[side].pop_bit(source);
             self.occupancies[BOTH].pop_bit(source);
 
+            // Rook
             let rook_type = if side == WHITE { R } else { r };
             self.hash ^= zobrist::piece_key(rook_type, target as usize);
             self.bitboards[rook_type].pop_bit(target);
@@ -776,6 +789,10 @@ impl GameState {
             }
 
             self.hash ^= zobrist::piece_key(piece_type, source as usize);
+            if piece_type == P || piece_type == p {
+                self.pawn_key ^= zobrist::piece_key(piece_type, source as usize);
+            }
+
             self.bitboards[piece_type].pop_bit(source);
             self.board[source as usize] = NO_PIECE as u8;
 
@@ -792,6 +809,7 @@ impl GameState {
             if promotion.is_some() {
                 self.bitboards[actual_piece].set_bit(target);
                 self.hash ^= zobrist::piece_key(actual_piece, target as usize);
+                // Promotion: Old pawn removed (above), new piece added. New piece not pawn.
             } else {
                 // Ensure target is clean before setting (Ghost Busting for Quiet Moves)
                 if !is_capture {
@@ -799,6 +817,9 @@ impl GameState {
                 }
                 self.bitboards[piece_type].set_bit(target);
                 self.hash ^= zobrist::piece_key(piece_type, target as usize);
+                if piece_type == P || piece_type == p {
+                    self.pawn_key ^= zobrist::piece_key(piece_type, target as usize);
+                }
             }
 
             if is_capture {
@@ -815,6 +836,8 @@ impl GameState {
                     self.bitboards[enemy_pawn].pop_bit(cap_sq);
                     self.board[cap_sq as usize] = NO_PIECE as u8;
                     self.hash ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
+                    self.pawn_key ^= zobrist::piece_key(enemy_pawn, cap_sq as usize);
+
                     removed.push((enemy_pawn, cap_sq as usize));
 
                     self.occupancies[enemy_side].pop_bit(cap_sq);
@@ -863,6 +886,9 @@ impl GameState {
                          let cap_p = captured_piece as usize;
                          self.bitboards[cap_p].pop_bit(target);
                          self.hash ^= zobrist::piece_key(cap_p, target as usize);
+                         if cap_p == P || cap_p == p {
+                             self.pawn_key ^= zobrist::piece_key(cap_p, target as usize);
+                         }
                          removed.push((cap_p, target as usize));
                     }
                     self.occupancies[enemy_side].pop_bit(target);
@@ -1031,6 +1057,7 @@ impl GameState {
         self.en_passant = info.en_passant;
         self.castling_rights = info.castling_rights;
         self.halfmove_clock = info.halfmove_clock;
+        let old_pawn_key = self.pawn_key; // Save current (new) pawn key to reverse changes
         self.hash = info.old_hash;
 
         let mut added = UpdateList::new();
@@ -1114,6 +1141,9 @@ impl GameState {
             if moved_piece != NO_PIECE {
                 removed.push((moved_piece, target as usize));
                 self.bitboards[moved_piece].pop_bit(target);
+                if moved_piece == P || moved_piece == p {
+                     self.pawn_key ^= zobrist::piece_key(moved_piece, target as usize);
+                }
             }
 
             self.board[target as usize] = NO_PIECE as u8;
@@ -1140,6 +1170,9 @@ impl GameState {
                 self.occupancies[side].set_bit(source);
                 self.occupancies[BOTH].set_bit(source);
                 added.push((original_piece, source as usize));
+                if original_piece == P || original_piece == p {
+                    self.pawn_key ^= zobrist::piece_key(original_piece, source as usize);
+                }
             }
 
             // 4. Restore captured piece
@@ -1162,6 +1195,9 @@ impl GameState {
                 self.occupancies[enemy_side].set_bit(cap_sq);
                 self.occupancies[BOTH].set_bit(cap_sq);
                 added.push((captured, cap_sq as usize));
+                if captured == P || captured == p {
+                    self.pawn_key ^= zobrist::piece_key(captured, cap_sq as usize);
+                }
             }
         }
 

@@ -415,6 +415,55 @@ pub fn is_square_attacked(state: &GameState, square: u8, attacker_side: usize) -
     false
 }
 
+// Computes the mask of pieces that are pinned to the King by enemy sliders.
+// These pieces cannot move off the ray to the King.
+pub fn get_pinned_mask(state: &GameState, side: usize) -> Bitboard {
+    let mut pinned = Bitboard(0);
+    let king_sq = state.bitboards[if side == WHITE { K } else { k }].get_lsb_index() as u8;
+    let occ = state.occupancies[BOTH];
+    let enemy = 1 - side;
+
+    // Orthogonal Pinners (R + Q)
+    let rooks = state.bitboards[if enemy == WHITE { R } else { r }] | state.bitboards[if enemy == WHITE { Q } else { q }];
+    // Diagonal Pinners (B + Q)
+    let bishops = state.bitboards[if enemy == WHITE { B } else { b }] | state.bitboards[if enemy == WHITE { Q } else { q }];
+
+    // Candidates: Pieces that are on the same rank/file/diagonal as King AND are sliders
+    // We can use the attacks from the King to find aligned pieces
+
+    // Orthogonal
+    let mut pinners = bitboard::get_rook_attacks(king_sq, Bitboard(0)) & rooks;
+    while pinners.0 != 0 {
+        let sq = pinners.pop_lsb();
+        let ray = bitboard::between(king_sq, sq);
+        // Check occupancy on ray
+        let blockers = ray & occ;
+        if blockers.count_bits() == 1 {
+            // If the single blocker is friendly, it is pinned
+            let friendly = state.occupancies[side];
+            if (blockers & friendly).0 != 0 {
+                pinned = pinned | blockers;
+            }
+        }
+    }
+
+    // Diagonal
+    let mut pinners = bitboard::get_bishop_attacks(king_sq, Bitboard(0)) & bishops;
+    while pinners.0 != 0 {
+        let sq = pinners.pop_lsb();
+        let ray = bitboard::between(king_sq, sq);
+        let blockers = ray & occ;
+        if blockers.count_bits() == 1 {
+            let friendly = state.occupancies[side];
+            if (blockers & friendly).0 != 0 {
+                pinned = pinned | blockers;
+            }
+        }
+    }
+
+    pinned
+}
+
 pub fn gives_check(state: &GameState, mv: Move) -> bool {
     let side = state.side_to_move;
     let enemy = 1 - side;
