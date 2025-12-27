@@ -70,7 +70,7 @@ cargo run --release
 Then send UCI commands (e.g., `uci`, `isready`, `go depth 10`).
 
 ### Options
-*   **Hash**: Size of the transposition table in MB (Range: 1-1024, Default: 64).
+*   **Hash**: Size of the transposition table in MB (Range: 1-65536, Default: 64).
 *   **Threads**: Number of search threads (Range: 1-64, Default: 1).
 *   **EvalFile**: Path to the NNUE network file. The engine attempts to load `nn-aether.nnue` from the working directory by default.
 *   **UCI_Chess960**: Enable Chess960 (Fischer Random) mode.
