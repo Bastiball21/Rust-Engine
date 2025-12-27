@@ -1278,13 +1278,20 @@ pub fn search(
             } else {
                 0
             };
-            let score_str = if score > MATE_SCORE {
+            let mut score_str = if score > MATE_SCORE {
                 format!("mate {}", (MATE_VALUE - score + 1) / 2)
             } else if score < -MATE_SCORE {
                 format!("mate -{}", (MATE_VALUE + score + 1) / 2)
             } else {
                 format!("cp {}", score)
             };
+
+            if crate::uci::UCI_SHOW_WDL.load(Ordering::Relaxed) {
+                if score.abs() < MATE_SCORE {
+                    let (w, d, l) = to_wdl(score);
+                    score_str.push_str(&format!(" wdl {} {} {}", w, d, l));
+                }
+            }
 
             let mut pv_line = String::new();
             if let Some(mv) = tt.get_move(state.hash, state, thread_id) {
@@ -2002,6 +2009,16 @@ pub fn square_to_coord(s: u8) -> String {
     let f = (b'a' + (s % 8)) as char;
     let rank_char = (b'1' + (s / 8)) as char;
     format!("{}{}", f, rank_char)
+}
+
+pub fn to_wdl(cp: i32) -> (i32, i32, i32) {
+    let score = cp as f64;
+    let win_p = 1.0 / (1.0 + (-score / 400.0).exp());
+    let draw_mass = 250.0 * (- (score.abs() / 200.0).powi(2)).exp(); // Bell curve peak at 0
+    let d = draw_mass as i32;
+    let w = ((1000.0 - draw_mass) * win_p) as i32;
+    let l = 1000 - w - d;
+    (w, d, l)
 }
 
 pub fn format_move_uci(mv: Move, state: &GameState) -> String {

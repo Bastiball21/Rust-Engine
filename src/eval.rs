@@ -44,8 +44,8 @@ macro_rules! a { ($($x:expr),*) => { [ $(AtomicI32::new($x)),* ] } }
 macro_rules! a { ($($x:expr),*) => { [ $($x),* ] } }
 
 // --- TUNED PARAMETERS ---
-#[rustfmt::skip] pub static MG_VALS: [EvalValue; 6] = a![ 5, 131, 139, 247, 990, 0 ];
-#[rustfmt::skip] pub static EG_VALS: [EvalValue; 6] = a![ -32, 2, -7, -32, 884, 0 ];
+#[rustfmt::skip] pub static MG_VALS: [EvalValue; 6] = a![ 100, 320, 330, 500, 900, 0 ];
+#[rustfmt::skip] pub static EG_VALS: [EvalValue; 6] = a![ 100, 320, 330, 500, 900, 0 ];
 
 // Phase Weights
 pub const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
@@ -120,16 +120,7 @@ pub fn init_eval() {}
 
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState, accumulators: &Option<&[crate::nnue::Accumulator; 2]>, alpha: i32, beta: i32) -> i32 {
-    let lazy_score = evaluate_lazy(state);
-    let margin = LAZY_EVAL_MARGIN;
-
-    if lazy_score + margin <= alpha {
-        return alpha;
-    }
-    if lazy_score - margin >= beta {
-        return beta;
-    }
-
+    // Correctness First: Prioritize NNUE
     if let Some(acc) = accumulators {
         if crate::nnue::NETWORK.get().is_some() {
             let score = crate::nnue::evaluate(
@@ -138,6 +129,16 @@ pub fn evaluate(state: &GameState, accumulators: &Option<&[crate::nnue::Accumula
             );
             return score;
         }
+    }
+
+    let lazy_score = evaluate_lazy(state);
+    let margin = LAZY_EVAL_MARGIN;
+
+    if lazy_score + margin <= alpha {
+        return alpha;
+    }
+    if lazy_score - margin >= beta {
+        return beta;
     }
 
     // Fallback to HCE
