@@ -9,7 +9,7 @@ use bulletformat::BulletFormat;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufWriter, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -375,11 +375,13 @@ pub fn run_datagen(config: DatagenConfig) {
     let (tx, rx) = mpsc::sync_channel::<(u64, Vec<bulletformat::ChessBoard>)>(1000);
 
     let global_games_written = Arc::new(AtomicUsize::new(0));
+    let global_nodes = Arc::new(AtomicU64::new(0));
 
     // Writer Thread
     let filename = config.filename.clone();
     let total_games = config.num_games;
     let writer_counter = global_games_written.clone();
+    let writer_nodes = global_nodes.clone();
 
     let writer_handle = thread::spawn(move || {
         let file = OpenOptions::new()
@@ -419,6 +421,18 @@ pub fn run_datagen(config: DatagenConfig) {
                 let games_per_sec = games_written as f64 / elapsed;
                 let pos_per_sec = positions_written as f64 / elapsed;
 
+                let total_nodes = writer_nodes.load(Ordering::Relaxed);
+                let nps = if elapsed > 0.0 {
+                    total_nodes as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let avg_nodes_pos = if positions_written > 0 {
+                    total_nodes as f64 / positions_written as f64
+                } else {
+                    0.0
+                };
+
                 let remaining_games = total_games.saturating_sub(games_written);
                 let eta_secs = if games_per_sec > 0.0 {
                     remaining_games as f64 / games_per_sec
@@ -435,12 +449,14 @@ pub fn run_datagen(config: DatagenConfig) {
                 };
 
                 println!(
-                    "Written {} games ({:.1}%) ({} pos)... {:.1} games/s, {:.1} pos/s, Dups: {}, Elapsed: {:.0}s, ETA: {}",
+                    "Written {} games ({:.1}%) ({} pos)... {:.1} games/s, {:.1} pos/s, NPS: {:.1}k, Nodes/Pos: {:.0}, Dups: {}, Elapsed: {:.0}s, ETA: {}",
                     games_written,
                     (games_written as f64 / total_games as f64) * 100.0,
                     positions_written,
                     games_per_sec,
                     pos_per_sec,
+                    nps / 1000.0,
+                    avg_nodes_pos,
                     duplicates_discarded,
                     elapsed,
                     eta_str
@@ -461,6 +477,7 @@ pub fn run_datagen(config: DatagenConfig) {
         let tx = tx.clone();
         let params_clone = default_params.clone();
         let book_arc = book.clone();
+        let global_nodes_clone = global_nodes.clone();
 
         let builder = thread::Builder::new()
             .name(format!("datagen_worker_{}", t_id))
@@ -599,7 +616,6 @@ pub fn run_datagen(config: DatagenConfig) {
                     let mut mercy_counter = 0;
                     let mut win_stable_counter = 0;
                     let mut draw_counter = 0;
-                    let mut last_score: i32 = 0; // For Adaptive Depth
 
                     loop {
                         // Repetition / 50-move
@@ -654,14 +670,9 @@ pub fn run_datagen(config: DatagenConfig) {
                             break;
                         }
 
-                        // Determine Search Depth (Adaptive)
-                        let mut search_depth = 8;
-                        let abs_score = last_score.abs();
-                        if abs_score > 600 {
-                            search_depth -= 2;
-                        } else if abs_score > 300 {
-                            search_depth -= 1;
-                        }
+                        // Determine Search Limit
+                        // Smart limit: 50k nodes max, min depth 6
+                        let limits = search::Limits::Smart { node_limit: 50_000, min_depth: 6 };
 
                         // Search
                         let mut used_tt_hit = false;
@@ -671,7 +682,7 @@ pub fn run_datagen(config: DatagenConfig) {
                         if let Some((tt_score, tt_depth, tt_flag, tt_move)) =
                             tt.probe_data(state.hash, &state, None)
                         {
-                            if tt_flag == FLAG_EXACT && tt_depth >= search_depth {
+                            if tt_flag == FLAG_EXACT && tt_depth >= 6 {
                                 if let Some(mv) = tt_move {
                                     if tt.is_pseudo_legal(&state, mv) {
                                         search_score = tt_score;
@@ -683,7 +694,6 @@ pub fn run_datagen(config: DatagenConfig) {
                         }
 
                         if !used_tt_hit {
-                            let limits = search::Limits::FixedDepth(search_depth);
                             let (s, m) = search::search(
                                 &state,
                                 limits,
@@ -693,14 +703,12 @@ pub fn run_datagen(config: DatagenConfig) {
                                 &history_vec,
                                 &mut search_data,
                                 &params_clone,
-                                None,
+                                Some(&global_nodes_clone),
                                 None,
                             );
                             search_score = s;
                             best_move = m;
                         }
-
-                        last_score = search_score;
 
                         // Mercy Rule (Extreme stomp)
                         if search_score.abs() >= MERCY_CP {

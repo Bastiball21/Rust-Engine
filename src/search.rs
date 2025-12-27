@@ -88,6 +88,7 @@ pub enum Limits {
     FixedDepth(u8),
     FixedNodes(u64),
     FixedTime(TimeManager),
+    Smart { node_limit: u64, min_depth: u8 },
 }
 
 pub struct SearchPath {
@@ -645,6 +646,7 @@ pub struct SearchInfo<'a> {
     pub nodes: u64,
     pub global_nodes: Option<&'a AtomicU64>,
     pub seldepth: u8,
+    pub root_depth: u8,
     pub limits: Limits,
     pub stop_signal: Arc<AtomicBool>,
     pub stopped: bool,
@@ -672,6 +674,7 @@ impl<'a> SearchInfo<'a> {
             nodes: 0,
             global_nodes,
             seldepth: 0,
+            root_depth: 0,
             limits,
             stop_signal: stop,
             stopped: false,
@@ -704,6 +707,12 @@ impl<'a> SearchInfo<'a> {
                 }
                 Limits::FixedTime(tm) => {
                     if self.main_thread && tm.check_hard_limit() {
+                        self.stopped = true;
+                        self.stop_signal.store(true, Ordering::Relaxed);
+                    }
+                }
+                Limits::Smart { node_limit, min_depth } => {
+                    if self.nodes >= *node_limit && self.root_depth >= *min_depth {
                         self.stopped = true;
                         self.stop_signal.store(true, Ordering::Relaxed);
                     }
@@ -1133,6 +1142,7 @@ pub fn search(
 
     let max_depth = match limits {
         Limits::FixedDepth(d) => d,
+        Limits::Smart { .. } => MAX_PLY as u8,
         _ => MAX_PLY as u8,
     };
 
@@ -1184,6 +1194,7 @@ pub fn search(
     let mut depth = 1;
 
     while depth <= max_depth {
+        info.root_depth = depth;
         info.seldepth = 0;
         let mut alpha = -INFINITY;
         let mut beta = INFINITY;
