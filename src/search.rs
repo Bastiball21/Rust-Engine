@@ -52,36 +52,6 @@ static SKIP_SIZE: [i16; 20] = [1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4
 // Continuation History
 type ContHistTable = [[[i32; 64]; 12]; 768];
 
-// NEW: Shared Correction History
-pub struct CorrectionTable(pub [[AtomicI16; 64]; 12]);
-
-impl CorrectionTable {
-    pub fn new() -> Self {
-        // Initialize with 0
-        let mut table: [[AtomicI16; 64]; 12] = unsafe { std::mem::zeroed() };
-        for i in 0..12 {
-            for j in 0..64 {
-                table[i][j] = AtomicI16::new(0);
-            }
-        }
-        CorrectionTable(table)
-    }
-}
-
-pub struct ThreatStats {
-    pub precise_calls: AtomicU64,
-    pub approx_calls: AtomicU64,
-}
-
-impl Default for ThreatStats {
-    fn default() -> Self {
-        Self {
-            precise_calls: AtomicU64::new(0),
-            approx_calls: AtomicU64::new(0),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub enum Limits {
     Infinite,
@@ -135,27 +105,19 @@ pub struct SearchData {
 
     pub cont_history: Box<ContHistTable>,
 
-    // Correction History: [Piece][Square] -> Error Adjustment
-    // Changed from local array to Arc<CorrectionTable>
-    pub correction_history: Arc<CorrectionTable>,
-
     // NNUE Accumulators (Thread Local)
     pub accumulators: [Accumulator; 2],
-
-    pub threat_stats: Arc<ThreatStats>,
 }
 
 impl SearchData {
-    pub fn new(correction_history: Arc<CorrectionTable>) -> Self {
+    pub fn new() -> Self {
         Self {
             killers: [[None; 2]; MAX_PLY + 1],
             history: [[0; 64]; 64],
             capture_history: Box::new([[[0; 6]; 64]; 12]),
             counter_moves: [[None; 64]; 12],
             cont_history: Box::new([[[0; 64]; 12]; 768]),
-            correction_history,
             accumulators: [Accumulator::default(); 2],
-            threat_stats: Arc::new(ThreatStats::default()),
         }
     }
 
@@ -165,12 +127,6 @@ impl SearchData {
         self.capture_history.fill_with(|| [[0; 6]; 64]);
         self.counter_moves = [[None; 64]; 12];
         self.cont_history.fill_with(|| [[0; 64]; 12]);
-        // Correction History is shared and persistent across moves in a search,
-        // but we might want to clear it between searches?
-        // Usually correction history is cleared per search or per game.
-        // Since it's in Arc, `SearchData::clear` can't easily clear it without interior mutability on all threads.
-        // Typically it is cleared in `uci.rs` when starting a new search if needed, or aged.
-        // For now, we leave it as is (persistent during search phase).
     }
 }
 
@@ -497,7 +453,8 @@ impl<'a> MovePicker<'a> {
             }
 
             if jitter_base != 0 {
-                let noise = (jitter_base.wrapping_add(mv.0 as u64) & 0x3FF) as i32;
+                // Noise in [-16, +15]
+                let noise = ((jitter_base.wrapping_add(mv.0 as u64) % 32) as i32) - 16;
                 score += noise;
             }
 
@@ -530,19 +487,9 @@ impl<'a> MovePicker<'a> {
             indices.sort_by(|&idx_a, &idx_b| self.move_scores[idx_b].cmp(&self.move_scores[idx_a]));
 
             let top_k = params.tactical_topk_quiets;
-            let mut precise_count = 0;
-            let mut approx_count = 0;
 
             for (rank, &idx) in indices.iter().enumerate() {
                 let mv = self.move_list[idx];
-
-                // Gating Check
-                // Note: We don't have `mv_is_check` here easily without running `gives_check`.
-                // `gives_check` is moderately expensive.
-                // However, `tag_pin` relies on `occ_after`.
-                // Let's use the helper `should_use_precise_tagging`.
-                // We pass `mv_is_check=false` for now, or check it if we want.
-                // Or we can rely on `quiet_rank`.
 
                 if threat::should_use_precise_tagging(
                     self.is_pv_node,
@@ -552,8 +499,6 @@ impl<'a> MovePicker<'a> {
                     Some(rank),
                     top_k
                 ) {
-                    precise_count += 1;
-
                     let us_white = state.side_to_move == WHITE;
 
                     // Determine the piece type ON THE TARGET SQUARE (handling promotion)
@@ -627,15 +572,8 @@ impl<'a> MovePicker<'a> {
                     ) {
                         self.move_scores[idx] += params.bonus_discovered;
                     }
-
-                } else {
-                    approx_count += 1;
                 }
             }
-
-            // Stats Update
-            data.threat_stats.precise_calls.fetch_add(precise_count, Ordering::Relaxed);
-            data.threat_stats.approx_calls.fetch_add(approx_count, Ordering::Relaxed);
         }
     }
 }
@@ -923,30 +861,6 @@ fn update_continuation_history(
     }
 }
 
-fn update_correction_history(
-    info: &mut SearchInfo,
-    prev_move: Option<Move>,
-    state: &GameState,
-    diff: i32,
-    depth: u8,
-) {
-    if let Some(mv) = prev_move {
-        let piece = get_moved_piece(state, mv);
-        let to = mv.target() as usize;
-        let entry = &info.data.correction_history.0[piece][to];
-
-        let scaled_diff = diff.clamp(-512, 512);
-        let weight = (depth as i32).min(16);
-
-        // Update formula: Move towards diff
-        // We need to load and store atomically
-        let current_val = entry.load(Ordering::Relaxed) as i32;
-        let new_val = current_val + (scaled_diff - current_val) * weight / 64;
-        let clamped_val = new_val.clamp(-16000, 16000) as i16;
-
-        entry.store(clamped_val, Ordering::Relaxed);
-    }
-}
 
 #[inline(always)]
 fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
@@ -1400,6 +1314,8 @@ fn negamax(
         return 0;
     }
 
+    let alpha0 = alpha;
+
     // OPTIMIZED REPETITION CHECK using SearchPath
     if ply > 0 {
         let path_len = info.path.len;
@@ -1509,15 +1425,8 @@ fn negamax(
         -INFINITY
     } else {
         raw_eval = eval::evaluate(state, &Some(&info.data.accumulators), alpha, beta);
-        let mut correction = 0;
-        if let Some(pm) = prev_move {
-            let piece = get_moved_piece(state, pm);
-            // Change: Access atomic correction history
-            correction = info.data.correction_history.0[piece][pm.target() as usize].load(Ordering::Relaxed) as i32;
-        }
-        let eval = raw_eval + correction;
-        info.static_evals[ply] = eval;
-        eval
+        info.static_evals[ply] = raw_eval;
+        raw_eval
     };
 
     let improving = ply >= 2 && !in_check && static_eval >= info.static_evals[ply - 2];
@@ -1978,13 +1887,7 @@ fn negamax(
         }
     }
 
-    if excluded_move.is_none() && !in_check && raw_eval != -INFINITY && max_score.abs() < MATE_SCORE
-    {
-        let diff = max_score - raw_eval;
-        update_correction_history(info, prev_move, state, diff, new_depth);
-    }
-
-    let flag = if max_score <= alpha {
+    let flag = if max_score <= alpha0 {
         FLAG_ALPHA
     } else if max_score >= beta {
         FLAG_BETA
@@ -2105,6 +2008,6 @@ fn is_forced_move(
     score < r_beta
 }
 
-fn see_ge(state: &GameState, mv: Move, threshold: i32) -> bool {
+pub(crate) fn see_ge(state: &GameState, mv: Move, threshold: i32) -> bool {
     see(state, mv) >= threshold
 }

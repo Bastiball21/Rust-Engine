@@ -99,7 +99,7 @@ pub fn run_cli() {
              // Basic benchmark: Fixed depth search from startpos
              let state = state::GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
              let tt = std::sync::Arc::new(tt::TranspositionTable::new(16, 1)); // 16MB
-             let mut data = search::SearchData::new(std::sync::Arc::new(search::CorrectionTable::new()));
+             let mut data = search::SearchData::new();
              let params = parameters::SearchParameters::default();
              let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -116,11 +116,6 @@ pub fn run_cli() {
                  None,
                  Some(0)
              );
-
-             let precise = data.threat_stats.precise_calls.load(std::sync::atomic::Ordering::Relaxed);
-             let approx = data.threat_stats.approx_calls.load(std::sync::atomic::Ordering::Relaxed);
-             println!("Threat tagging: precise={} approx={} (precise_rate={:.1}%)",
-                      precise, approx, (precise as f64) * 100.0 / ((precise + approx).max(1) as f64));
              return;
         }
 
