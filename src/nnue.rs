@@ -336,6 +336,31 @@ pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
     evaluate_scalar(stm_acc, ntm_acc, net)
 }
 
+#[cfg(debug_assertions)]
+pub fn verify_accumulator(state: &crate::state::GameState, acc: &Accumulator, perspective: usize) {
+    if NETWORK.get().is_none() {
+        return;
+    }
+
+    let mut fresh = Accumulator::default();
+    use crate::state::{K, k};
+    let king_sq = if perspective == crate::state::WHITE {
+        state.bitboards[K].get_lsb_index() as usize
+    } else {
+        state.bitboards[k].get_lsb_index() as usize
+    };
+    fresh.refresh(&state.bitboards, perspective, king_sq);
+
+    for i in 0..L1_SIZE {
+        if fresh.v[i] != acc.v[i] {
+            eprintln!("ACCUMULATOR MISMATCH Perspective: {}", if perspective == crate::state::WHITE { "White" } else { "Black" });
+            eprintln!("Index: {}, Fresh: {}, Incremental: {}", i, fresh.v[i], acc.v[i]);
+            eprintln!("FEN: {}", state.to_fen());
+            panic!("Accumulator Verification Failed");
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network) -> i32 {

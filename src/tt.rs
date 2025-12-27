@@ -394,24 +394,20 @@ impl TranspositionTable {
         self.generation.store(0, Ordering::Relaxed);
     }
 
-    fn get_shard(&self, _key: u64, thread_id: Option<usize>) -> &TTShard {
+    fn get_shard(&self, hash: u64, _thread_id: Option<usize>) -> &TTShard {
         if self.num_shards == 1 {
             return &self.shards[0];
         }
-        // If thread_id is provided, use it (Private Partitioning / Sharding)
-        // User asked: "index by (key ^ thread_id)"?
-        // Actually, user said: "allocate shards and index by (key ^ thread_id) & (shard_size - 1)".
-        // This implies selecting the index WITHIN the shard using thread_id mixing.
-        // But do we select the SHARD based on thread_id?
-        // "Shard TT per thread" suggests 1 shard per thread.
-        // So we select shard by thread_id % num_shards.
 
-        if let Some(tid) = thread_id {
-            &self.shards[tid % self.num_shards]
+        // Shard based on hash (high bits)
+        // Use high bits for better distribution
+        let shard_idx = if self.num_shards.is_power_of_two() {
+            ((hash >> 48) as usize) & (self.num_shards - 1)
         } else {
-            // Fallback if no thread_id (e.g. main thread helpers) -> use shard 0
-            &self.shards[0]
-        }
+            ((hash >> 48) as usize) % self.num_shards
+        };
+
+        &self.shards[shard_idx]
     }
 
     pub fn prefetch(&self, hash: u64, thread_id: Option<usize>) {
@@ -556,5 +552,52 @@ impl TranspositionTable {
 
         if total_slots == 0 { return 0; }
         (used * 1000) / total_slots
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tt_sharding_power_of_two() {
+        let tt = TranspositionTable::new(16, 4);
+        assert_eq!(tt.num_shards, 4);
+
+        // High bits 48, 49
+        let hash1: u64 = 0u64;           // 00 -> 0
+        let hash2: u64 = 1u64 << 48;     // 01 -> 1
+        let hash3: u64 = 2u64 << 48;     // 10 -> 2
+        let hash4: u64 = 3u64 << 48;     // 11 -> 3
+
+        let s1 = tt.get_shard(hash1, None);
+        let s2 = tt.get_shard(hash2, None);
+        let s3 = tt.get_shard(hash3, None);
+        let s4 = tt.get_shard(hash4, None);
+
+        // Check pointers are distinct (shards are different objects)
+        assert!(!std::ptr::eq(s1 as *const _, s2 as *const _));
+        assert!(!std::ptr::eq(s1 as *const _, s3 as *const _));
+        assert!(!std::ptr::eq(s1 as *const _, s4 as *const _));
+    }
+
+    #[test]
+    fn test_tt_sharding_non_power_of_two() {
+        let tt = TranspositionTable::new(16, 3);
+        assert_eq!(tt.num_shards, 3);
+
+        let hash0: u64 = 0u64 << 48; // 0 % 3 = 0
+        let hash1: u64 = 1u64 << 48; // 1 % 3 = 1
+        let hash2: u64 = 2u64 << 48; // 2 % 3 = 2
+        let hash3: u64 = 3u64 << 48; // 3 % 3 = 0
+
+        let s0 = tt.get_shard(hash0, None);
+        let s1 = tt.get_shard(hash1, None);
+        let s2 = tt.get_shard(hash2, None);
+        let s3 = tt.get_shard(hash3, None);
+
+        assert!(!std::ptr::eq(s0 as *const _, s1 as *const _));
+        assert!(!std::ptr::eq(s0 as *const _, s2 as *const _));
+        assert!(std::ptr::eq(s0 as *const _, s3 as *const _));
     }
 }
