@@ -507,7 +507,12 @@ pub fn run_datagen(config: DatagenConfig) {
                 let mut book_cursor = 0;
 
                 if let Some(book_ref) = &book_arc {
-                    book_indices = (0..book_ref.positions.len()).collect();
+                    // Shard: Only take indices belonging to this thread
+                    book_indices = (0..book_ref.positions.len())
+                        .filter(|&i| i % config.num_threads == t_id)
+                        .collect();
+
+                    // Shuffle using the custom RNG method
                     rng.shuffle(&mut book_indices);
                 }
 
@@ -671,7 +676,7 @@ pub fn run_datagen(config: DatagenConfig) {
                         }
 
                         // Determine Search Limit
-                        // Smart limit: 50k nodes max, min depth 6
+                        // FixedNodes(50_000) for consistent quality
                         let limits = search::Limits::FixedNodes(50_000);
 
                         // Search
@@ -694,6 +699,9 @@ pub fn run_datagen(config: DatagenConfig) {
                         }
 
                         if !used_tt_hit {
+                            // Generate a random ID (ensure non-zero using | 1)
+                            let random_id = (rng.next_u64() as usize) | 1;
+
                             let (s, m) = search::search(
                                 &state,
                                 limits,
@@ -704,7 +712,7 @@ pub fn run_datagen(config: DatagenConfig) {
                                 &mut search_data,
                                 &params_clone,
                                 Some(&global_nodes_clone),
-                                Some(t_id + 1),
+                                Some(random_id), // <--- Pass Random ID here
                             );
                             search_score = s;
                             best_move = m;
