@@ -672,7 +672,7 @@ pub fn run_datagen(config: DatagenConfig) {
 
                         // Determine Search Limit
                         // Smart limit: 50k nodes max, min depth 6
-                        let limits = search::Limits::Smart { node_limit: 50_000, min_depth: 6 };
+                        let limits = search::Limits::FixedNodes(50_000);
 
                         // Search
                         let mut used_tt_hit = false;
