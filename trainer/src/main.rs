@@ -140,13 +140,13 @@ fn main() {
             let hidden_layer_0 = stm_hidden.concat(ntm_hidden);
 
             // L1: 512 -> 32 (ClippedReLU)
-            let hidden_layer_1 = l1.forward(hidden_layer_0).clamp_min().clamp_max(1.0); // ClippedReLU [0, 1]
+            let hidden_layer_1 = l1.forward(hidden_layer_0).clamp(0.0, 1.0); // ClippedReLU [0, 1]
 
             // L2: 32 -> 32 (ClippedReLU)
-            let hidden_layer_2 = l2.forward(hidden_layer_1).clamp_min().clamp_max(1.0);
+            let hidden_layer_2 = l2.forward(hidden_layer_1).clamp(0.0, 1.0);
 
             // L3: 32 -> 32 (ClippedReLU)
-            let hidden_layer_3 = l3.forward(hidden_layer_2).clamp_min().clamp_max(1.0);
+            let hidden_layer_3 = l3.forward(hidden_layer_2).clamp(0.0, 1.0);
 
             // L4: 32 -> 1 (Linear)
             l4.forward(hidden_layer_3)
@@ -157,7 +157,7 @@ fn main() {
         eval_scale: 400.0,
         steps: TrainingSteps {
             batch_size: 16_384,
-            batches_per_superbatch: 6104,
+            batches_per_superbatch: 1953,
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
