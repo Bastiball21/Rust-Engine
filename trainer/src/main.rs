@@ -110,7 +110,7 @@ fn main() {
 
             // Layer 4: 32 -> 1 (Raw)
             SavedFormat::id("l4w").round().quantise::<i16>(64),
-            SavedFormat::id("l4b").round().quantise::<i16>(255 * 64 * 127), // Output bias
+            SavedFormat::id("l4b").round().quantise::<i32>(255 * 64 * 127), // Output bias
         ])
         .loss_fn(|output: NetworkBuilderNode<BackendMarker>, target: NetworkBuilderNode<BackendMarker>| {
             output.sigmoid().squared_error(target)
@@ -140,13 +140,13 @@ fn main() {
             let hidden_layer_0 = stm_hidden.concat(ntm_hidden);
 
             // L1: 512 -> 32 (ClippedReLU)
-            let hidden_layer_1 = l1.forward(hidden_layer_0).clamp_zero().clamp_max(1.0); // ClippedReLU [0, 1]
+            let hidden_layer_1 = l1.forward(hidden_layer_0).clamp_min().clamp_max(1.0); // ClippedReLU [0, 1]
 
             // L2: 32 -> 32 (ClippedReLU)
-            let hidden_layer_2 = l2.forward(hidden_layer_1).clamp_zero().clamp_max(1.0);
+            let hidden_layer_2 = l2.forward(hidden_layer_1).clamp_min().clamp_max(1.0);
 
             // L3: 32 -> 32 (ClippedReLU)
-            let hidden_layer_3 = l3.forward(hidden_layer_2).clamp_zero().clamp_max(1.0);
+            let hidden_layer_3 = l3.forward(hidden_layer_2).clamp_min().clamp_max(1.0);
 
             // L4: 32 -> 1 (Linear)
             l4.forward(hidden_layer_3)
