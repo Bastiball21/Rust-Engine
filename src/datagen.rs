@@ -704,7 +704,7 @@ pub fn run_datagen(config: DatagenConfig) {
                                 &mut search_data,
                                 &params_clone,
                                 Some(&global_nodes_clone),
-                                None,
+                                Some(t_id + 1),
                             );
                             search_score = s;
                             best_move = m;
