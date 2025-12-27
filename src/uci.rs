@@ -15,6 +15,7 @@ use crate::syzygy;
 
 // Global UCI Option
 pub static UCI_CHESS960: AtomicBool = AtomicBool::new(false);
+pub static UCI_SHOW_WDL: AtomicBool = AtomicBool::new(false);
 pub static TT_SHARDS: AtomicUsize = AtomicUsize::new(1); // Default 1 (Shared)
 
 pub fn parse_move_wrapper(state: &GameState, move_str: &str) -> Option<Move> {
@@ -81,6 +82,7 @@ pub fn uci_loop() {
                 println!("option name Move Overhead type spin default 10 min 0 max 5000");
                 println!("option name EvalFile type string default nn-aether.nnue");
                 println!("option name UCI_Chess960 type check default false");
+                println!("option name UCI_ShowWDL type check default false");
                 println!("option name TTShards type spin default 1 min 1 max 64");
                 println!("uciok");
             }
@@ -208,6 +210,9 @@ pub fn uci_loop() {
                         } else if name.eq_ignore_ascii_case("UCI_Chess960") {
                             let val = value.parse::<bool>().unwrap_or(false);
                             UCI_CHESS960.store(val, Ordering::Relaxed);
+                        } else if name.eq_ignore_ascii_case("UCI_ShowWDL") {
+                            let val = value.parse::<bool>().unwrap_or(false);
+                            UCI_SHOW_WDL.store(val, Ordering::Relaxed);
                         } else if name.eq_ignore_ascii_case("SyzygyPath") {
                             syzygy::init_tablebase(value);
                         } else if name.eq_ignore_ascii_case("TTShards") {

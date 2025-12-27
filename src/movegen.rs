@@ -25,16 +25,10 @@ impl MoveList {
 
     #[inline(always)]
     pub fn push(&mut self, m: Move) {
-        if self.count < MAX_MOVES {
-            self.moves[self.count] = m;
+        debug_assert!(self.count < MAX_MOVES);
+        unsafe {
+            *self.moves.get_unchecked_mut(self.count) = m;
             self.count += 1;
-        } else {
-            #[cfg(debug_assertions)]
-            panic!(
-                "MoveList overflow! Attempted to push move {} (limit {})",
-                self.count + 1,
-                MAX_MOVES
-            );
         }
     }
 }
