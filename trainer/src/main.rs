@@ -132,7 +132,7 @@ fn main() {
             let l4 = builder.new_affine("l4", l4_size, 1);
 
             // Forward Pass
-            // L0 Activation: SCReLU (SquarerClippedReLU) -> Range [0, 255] roughly (if quantised) or [0, 1] in float world squared
+            // L0 Activation: SCReLU (SquarerClippedReLU)
             let stm_hidden = l0.forward(stm_inputs).screlu();
             let ntm_hidden = l0.forward(ntm_inputs).screlu();
 
@@ -140,13 +140,14 @@ fn main() {
             let hidden_layer_0 = stm_hidden.concat(ntm_hidden);
 
             // L1: 512 -> 32 (ClippedReLU)
-            let hidden_layer_1 = l1.forward(hidden_layer_0).clamp(0.0, 1.0); // ClippedReLU [0, 1]
+            // CHANGE: Use .crelu() instead of .clamp_zero().clamp_max(1.0)
+            let hidden_layer_1 = l1.forward(hidden_layer_0).crelu(); 
 
             // L2: 32 -> 32 (ClippedReLU)
-            let hidden_layer_2 = l2.forward(hidden_layer_1).clamp(0.0, 1.0);
+            let hidden_layer_2 = l2.forward(hidden_layer_1).crelu();
 
             // L3: 32 -> 32 (ClippedReLU)
-            let hidden_layer_3 = l3.forward(hidden_layer_2).clamp(0.0, 1.0);
+            let hidden_layer_3 = l3.forward(hidden_layer_2).crelu();
 
             // L4: 32 -> 1 (Linear)
             l4.forward(hidden_layer_3)
