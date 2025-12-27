@@ -187,6 +187,8 @@ pub fn run_cli() {
                 book_ply,
             };
 
+            // Ensure NNUE is loaded (File or Embedded)
+            crate::nnue::ensure_nnue_loaded();
             datagen::run_datagen(config);
             return;
         }

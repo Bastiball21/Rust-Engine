@@ -3,7 +3,7 @@ My first chess engine
 
 ## Features
 *   **Search**: Alpha-Beta with Principal Variation Search, Transposition Table, Iterative Deepening.
-*   **Evaluation**: Hybrid 5-Layer NNUE (768 → 256 → 32 → 32 → 32 → 1) with Hand-Crafted Evaluation (HCE) fallback.
+*   **Evaluation**: Hybrid 5-Layer NNUE (768 → 256 → 32 → 32 → 32 → 1) with Hand-Crafted Evaluation (HCE) fallback. Includes an **Embedded Network** for standalone operation.
 *   **Protocol**: Universal Chess Interface (UCI).
 *   **Training**: CUDA-accelerated NNUE trainer using `bullet`.
 
@@ -70,16 +70,27 @@ cargo run --release
 Then send UCI commands (e.g., `uci`, `isready`, `go depth 10`).
 
 ### Options
-*   **Hash**: Size of the transposition table in MB (Range: 1-65536, Default: 64).
+*   **Hash**: Size of the transposition table in MB (Range: 1-262144, Default: 64).
 *   **Threads**: Number of search threads (Range: 1-64, Default: 1).
-*   **EvalFile**: Path to the NNUE network file. The engine attempts to load `nn-aether.nnue` from the working directory by default.
+*   **EvalFile**: Path to the NNUE network file. The engine attempts to load `nn-aether.nnue` from the working directory by default. If not found, it uses the **embedded network** compiled into the binary.
 *   **UCI_Chess960**: Enable Chess960 (Fischer Random) mode.
 *   **SyzygyPath**: Path to Syzygy endgame tablebases.
 *   **TTShards**: Number of Transposition Table shards (Range: 1-64, Default: 1).
 *   **Move Overhead**: Time buffer in milliseconds to compensate for network/GUI latency (Range: 0-5000, Default: 10).
 
-### Evaluation Fallback
-If no NNUE network is loaded, Aether falls back to a Hand-Crafted Evaluation (HCE). This allows the engine to function without a network file, though playing strength will be significantly lower.
+### Embedded Network
+Aether includes a default NNUE network embedded directly into the binary. This ensures the engine plays at full strength even if the external `nn-aether.nnue` file is missing. You can override this by providing a specific file via the `EvalFile` option.
+
+### Tuning
+Aether supports parameter tuning:
+*   **SPSA (Search Tuning)**: Optimizes search parameters (LMR, RFP, etc.) via self-play.
+    ```bash
+    cargo run --release -- tune-search
+    ```
+*   **Texel (Eval Tuning)**: Optimizes HCE weights using labeled positions.
+    ```bash
+    cargo run --release -- tune <epd_file>
+    ```
 
 ## Data Generation
 
