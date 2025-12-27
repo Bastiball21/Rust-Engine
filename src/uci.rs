@@ -75,7 +75,7 @@ pub fn uci_loop() {
             "uci" => {
                 println!("id name Aether 1.0.0");
                 println!("id author Basti Dangca");
-                println!("option name Hash type spin default 64 min 1 max 65536");
+                println!("option name Hash type spin default 64 min 1 max 262144");
                 println!("option name Threads type spin default 1 min 1 max 64");
                 println!("option name SyzygyPath type string default <empty>");
                 println!("option name Move Overhead type spin default 10 min 0 max 5000");
@@ -187,7 +187,7 @@ pub fn uci_loop() {
 
                         if name.eq_ignore_ascii_case("Hash") {
                             if let Ok(mb) = value.parse::<usize>() {
-                                let clamped_mb = mb.clamp(1, 1024);
+                                let clamped_mb = mb.clamp(1, 262144);
                                 let shards = TT_SHARDS.load(Ordering::Relaxed);
                                 stop_signal.store(true, Ordering::Relaxed);
                                 for h in search_threads.drain(..) {
