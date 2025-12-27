@@ -231,7 +231,14 @@ fn process_and_write_game(move_text: &str, writer: &mut BufWriter<File>) -> usiz
         // Calculate Eval (Score) - White Relative for BulletFormat
         let raw_stm = crate::eval::evaluate(&state, &None, -32000, 32000);
         let score_white = if state.side_to_move == WHITE { raw_stm } else { -raw_stm };
-        let clamped_score = score_white.clamp(-32000, 32000) as i16;
+        let mut clamped_score = score_white.clamp(-32000, 32000) as i16;
+
+        // Mate Score Capping
+        const MATE_THRESHOLD: i16 = 20000;
+        const MATE_CAP: i16 = 3000;
+        if clamped_score.abs() >= MATE_THRESHOLD {
+            clamped_score = if clamped_score > 0 { MATE_CAP } else { -MATE_CAP };
+        }
 
         let board_data = convert_to_bullet(&state, clamped_score, global_white_score);
         bulletformat::ChessBoard::write_to_bin(writer, &[board_data]).unwrap();
@@ -768,10 +775,17 @@ pub fn run_datagen(config: DatagenConfig) {
                             valid
                         };
 
-                        let clamped_score = search_score.clamp(-32000, 32000);
+                        let mut clamped_score = search_score.clamp(-32000, 32000);
+
+                        // Mate Score Capping
+                        const MATE_THRESHOLD: i32 = 20000;
+                        const MATE_CAP: i32 = 3000;
+                        if clamped_score.abs() >= MATE_THRESHOLD {
+                            clamped_score = if clamped_score > 0 { MATE_CAP } else { -MATE_CAP };
+                        }
 
                         // --- Data Sampling Logic ---
-                        let should_keep = if game_ply < OPENING_SKIP_PLIES {
+                        let mut should_keep = if game_ply < OPENING_SKIP_PLIES {
                             false
                         } else {
                              // "always keep if abs(score_white) <= 200"
@@ -787,6 +801,11 @@ pub fn run_datagen(config: DatagenConfig) {
                                  rng.range(0, 100) < 25
                              }
                         };
+
+                        // Skip one legal move (unless check)
+                        if moves.list.count == 1 && !crate::search::is_in_check(&state) {
+                            should_keep = false;
+                        }
 
                         if should_keep {
                             // We store the STM-relative score here.

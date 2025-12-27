@@ -1015,6 +1015,26 @@ fn quiescence(
         return 0;
     }
 
+    // Safety Verification
+    #[cfg(debug_assertions)]
+    if info.nodes % 4096 == 0 {
+         crate::nnue::verify_accumulator(state, &info.data.accumulators[0], 0);
+         crate::nnue::verify_accumulator(state, &info.data.accumulators[1], 1);
+    }
+
+    // TT Probe in QSearch
+    if let Some((score, _d, flag, _m)) = info.tt.probe_data(state.hash, state, info.thread_id) {
+        if flag == FLAG_EXACT {
+            return score;
+        }
+        if flag == FLAG_ALPHA && score <= alpha {
+            return score;
+        }
+        if flag == FLAG_BETA && score >= beta {
+            return score;
+        }
+    }
+
     let in_check = is_in_check(state);
 
     if !in_check {
