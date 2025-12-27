@@ -121,13 +121,15 @@ pub fn init_eval() {}
 // --- MAIN EVAL ---
 pub fn evaluate(state: &GameState, accumulators: &Option<&[crate::nnue::Accumulator; 2]>, alpha: i32, beta: i32) -> i32 {
     // Correctness First: Prioritize NNUE
+    // If accumulators are present AND network is loaded, return NNUE score immediately.
+    // No lazy eval, no pruning, no HCE fallback.
     if let Some(acc) = accumulators {
         if crate::nnue::NETWORK.get().is_some() {
-            let score = crate::nnue::evaluate(
+            // crate::nnue::evaluate returns STM-relative score (verified).
+            return crate::nnue::evaluate(
                 &acc[state.side_to_move],
                 &acc[1 - state.side_to_move],
             );
-            return score;
         }
     }
 

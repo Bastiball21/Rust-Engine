@@ -47,9 +47,6 @@ pub fn uci_loop() {
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
     let global_nodes = Arc::new(AtomicU64::new(0));
 
-    // NEW: Shared Correction History
-    let mut correction_history = Arc::new(search::CorrectionTable::new());
-
     loop {
         buffer.clear();
         match stdin.lock().read_line(&mut buffer) {
@@ -95,9 +92,6 @@ pub fn uci_loop() {
                     tt = Arc::new(TranspositionTable::new(64, shards));
                 }
 
-                // Reset correction history
-                correction_history = Arc::new(search::CorrectionTable::new());
-
                 game_state = GameState::parse_fen(
                     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
                 );
@@ -135,7 +129,6 @@ pub fn uci_loop() {
                     let tt_clone = tt.clone();
                     let params_clone = default_params.clone();
                     let global_nodes_clone = global_nodes.clone();
-                    let correction_clone = correction_history.clone();
                     let thread_id = i;
 
                     let builder = thread::Builder::new()
@@ -144,7 +137,7 @@ pub fn uci_loop() {
 
                     let handle = builder
                         .spawn(move || {
-                            let mut search_data = search::SearchData::new(correction_clone);
+                            let mut search_data = search::SearchData::new();
                             search::search(
                                 &safe_state,
                                 limits_clone,

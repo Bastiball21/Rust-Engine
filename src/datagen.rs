@@ -495,8 +495,7 @@ pub fn run_datagen(config: DatagenConfig) {
 
                 let local_stop = Arc::new(AtomicBool::new(false));
 
-                let correction_history = Arc::new(search::CorrectionTable::new());
-                let mut search_data = search::SearchData::new(correction_history.clone());
+                let mut search_data = search::SearchData::new();
 
                 let mut rep_history: HashMap<u64, u8> = HashMap::with_capacity(300);
                 let mut history_vec: Vec<u64> = Vec::with_capacity(300);
@@ -580,6 +579,15 @@ pub fn run_datagen(config: DatagenConfig) {
                             while moves.list.count > 0 {
                                 let idx = rng.range(0, moves.list.count);
                                 let m = moves.list.moves[idx];
+
+                                // Reject losing captures (SEE < 0)
+                                if m.is_capture() && !search::see_ge(&state, m, 0) {
+                                     // Swap-remove
+                                    moves.list.moves[idx] = moves.list.moves[moves.list.count - 1];
+                                    moves.list.count -= 1;
+                                    continue;
+                                }
+
                                 let next_state = state.make_move(m);
                                 if !crate::search::is_check(&next_state, state.side_to_move) {
                                     picked_move = Some(m);
