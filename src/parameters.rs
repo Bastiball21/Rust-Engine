@@ -22,6 +22,21 @@ pub struct SearchParameters {
     pub razoring_base: i32,
     pub razoring_multiplier: i32,
 
+    // Tactical bonuses (move ordering)
+    pub bonus_safe_check: i32,
+    pub bonus_check: i32,
+    pub bonus_fork: i32,
+    pub bonus_pin: i32,
+    pub bonus_skewer: i32,
+    pub bonus_discovered: i32,
+
+    // Gating
+    pub tactical_topk_quiets: usize,
+
+    // Extension / pruning guard thresholds
+    pub extend_safe_check: bool,
+    pub extend_near_mate: bool,
+
     // LMP (Kept as table for now, fixed in struct)
     // We skip serialization for the table to avoid clutter and Default issue,
     // relying on default initialization which matches the hardcoded values.
@@ -43,6 +58,19 @@ impl Default for SearchParameters {
             rfp_margin: 60,
             razoring_base: 300,
             razoring_multiplier: 150,
+
+            bonus_safe_check: 200_000,
+            bonus_check: 60_000,
+            bonus_fork: 120_000,
+            bonus_pin: 90_000,
+            bonus_skewer: 90_000,
+            bonus_discovered: 70_000,
+
+            tactical_topk_quiets: 12,
+
+            extend_safe_check: true,
+            extend_near_mate: true,
+
             lmp_table: [
                 0, 2, 4, 7, 10, 15, 20, 28, 38, 50, 65, 80, 100, 120, 150, 200,
             ],

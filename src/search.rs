@@ -4,7 +4,7 @@ use crate::eval;
 use crate::syzygy;
 use crate::movegen::{self, GenType, MoveGenerator, MAX_MOVES};
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, NO_PIECE, P, Q, R, WHITE};
-use crate::threat::{self, ThreatDeltaScore, ThreatInfo};
+use crate::threat::{self, ThreatDeltaScore, ThreatInfo, MoveTag};
 use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use crate::parameters::SearchParameters;
@@ -68,6 +68,20 @@ impl CorrectionTable {
     }
 }
 
+pub struct ThreatStats {
+    pub precise_calls: AtomicU64,
+    pub approx_calls: AtomicU64,
+}
+
+impl Default for ThreatStats {
+    fn default() -> Self {
+        Self {
+            precise_calls: AtomicU64::new(0),
+            approx_calls: AtomicU64::new(0),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Limits {
     Infinite,
@@ -126,6 +140,8 @@ pub struct SearchData {
 
     // NNUE Accumulators (Thread Local)
     pub accumulators: [Accumulator; 2],
+
+    pub threat_stats: Arc<ThreatStats>,
 }
 
 impl SearchData {
@@ -138,6 +154,7 @@ impl SearchData {
             cont_history: Box::new([[[0; 64]; 12]; 768]),
             correction_history,
             accumulators: [Accumulator::default(); 2],
+            threat_stats: Arc::new(ThreatStats::default()),
         }
     }
 
@@ -180,6 +197,8 @@ pub struct MovePicker<'a> {
     captures_only: bool,
     cont_index: Option<usize>,
     thread_id: Option<usize>,
+    params: Option<&'a SearchParameters>,
+    is_pv_node: bool,
 }
 
 impl<'a> MovePicker<'a> {
@@ -192,6 +211,8 @@ impl<'a> MovePicker<'a> {
         prev_move: Option<Move>,
         captures_only: bool,
         thread_id: Option<usize>,
+        params: Option<&'a SearchParameters>,
+        is_pv_node: bool,
     ) -> Self {
         let mut killers = [None; 2];
         let mut counter_move = None;
@@ -224,6 +245,8 @@ impl<'a> MovePicker<'a> {
             captures_only,
             cont_index,
             thread_id,
+            params,
+            is_pv_node,
         }
     }
 
@@ -478,6 +501,140 @@ impl<'a> MovePicker<'a> {
             }
 
             self.move_scores[i] = score;
+        }
+
+        // --- TACTICAL TAGGING AND REFINEMENT ---
+        if let Some(params) = self.params {
+            // Check if we should use precise tagging
+            // We check gating conditions for the node (Root/PV) here.
+            // Individual move checks (quiet rank) are done below.
+            // We assume is_root/is_pv is passed or derived.
+            // For now, we only enable this logic if we have params, implying we care.
+
+            // We want to process top K moves.
+            // Since we haven't sorted yet, we need to sort or find top K.
+            // Given the list size is small (up to 218), full sort is fast.
+            // Or we can just iterate and find the best ones.
+            // Let's do a partial sort or full sort of the `start_idx..move_count` range.
+            // But `pick_best_move` does selection sort.
+            // If we modify scores now, we might affect ordering.
+            // Let's sort the quiet moves by their current scores to identify the candidates.
+
+            let mut indices: SmallVec<[usize; 64]> = SmallVec::new();
+            for i in start_idx..self.move_count {
+                indices.push(i);
+            }
+
+            // Sort indices based on scores (descending)
+            indices.sort_by(|&idx_a, &idx_b| self.move_scores[idx_b].cmp(&self.move_scores[idx_a]));
+
+            let top_k = params.tactical_topk_quiets;
+            let mut precise_count = 0;
+            let mut approx_count = 0;
+
+            for (rank, &idx) in indices.iter().enumerate() {
+                let mv = self.move_list[idx];
+
+                // Gating Check
+                // Note: We don't have `mv_is_check` here easily without running `gives_check`.
+                // `gives_check` is moderately expensive.
+                // However, `tag_pin` relies on `occ_after`.
+                // Let's use the helper `should_use_precise_tagging`.
+                // We pass `mv_is_check=false` for now, or check it if we want.
+                // Or we can rely on `quiet_rank`.
+
+                if threat::should_use_precise_tagging(
+                    self.is_pv_node,
+                    self.is_pv_node,
+                    false, // We don't know if it gives check yet
+                    false, // Quiet move
+                    Some(rank),
+                    top_k
+                ) {
+                    precise_count += 1;
+
+                    let us_white = state.side_to_move == WHITE;
+
+                    // Determine the piece type ON THE TARGET SQUARE (handling promotion)
+                    let (piece_on_target, raw_type) = if let Some(promo) = mv.promotion() {
+                        // Promotion
+                        let p_idx = if us_white { promo } else { promo + 6 };
+                        (p_idx, promo)
+                    } else {
+                        // Normal move
+                        let src_piece = get_piece_type_safe(state, mv.source());
+                        (src_piece, src_piece % 6)
+                    };
+
+                    let is_rook = raw_type == 3;
+                    let is_bishop = raw_type == 2;
+                    let is_queen = raw_type == 4;
+
+                    let occ_after = threat::occ_after_basic(state.occupancies[BOTH].0, mv.source(), mv.target());
+
+                    let board_at = |sq: u8| {
+                        // We need the board AFTER the move.
+                        // But `state.board` is before.
+                        // `occ_after` handles occupancy.
+                        // The piece at `sq` is:
+                        // - if sq == to: the moving piece (possibly promoted)
+                        // - if sq == from: NO_PIECE (already handled by occ)
+                        // - else: state.board[sq]
+
+                        if sq == mv.target() {
+                            piece_on_target as u8
+                        } else {
+                            state.board[sq as usize]
+                        }
+                    };
+
+                    // 1. PIN / SKEWER
+                    let tag = threat::tag_pin_or_skewer_precise(
+                        board_at,
+                        occ_after,
+                        us_white,
+                        is_rook,
+                        is_bishop,
+                        is_queen,
+                        mv.target()
+                    );
+
+                    if tag.contains(MoveTag::PIN) {
+                        self.move_scores[idx] += params.bonus_pin;
+                    }
+                    if tag.contains(MoveTag::SKEWER) {
+                        self.move_scores[idx] += params.bonus_skewer;
+                    }
+
+                    // 2. DISCOVERED ATTACK
+                    // Need enemy king ring.
+                    // We can compute it or get it from `ThreatInfo` if we had it.
+                    // Since we don't pass `ThreatInfo` to `MovePicker` easily (it's heavy),
+                    // we can recompute ring (cheap bitboards) or skip it.
+                    // The function `is_discovered_attack_precise` takes `king_ring_mask`.
+                    // Let's compute it quickly.
+                    let enemy = 1 - state.side_to_move;
+                    let k_sq = state.bitboards[if enemy == WHITE { K } else { k }].get_lsb_index() as u8;
+                    let king_ring = bitboard::get_king_attacks(k_sq).0;
+
+                    if threat::is_discovered_attack_precise(
+                        board_at,
+                        occ_after,
+                        us_white,
+                        mv.source(),
+                        king_ring
+                    ) {
+                        self.move_scores[idx] += params.bonus_discovered;
+                    }
+
+                } else {
+                    approx_count += 1;
+                }
+            }
+
+            // Stats Update
+            data.threat_stats.precise_calls.fetch_add(precise_count, Ordering::Relaxed);
+            data.threat_stats.approx_calls.fetch_add(approx_count, Ordering::Relaxed);
         }
     }
 }
@@ -881,7 +1038,7 @@ fn quiescence(
         }
     }
 
-    let mut picker = MovePicker::new(info.data, info.tt, state, ply, None, None, true, info.thread_id);
+    let mut picker = MovePicker::new(info.data, info.tt, state, ply, None, None, true, info.thread_id, Some(info.params), false);
 
     let mut legal_moves_found = 0;
 
@@ -1482,7 +1639,7 @@ fn negamax(
         }
     }
 
-    let mut picker = MovePicker::new(info.data, info.tt, state, ply, tt_move, prev_move, false, info.thread_id);
+    let mut picker = MovePicker::new(info.data, info.tt, state, ply, tt_move, prev_move, false, info.thread_id, Some(info.params), is_pv);
 
     let mut max_score = -INFINITY;
     let mut best_move = None;

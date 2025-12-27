@@ -5,6 +5,24 @@ use crate::movegen;
 use crate::state::{b, k, n, p, q, r, GameState, Move, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 use std::sync::OnceLock;
 
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct MoveTag: u16 {
+        const NONE        = 0;
+        const GIVES_CHECK = 1 << 0;
+        const SAFE_CHECK  = 1 << 1;
+
+        const FORK        = 1 << 3;
+        const PIN         = 1 << 4;
+        const SKEWER      = 1 << 5;
+        const DISCOVERED  = 1 << 6;
+
+        // (optional)
+        const RING_PRESSURE = 1 << 7;
+        const NEAR_MATE_NET = 1 << 8;
+    }
+}
+
 // --- CONSTANTS & THRESHOLDS ---
 pub const SACRIFICE_THREAT_THRESHOLD: i32 = 50;
 
@@ -42,6 +60,233 @@ pub struct ThreatDeltaScore {
     pub prophylaxis_score: i32,  // Feature #1
     pub pawn_lever_score: i32,   // Feature #3
     pub coordination_bonus: i32, // Feature #2 (Dynamic)
+}
+
+#[derive(Clone, Copy)]
+pub enum Dir {
+    N, S, E, W,
+    NE, NW, SE, SW,
+}
+
+#[inline(always)]
+fn step_sq(sq: u8, dir: Dir) -> Option<u8> {
+    let f = (sq & 7) as i8;
+    let rank_idx = (sq >> 3) as i8;
+
+    let (df, dr) = match dir {
+        Dir::N  => ( 0,  1),
+        Dir::S  => ( 0, -1),
+        Dir::E  => ( 1,  0),
+        Dir::W  => (-1,  0),
+        Dir::NE => ( 1,  1),
+        Dir::NW => (-1,  1),
+        Dir::SE => ( 1, -1),
+        Dir::SW => (-1, -1),
+    };
+
+    let nf = f + df;
+    let nr = rank_idx + dr;
+    if (0..=7).contains(&nf) && (0..=7).contains(&nr) {
+        Some(((nr << 3) + nf) as u8)
+    } else {
+        None
+    }
+}
+
+/// Returns (first_blocker, second_blocker) squares along a ray from `from` (exclusive).
+#[inline]
+fn first_two_blockers(mut sq: u8, dir: Dir, occ: u64) -> (Option<u8>, Option<u8>) {
+    let mut first: Option<u8> = None;
+    loop {
+        sq = match step_sq(sq, dir) {
+            Some(curr) => curr,
+            None => break,
+        };
+        if (occ >> sq) & 1 != 0 {
+            if first.is_none() {
+                first = Some(sq);
+            } else {
+                return (first, Some(sq));
+            }
+        }
+    }
+    (first, None)
+}
+
+#[inline(always)]
+fn is_white_piece(pc: u8) -> bool { pc <= 5 }
+#[inline(always)]
+fn is_black_piece(pc: u8) -> bool { (6..=11).contains(&pc) }
+
+#[inline(always)]
+fn same_side(pc: u8, us_white: bool) -> bool {
+    if pc == 12 { return false; } // NO_PIECE
+    if us_white { is_white_piece(pc) } else { is_black_piece(pc) }
+}
+
+#[inline(always)]
+fn piece_value_for_threat(pc: u8) -> i32 {
+    // Use “high value” filter for discovered/skewer targets
+    match pc % 6 {
+        4 => 9, // Q
+        3 => 5, // R
+        2 => 3, // B
+        1 => 3, // N
+        0 => 1, // P
+        5 => 100, // K
+        _ => 0,
+    }
+}
+
+pub fn tag_pin_or_skewer_precise(
+    board_piece_at: impl Fn(u8) -> u8,
+    occ_after: u64,
+    us_white: bool,
+    moved_piece_is_rook: bool,
+    moved_piece_is_bishop: bool,
+    moved_piece_is_queen: bool,
+    to_sq: u8,
+) -> MoveTag {
+    let mut tag = MoveTag::NONE;
+
+    let mut dirs: [Dir; 8] = [Dir::N, Dir::S, Dir::E, Dir::W, Dir::NE, Dir::NW, Dir::SE, Dir::SW];
+    let dir_count = match (moved_piece_is_rook, moved_piece_is_bishop, moved_piece_is_queen) {
+        (true,  _, false) => 4,
+        (_,  true, false) => 4,
+        (_,   _,  true) => 8,
+        _ => return tag,
+    };
+
+    for i in 0..dir_count {
+        let dir = if moved_piece_is_rook && !moved_piece_is_queen {
+            [Dir::N, Dir::S, Dir::E, Dir::W][i]
+        } else if moved_piece_is_bishop && !moved_piece_is_queen {
+            [Dir::NE, Dir::NW, Dir::SE, Dir::SW][i]
+        } else {
+            dirs[i]
+        };
+
+        let (a, b_opt) = first_two_blockers(to_sq, dir, occ_after);
+        let (Some(first_sq), Some(second_sq)) = (a, b_opt) else { continue };
+
+        let first_pc = board_piece_at(first_sq);
+        let second_pc = board_piece_at(second_sq);
+
+        // We only care about lines involving the enemy side
+        if same_side(first_pc, us_white) { continue; }
+
+        let first_is_king_or_queen = (first_pc % 6 == 5) || (first_pc % 6 == 4);
+        let second_is_king_or_queen = (second_pc % 6 == 5) || (second_pc % 6 == 4);
+
+        // PIN: first enemy piece, second enemy king/queen behind it
+        if !first_is_king_or_queen && second_is_king_or_queen {
+            tag |= MoveTag::PIN;
+            continue;
+        }
+
+        // SKEWER: first king/queen, second valuable behind
+        if first_is_king_or_queen && piece_value_for_threat(second_pc) >= 5 {
+            tag |= MoveTag::SKEWER;
+            continue;
+        }
+    }
+
+    tag
+}
+
+pub fn is_discovered_attack_precise(
+    board_piece_at: impl Fn(u8) -> u8,
+    occ_after: u64,
+    us_white: bool,
+    from_sq: u8,
+    king_ring_mask: u64, // enemy king ring squares (bitboard as u64)
+) -> bool {
+    // We check each direction: if behind `from_sq` there is our slider,
+    // and forward from `from_sq` becomes a new attack on ring or valuable.
+    const ALL_DIRS: [Dir; 8] = [Dir::N, Dir::S, Dir::E, Dir::W, Dir::NE, Dir::NW, Dir::SE, Dir::SW];
+
+    for dir in ALL_DIRS {
+        // Step backwards (opposite dir) to find our first piece behind.
+        let back_dir = match dir {
+            Dir::N => Dir::S, Dir::S => Dir::N, Dir::E => Dir::W, Dir::W => Dir::E,
+            Dir::NE => Dir::SW, Dir::NW => Dir::SE, Dir::SE => Dir::NW, Dir::SW => Dir::NE,
+        };
+
+        // Find slider behind
+        let mut sq = from_sq;
+        let slider_sq = loop {
+            sq = match step_sq(sq, back_dir) { Some(x) => x, None => break None };
+            if ((occ_after >> sq) & 1) != 0 {
+                let pc = board_piece_at(sq);
+                if !same_side(pc, us_white) { break None; } // behind is enemy => no discovered from us
+                break Some((sq, pc));
+            }
+        };
+
+        let Some((_, slider_pc)) = slider_sq else { continue };
+
+        // Check if that piece actually attacks along `dir`
+        let is_rooklike = slider_pc % 6 == 3 || slider_pc % 6 == 4;   // R or Q
+        let is_bishoplike = slider_pc % 6 == 2 || slider_pc % 6 == 4; // B or Q
+
+        let dir_is_straight = matches!(dir, Dir::N|Dir::S|Dir::E|Dir::W);
+        let dir_is_diag = !dir_is_straight;
+
+        if (dir_is_straight && !is_rooklike) || (dir_is_diag && !is_bishoplike) {
+            continue;
+        }
+
+        // Now scan forward from from_sq along dir: first hit decides what we newly attack
+        let mut fwd = from_sq;
+        loop {
+            fwd = match step_sq(fwd, dir) { Some(x) => x, None => break };
+            if ((occ_after >> fwd) & 1) == 0 {
+                // also if it’s a king ring square, we can accept “pressure” without a piece
+                if ((king_ring_mask >> fwd) & 1) != 0 {
+                    return true;
+                }
+                continue;
+            }
+
+            // First occupied square after unblocking
+            let hit_pc = board_piece_at(fwd);
+
+            // If it's our own piece, line is blocked => no discovered
+            if same_side(hit_pc, us_white) { break; }
+
+            // If it's valuable enemy or directly king-ring related, count it.
+            if piece_value_for_threat(hit_pc) >= 5 {
+                return true;
+            }
+
+            // otherwise, not a “high-value discovered”
+            break;
+        }
+    }
+
+    false
+}
+
+#[inline(always)]
+pub fn occ_after_basic(occ_before: u64, from: u8, to: u8) -> u64 {
+    // remove from, ensure to is occupied
+    (occ_before & !(1u64 << from)) | (1u64 << to)
+}
+
+#[inline(always)]
+pub fn should_use_precise_tagging(
+    is_root: bool,
+    is_pv: bool,
+    mv_is_check: bool,
+    mv_is_capture: bool,
+    quiet_rank: Option<usize>, // rank among quiets by history (0 = best)
+    topk_quiets: usize,        // e.g. 12
+) -> bool {
+    if is_root || is_pv {
+        return mv_is_check || mv_is_capture || quiet_rank.map_or(false, |rank| rank < topk_quiets);
+    }
+    // non-PV nodes: keep approximate only
+    false
 }
 
 // --- INITIALIZATION ---
@@ -138,60 +383,6 @@ pub fn analyze_move_threat_impact(
     }
 
     delta
-}
-
-// Feature #1: Prophylaxis Helper
-// Only call this for promising quiet moves!
-pub fn get_prophylaxis_score(state: &GameState, mv: Move, current_threat: &ThreatInfo) -> i32 {
-    // 1. Make move
-    let next_state = state.make_move(mv);
-
-    // 2. Analyze opponent's threat (Static)
-    // We want to know if 'next_state' has LESS threat for US than 'state' had.
-    // In 'state', threat is calculated for 'state.side_to_move' (US).
-    // In 'next_state', side to move is OPPONENT.
-    // ThreatInfo.static_threat_score measures threats against the side to move?
-    // analyze() computes threats for both, but aggregates into 'static_threat_score' based on hanging pieces etc.
-
-    // Let's re-run analyze lightly.
-    // We care about threats AGAINST US (the side that just moved).
-    // In 'next_state', US is '1 - next_state.side_to_move'.
-
-    // However, analyze() returns a struct.
-    // static_threat_score adds hanging_val.
-    // king_danger_score is indexed by side.
-
-    let next_info = analyze(&next_state);
-
-    let us = state.side_to_move;
-
-    // Did King Danger decrease?
-    let current_danger = current_threat.king_danger_score[us];
-    let next_danger = next_info.king_danger_score[us];
-
-    // Did hanging pieces decrease?
-    // hanging_piece_value in ThreatInfo aggregates generally?
-    // Actually `compute_static_threats` computes `hanging_val` for `state.side_to_move` (US in `state`).
-    // In `next_state`, `side_to_move` is THEM. `hanging_val` would be THEIR hanging pieces.
-    // We need to look at `next_info`'s assessment of OUR pieces.
-    // `compute_static_threats` only computes for `side_to_move`.
-
-    // This implies `analyze` might not fully give us what we want for the *opponent* (us in next state).
-    // But `king_danger_score` IS computed for both sides.
-
-    let mut score = 0;
-
-    if next_danger < current_danger {
-        score += (current_danger - next_danger) * 2;
-    }
-
-    // Check threats to our pieces in next_state manually?
-    // Too expensive.
-
-    // Use `next_info.attacks_by_side[them]` vs `next_info.attacks_by_side[us]`.
-    // A simple metric: Total number of squares attacked near our king?
-
-    score
 }
 
 fn evaluate_defensive_move(state: &GameState, mv: Move, threat: &ThreatInfo) -> i32 {
@@ -911,6 +1102,60 @@ fn compute_forcing_threats(state: &GameState, info: &mut ThreatInfo) {
     }
 }
 
+// Feature #1: Prophylaxis Helper
+// Only call this for promising quiet moves!
+pub fn get_prophylaxis_score(state: &GameState, mv: Move, current_threat: &ThreatInfo) -> i32 {
+    // 1. Make move
+    let next_state = state.make_move(mv);
+
+    // 2. Analyze opponent's threat (Static)
+    // We want to know if 'next_state' has LESS threat for US than 'state' had.
+    // In 'state', threat is calculated for 'state.side_to_move' (US).
+    // In 'next_state', side to move is OPPONENT.
+    // ThreatInfo.static_threat_score measures threats against the side to move?
+    // analyze() computes threats for both, but aggregates into 'static_threat_score' based on hanging pieces etc.
+
+    // Let's re-run analyze lightly.
+    // We care about threats AGAINST US (the side that just moved).
+    // In 'next_state', US is '1 - next_state.side_to_move'.
+
+    // However, analyze() returns a struct.
+    // static_threat_score adds hanging_val.
+    // king_danger_score is indexed by side.
+
+    let next_info = analyze(&next_state);
+
+    let us = state.side_to_move;
+
+    // Did King Danger decrease?
+    let current_danger = current_threat.king_danger_score[us];
+    let next_danger = next_info.king_danger_score[us];
+
+    // Did hanging pieces decrease?
+    // hanging_piece_value in ThreatInfo aggregates generally?
+    // Actually `compute_static_threats` computes `hanging_val` for `state.side_to_move` (US in `state`).
+    // In `next_state`, `side_to_move` is THEM. `hanging_val` would be THEIR hanging pieces.
+    // We need to look at `next_info`'s assessment of OUR pieces.
+    // `compute_static_threats` only computes for `side_to_move`.
+
+    // This implies `analyze` might not fully give us what we want for the *opponent* (us in next state).
+    // But `king_danger_score` IS computed for both sides.
+
+    let mut score = 0;
+
+    if next_danger < current_danger {
+        score += (current_danger - next_danger) * 2;
+    }
+
+    // Check threats to our pieces in next_state manually?
+    // Too expensive.
+
+    // Use `next_info.attacks_by_side[them]` vs `next_info.attacks_by_side[us]`.
+    // A simple metric: Total number of squares attacked near our king?
+
+    score
+}
+
 fn get_piece_value(state: &GameState, sq: u8) -> i32 {
     // Simple lookup
     for piece in 0..12 {
@@ -948,4 +1193,85 @@ fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
         }
     }
     12
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{GameState, Move};
+
+    // Helper: build occ_before from state
+    fn occ(state: &GameState) -> u64 { state.occupancies[crate::state::BOTH].0 }
+
+    #[test]
+    fn tags_pin_bishop() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        // Ba4-b5 pins Nc6 to Ke8 along diagonal b5-c6-d7-e8
+        let s = GameState::parse_fen("4k3/8/2n5/8/B7/8/8/4K3 w - - 0 1");
+        let mv = Move::new(24, 33, None, false); // a4->b5
+        let occ_after = super::occ_after_basic(occ(&s), mv.source(), mv.target());
+
+        let board_piece_at = |sq: u8| s.board[sq as usize];
+
+        let tag = tag_pin_or_skewer_precise(
+            board_piece_at,
+            occ_after,
+            true,  // us is white
+            false, // rook
+            true,  // bishop
+            false, // queen
+            mv.target(),
+        );
+
+        assert!(tag.contains(MoveTag::PIN));
+    }
+
+    #[test]
+    fn tags_skewer_rook_file() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        // Re1-e2, rook on e2 skewers queen e7 with rook e8 behind (queen first, rook second)
+        // Adjusted FEN to remove extra rook and place pieces for skewer
+
+        let s = GameState::parse_fen("4q3/4k3/8/8/8/8/8/4R2K w - - 0 1");
+
+        let mv = Move::new(4, 12, None, false); // e1->e2
+        let occ_after = super::occ_after_basic(occ(&s), mv.source(), mv.target());
+        let board_piece_at = |sq: u8| s.board[sq as usize];
+
+        let tag = tag_pin_or_skewer_precise(
+            board_piece_at,
+            occ_after,
+            true,
+            true,   // rook
+            false,
+            false,
+            mv.target(),
+        );
+
+        assert!(tag.contains(MoveTag::SKEWER));
+    }
+
+    #[test]
+    fn tags_discovered_rook_reveals_attack() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        // Na2-c3 reveals Ra1 -> a8 hitting enemy queen
+        let s = GameState::parse_fen("q6k/8/8/8/8/8/N7/R3K3 w - - 0 1");
+        let mv = Move::new(8, 18, None, false); // a2->c3
+        let occ_after = super::occ_after_basic(occ(&s), mv.source(), mv.target());
+        let board_piece_at = |sq: u8| s.board[sq as usize];
+
+        // enemy king ring mask not needed for this scenario; pass 0
+        let discovered = is_discovered_attack_precise(
+            board_piece_at,
+            occ_after,
+            true,
+            mv.source(),
+            0,
+        );
+
+        assert!(discovered);
+    }
 }

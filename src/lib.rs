@@ -116,6 +116,11 @@ pub fn run_cli() {
                  None,
                  Some(0)
              );
+
+             let precise = data.threat_stats.precise_calls.load(std::sync::atomic::Ordering::Relaxed);
+             let approx = data.threat_stats.approx_calls.load(std::sync::atomic::Ordering::Relaxed);
+             println!("Threat tagging: precise={} approx={} (precise_rate={:.1}%)",
+                      precise, approx, (precise as f64) * 100.0 / ((precise + approx).max(1) as f64));
              return;
         }
 
