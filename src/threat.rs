@@ -149,7 +149,7 @@ pub fn tag_pin_or_skewer_precise(
 ) -> MoveTag {
     let mut tag = MoveTag::NONE;
 
-    let mut dirs: [Dir; 8] = [Dir::N, Dir::S, Dir::E, Dir::W, Dir::NE, Dir::NW, Dir::SE, Dir::SW];
+    let dirs: [Dir; 8] = [Dir::N, Dir::S, Dir::E, Dir::W, Dir::NE, Dir::NW, Dir::SE, Dir::SW];
     let dir_count = match (moved_piece_is_rook, moved_piece_is_bishop, moved_piece_is_queen) {
         (true,  _, false) => 4,
         (_,  true, false) => 4,
