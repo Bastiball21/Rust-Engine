@@ -107,15 +107,7 @@ pub fn uci_loop() {
             }
             "go" => {
                 // Check Lazy Load of NNUE
-                if crate::nnue::NETWORK.get().is_none() {
-                    // Try default
-                    if std::path::Path::new("nn-aether.nnue").exists() {
-                        crate::nnue::init_nnue("nn-aether.nnue");
-                    } else {
-                        // Warn if not found, search will fallback to HCE
-                        println!("info string Warning: NNUE not found, falling back to HCE");
-                    }
-                }
+                crate::nnue::ensure_nnue_loaded();
 
                 stop_signal.store(true, Ordering::Relaxed);
                 for h in search_threads.drain(..) {

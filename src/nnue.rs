@@ -1,10 +1,12 @@
 // src/nnue.rs
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::sync::OnceLock;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+
+static EMBEDDED_NET: &[u8] = include_bytes!("../nn-new.nnue");
 
 // Architecture Constants
 pub const L1_SIZE: usize = 256;
@@ -493,14 +495,12 @@ pub struct Network {
     pub l4_biases: Vec<i16>,  // 1
 }
 
-pub fn load_network(path: &str) -> io::Result<Network> {
-    let mut file = File::open(path)?;
-
+pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> {
     // Helper to read vector
-    let read_vec = |f: &mut File, len: usize| -> io::Result<Vec<i16>> {
+    let read_vec = |reader: &mut R, len: usize| -> io::Result<Vec<i16>> {
         let mut v = vec![0i16; len];
         let mut buf = vec![0u8; len * 2];
-        f.read_exact(&mut buf)?;
+        reader.read_exact(&mut buf)?;
         for (i, chunk) in buf.chunks(2).enumerate() {
             v[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
         }
@@ -510,24 +510,24 @@ pub fn load_network(path: &str) -> io::Result<Network> {
     let total_features = INPUT_SIZE * NUM_BUCKETS; // 768 * 32
 
     // L0
-    let l0_weights = read_vec(&mut file, total_features * L1_SIZE)?;
-    let l0_biases = read_vec(&mut file, L1_SIZE)?;
+    let l0_weights = read_vec(reader, total_features * L1_SIZE)?;
+    let l0_biases = read_vec(reader, L1_SIZE)?;
 
     // L1
-    let l1_weights = read_vec(&mut file, (2 * L1_SIZE) * L2_SIZE)?;
-    let l1_biases = read_vec(&mut file, L2_SIZE)?;
+    let l1_weights = read_vec(reader, (2 * L1_SIZE) * L2_SIZE)?;
+    let l1_biases = read_vec(reader, L2_SIZE)?;
 
     // L2
-    let l2_weights = read_vec(&mut file, L2_SIZE * L3_SIZE)?;
-    let l2_biases = read_vec(&mut file, L3_SIZE)?;
+    let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?;
+    let l2_biases = read_vec(reader, L3_SIZE)?;
 
     // L3
-    let l3_weights = read_vec(&mut file, L3_SIZE * L4_SIZE)?;
-    let l3_biases = read_vec(&mut file, L4_SIZE)?;
+    let l3_weights = read_vec(reader, L3_SIZE * L4_SIZE)?;
+    let l3_biases = read_vec(reader, L4_SIZE)?;
 
     // L4
-    let l4_weights = read_vec(&mut file, L4_SIZE * OUTPUT_SIZE)?;
-    let l4_biases = read_vec(&mut file, OUTPUT_SIZE)?;
+    let l4_weights = read_vec(reader, L4_SIZE * OUTPUT_SIZE)?;
+    let l4_biases = read_vec(reader, OUTPUT_SIZE)?;
 
     Ok(Network {
         l0_weights,
@@ -543,6 +543,11 @@ pub fn load_network(path: &str) -> io::Result<Network> {
     })
 }
 
+pub fn load_network(path: &str) -> io::Result<Network> {
+    let mut file = File::open(path)?;
+    load_network_from_reader(&mut file)
+}
+
 pub fn init_nnue(path: &str) {
     match load_network(path) {
         Ok(net) => {
@@ -550,7 +555,40 @@ pub fn init_nnue(path: &str) {
             println!("NNUE loaded successfully from {}", path);
         }
         Err(e) => {
-            println!("Failed to load NNUE from {}: {}", path, e);
+            println!(
+                "Failed to load NNUE from {}: {}. Trying embedded network...",
+                path, e
+            );
+            match load_network_from_reader(&mut Cursor::new(EMBEDDED_NET)) {
+                Ok(net) => {
+                    NETWORK.set(net).ok();
+                    println!("NNUE loaded successfully from embedded data");
+                }
+                Err(e2) => {
+                    println!("Failed to load embedded NNUE: {}", e2);
+                }
+            }
+        }
+    }
+}
+
+pub fn ensure_nnue_loaded() {
+    if NETWORK.get().is_some() {
+        return;
+    }
+    // Try default path first
+    if std::path::Path::new("nn-aether.nnue").exists() {
+        init_nnue("nn-aether.nnue");
+    } else {
+        // Fallback to embedded
+        match load_network_from_reader(&mut Cursor::new(EMBEDDED_NET)) {
+            Ok(net) => {
+                NETWORK.set(net).ok();
+                println!("NNUE loaded successfully from embedded data");
+            }
+            Err(e) => {
+                println!("Failed to load embedded NNUE: {}", e);
+            }
         }
     }
 }
