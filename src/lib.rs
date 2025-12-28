@@ -9,6 +9,7 @@ pub mod eval;
 pub mod logging;
 pub mod movegen;
 pub mod nnue;
+pub mod nnue_scratch;
 pub mod pawn;
 pub mod perft;
 pub mod search;
@@ -71,10 +72,12 @@ pub fn run_cli() {
             println!("Threat Info: {:?}", threat);
 
             // Create temporary accumulator for single eval
+            // Create temporary accumulator for single eval
             let mut accumulators = [nnue::Accumulator::default(); 2];
             state.refresh_accumulator(&mut accumulators);
+            let mut scratch = nnue_scratch::NNUEScratch::default();
 
-            let score = eval::evaluate(&state, &Some(&accumulators), -32000, 32000);
+            let score = eval::evaluate(&state, Some(&mut accumulators), Some(&mut scratch), -32000, 32000);
             println!("Final Score (CP): {}", score);
             if score.abs() > 1000 {
                 println!("WARNING: Score is massive! This causes the 'Mate in 1' bug.");

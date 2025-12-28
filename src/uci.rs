@@ -17,6 +17,7 @@ use crate::syzygy;
 pub static UCI_CHESS960: AtomicBool = AtomicBool::new(false);
 pub static UCI_SHOW_WDL: AtomicBool = AtomicBool::new(false);
 pub static TT_SHARDS: AtomicUsize = AtomicUsize::new(1); // Default 1 (Shared)
+pub static EVAL_BLEND: AtomicUsize = AtomicUsize::new(0); // 0..256
 
 pub fn parse_move_wrapper(state: &GameState, move_str: &str) -> Option<Move> {
     parse_move(state, move_str)
@@ -81,6 +82,7 @@ pub fn uci_loop() {
                 println!("option name UCI_Chess960 type check default false");
                 println!("option name UCI_ShowWDL type check default false");
                 println!("option name TTShards type spin default 1 min 1 max 64");
+                println!("option name EvalBlend type spin default 0 min 0 max 256");
                 println!("uciok");
             }
             "isready" => println!("readyok"),
@@ -115,6 +117,9 @@ pub fn uci_loop() {
                 let limits = parse_go(game_state.side_to_move, &parts, move_overhead);
 
                 global_nodes.store(0, Ordering::Relaxed);
+
+                // Bump TT generation
+                tt.new_search();
 
                 log::info!("Starting search with {} threads", num_threads);
 
@@ -211,6 +216,10 @@ pub fn uci_loop() {
                         } else if name.eq_ignore_ascii_case("TTShards") {
                             if let Ok(s) = value.parse::<usize>() {
                                 TT_SHARDS.store(s.clamp(1, 64), Ordering::Relaxed);
+                            }
+                        } else if name.eq_ignore_ascii_case("EvalBlend") {
+                            if let Ok(b) = value.parse::<usize>() {
+                                EVAL_BLEND.store(b.clamp(0, 256), Ordering::Relaxed);
                             }
                         }
                     }

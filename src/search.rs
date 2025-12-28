@@ -9,6 +9,7 @@ use crate::time::TimeManager;
 use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use crate::parameters::SearchParameters;
 use crate::nnue::Accumulator;
+use crate::nnue_scratch::NNUEScratch;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicI16, Ordering};
 use std::sync::{Arc, OnceLock};
 use smallvec::SmallVec;
@@ -107,6 +108,9 @@ pub struct SearchData {
 
     // NNUE Accumulators (Thread Local)
     pub accumulators: [Accumulator; 2],
+
+    // NNUE Scratch (Thread Local)
+    pub nnue_scratch: Box<NNUEScratch>,
 }
 
 impl SearchData {
@@ -118,6 +122,7 @@ impl SearchData {
             counter_moves: [[None; 64]; 12],
             cont_history: Box::new([[[0; 64]; 12]; 768]),
             accumulators: [Accumulator::default(); 2],
+            nnue_scratch: Box::new(NNUEScratch::default()),
         }
     }
 
@@ -993,13 +998,16 @@ fn quiescence(
         }
 
         // SEE Gating for QSearch
-        if ENABLE_SEE_GATE_QS && mv.is_capture() && mv.promotion().is_none() && !in_check {
+    // Only applied if NOT in check. If in check, we search evasions (legality checked by make_move/unmake loop below).
+    if !in_check {
+        if ENABLE_SEE_GATE_QS && mv.is_capture() && mv.promotion().is_none() {
              if !gives_check_fast(state, mv) {
                  if !see_ge(state, mv, 0) {
                      continue;
                  }
              }
         }
+    }
 
         let unmake_info = state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
 
@@ -1342,7 +1350,7 @@ fn negamax(
     }
 
     if ply >= MAX_PLY {
-        return eval::evaluate(state, &Some(&info.data.accumulators), alpha, beta);
+        return eval::evaluate(state, Some(&mut info.data.accumulators), Some(&mut info.data.nnue_scratch), alpha, beta);
     }
 
     if ply > 0 && state.occupancies[BOTH].count_bits() <= 6 && state.castling_rights == 0 {
@@ -1424,7 +1432,7 @@ fn negamax(
     let static_eval = if in_check {
         -INFINITY
     } else {
-        raw_eval = eval::evaluate(state, &Some(&info.data.accumulators), alpha, beta);
+        raw_eval = eval::evaluate(state, Some(&mut info.data.accumulators), Some(&mut info.data.nnue_scratch), alpha, beta);
         info.static_evals[ply] = raw_eval;
         raw_eval
     };
@@ -1731,21 +1739,42 @@ fn negamax(
                 && is_quiet
                 && !gives_check
                 && !in_check
+                && Some(mv) != tt_move
                 && (ply >= MAX_PLY
                     || (info.data.killers[ply][0] != Some(mv)
                         && info.data.killers[ply][1] != Some(mv)))
             {
-                let d_idx = new_depth.min(63) as usize;
-                let m_idx = moves_searched.min(63) as usize;
-                let mut lmr_r = info.params.lmr_table[d_idx][m_idx] as i32;
+                // Counter-move Exception
+                let is_counter = if ply > 0 {
+                    if let Some(pm) = prev_move {
+                        let p_piece = get_moved_piece(state, pm);
+                        let p_to = pm.target() as usize;
+                        info.data.counter_moves[p_piece][p_to] == Some(mv)
+                    } else { false }
+                } else { false };
 
-                let history = info.data.history[mv.source() as usize][mv.target() as usize];
-                lmr_r -= history / 8192;
-                if !improving {
-                    lmr_r += 1;
+                // Pawn push to 6th/7th Exception
+                let src_sq = mv.source();
+                let piece_type = state.board[src_sq as usize] as usize % 6; // Assuming 0=Pawn
+
+                let is_advanced_pawn = piece_type == 0 && (
+                    (state.side_to_move == WHITE && mv.target() >= 48) ||
+                    (state.side_to_move == BLACK && mv.target() <= 15)
+                );
+
+                if !is_counter && !is_advanced_pawn {
+                    let d_idx = new_depth.min(63) as usize;
+                    let m_idx = moves_searched.min(63) as usize;
+                    let mut lmr_r = info.params.lmr_table[d_idx][m_idx] as i32;
+
+                    let history = info.data.history[mv.source() as usize][mv.target() as usize];
+                    lmr_r -= history / 8192;
+                    if !improving {
+                        lmr_r += 1;
+                    }
+
+                    reduction = lmr_r.max(0) as u8;
                 }
-
-                reduction = lmr_r.max(0) as u8;
             }
 
             let d = new_depth.saturating_sub(1 + reduction);
@@ -1763,6 +1792,9 @@ fn negamax(
                 false,
             );
 
+            // Verification Search (Research if LMR move fails high/improves alpha)
+            // User requested: "Only do verification when reduced search returns a beta cutoff".
+            // But we research on any alpha improvement because we need exact score for PV update (and beta cutoff coverage).
             if score > alpha && reduction > 0 {
                 score = -negamax(
                     state,

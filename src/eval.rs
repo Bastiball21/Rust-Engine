@@ -1,5 +1,5 @@
 // src/eval.rs
-use crate::bitboard::{self, Bitboard};
+use crate::bitboard::{self, Bitboard, FILE_A, FILE_H};
 use crate::state::{b, k, n, p, q, r, GameState, B, BLACK, BOTH, K, N, P, Q, R, WHITE};
 #[cfg(feature = "tuning")]
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -60,6 +60,18 @@ pub const SHIELD_OPEN_FILE_PENALTY: i32 = -30;
 const LAZY_EVAL_MARGIN: i32 = 250;
 const ENABLE_HANGING_EVAL: bool = true;
 
+// New HCE Terms
+const BISHOP_PAIR_BONUS_MG: i32 = 30;
+const BISHOP_PAIR_BONUS_EG: i32 = 50;
+
+const ROOK_OPEN_FILE_BONUS_MG: i32 = 30;
+const ROOK_OPEN_FILE_BONUS_EG: i32 = 15;
+const ROOK_SEMI_OPEN_FILE_BONUS_MG: i32 = 15;
+const ROOK_SEMI_OPEN_FILE_BONUS_EG: i32 = 10;
+
+const PASSED_PAWN_SUPPORTED_BONUS_MG: i32 = 10;
+const PASSED_PAWN_SUPPORTED_BONUS_EG: i32 = 20;
+
 // Mobility Weights [Piece][SquareCount] -> (Offset, Weight)
 const MOBILITY_BONUS: [(i32, i32); 4] = [
     (0, 4), // Knight
@@ -119,17 +131,44 @@ impl Trace {
 pub fn init_eval() {}
 
 // --- MAIN EVAL ---
-pub fn evaluate(state: &GameState, accumulators: &Option<&[crate::nnue::Accumulator; 2]>, alpha: i32, beta: i32) -> i32 {
+pub fn evaluate(
+    state: &GameState,
+    accumulators: Option<&mut [crate::nnue::Accumulator; 2]>,
+    scratch: Option<&mut crate::nnue_scratch::NNUEScratch>,
+    alpha: i32,
+    beta: i32
+) -> i32 {
     // Correctness First: Prioritize NNUE
     // If accumulators are present AND network is loaded, return NNUE score immediately.
-    // No lazy eval, no pruning, no HCE fallback.
     if let Some(acc) = accumulators {
-        if crate::nnue::NETWORK.get().is_some() {
-            // crate::nnue::evaluate returns STM-relative score (verified).
-            return crate::nnue::evaluate(
-                &acc[state.side_to_move],
-                &acc[1 - state.side_to_move],
-            );
+        if let Some(scr) = scratch {
+            if crate::nnue::NETWORK.get().is_some() {
+                // crate::nnue::evaluate returns STM-relative score (verified).
+                let (first, second) = acc.split_at_mut(1);
+                let (stm_acc, ntm_acc) = if state.side_to_move == crate::state::WHITE {
+                    (&mut first[0], &mut second[0])
+                } else {
+                    (&mut second[0], &mut first[0])
+                };
+
+                let nnue_score = crate::nnue::evaluate(
+                    stm_acc,
+                    ntm_acc,
+                    scr,
+                    state
+                );
+
+                // Blended Eval
+                let blend = crate::uci::EVAL_BLEND.load(std::sync::atomic::Ordering::Relaxed);
+                if blend > 0 {
+                    let hce_light = evaluate_light(state);
+                    // Q8: hce_light * k / 256
+                    let blended_part = (hce_light * (blend as i32)) >> 8;
+                    return nnue_score + blended_part;
+                }
+
+                return nnue_score;
+            }
         }
     }
 
@@ -435,7 +474,7 @@ mod tests {
         let state = GameState::parse_fen(fen);
 
         // Pass None for accumulator (no NNUE in HCE test)
-        let score = evaluate(&state, &None, -32000, 32000);
+        let score = evaluate(&state, None, None, -32000, 32000);
         println!("Score: {}", score);
 
         // Without fix, score should be roughly:
@@ -472,7 +511,7 @@ mod tests {
         // Ensure NNUE is NOT used
         assert!(crate::nnue::NETWORK.get().is_none());
 
-        let score = evaluate(&state, &None, -32000, 32000);
+        let score = evaluate(&state, None, None, -32000, 32000);
 
         println!("Score for Black (Winning): {}", score);
 
@@ -561,6 +600,33 @@ fn evaluate_complex_terms(
         let my_rooks = state.bitboards[if us == WHITE { R } else { r }];
         let my_bishops = state.bitboards[if us == WHITE { B } else { b }];
         let my_queens = state.bitboards[if us == WHITE { Q } else { q }];
+        let my_pawns = state.bitboards[if us == WHITE { P } else { p }];
+        let enemy_pawns = state.bitboards[if us == WHITE { p } else { P }];
+
+        // Bishop Pair
+        if my_bishops.count_bits() >= 2 {
+            mg += BISHOP_PAIR_BONUS_MG * us_sign;
+            eg += BISHOP_PAIR_BONUS_EG * us_sign;
+        }
+
+        // Passed Pawn Supported Bonus
+        // Iterate over passed pawns for us
+        let mut passed = pawn_entry.passed_pawns[us];
+        while passed.0 != 0 {
+            let sq = passed.pop_lsb();
+            let rank = sq / 8;
+
+            // Supported by pawn? (Protected passed pawn)
+            // Checked by seeing if pawn_attacks[us] defends this square
+            if pawn_entry.pawn_attacks[us].get_bit(sq) {
+                // Bonus based on rank
+                let bonus_rank_idx = if us == WHITE { rank } else { 7 - rank };
+                if bonus_rank_idx >= 3 {
+                    mg += PASSED_PAWN_SUPPORTED_BONUS_MG * us_sign;
+                    eg += PASSED_PAWN_SUPPORTED_BONUS_EG * us_sign;
+                }
+            }
+        }
 
         for piece_type in 0..6 {
             let piece_idx = if us == WHITE {
@@ -598,6 +664,26 @@ fn evaluate_complex_terms(
                     let s = (mob_cnt - offset) * weight;
                     mg += s * us_sign;
                     eg += s * us_sign;
+                }
+
+                if piece_type == R {
+                    // Open / Semi-Open File
+                    let file = sq % 8;
+                    let file_mask = bitboard::file_mask(file);
+                    let my_pawns_on_file = (my_pawns & file_mask).0 != 0;
+                    let enemy_pawns_on_file = (enemy_pawns & file_mask).0 != 0;
+
+                    if !my_pawns_on_file {
+                        if !enemy_pawns_on_file {
+                            // Open File
+                            mg += ROOK_OPEN_FILE_BONUS_MG * us_sign;
+                            eg += ROOK_OPEN_FILE_BONUS_EG * us_sign;
+                        } else {
+                            // Semi-Open File
+                            mg += ROOK_SEMI_OPEN_FILE_BONUS_MG * us_sign;
+                            eg += ROOK_SEMI_OPEN_FILE_BONUS_EG * us_sign;
+                        }
+                    }
                 }
 
                 if piece_type == N || piece_type == B || piece_type == R {
@@ -700,6 +786,26 @@ fn evaluate_complex_terms(
         let attacked = ring & attacks_by_side[1 - side];
         let danger_zone = undefended & attacked;
         danger += (danger_zone.count_bits() as i32) * 10;
+
+        // Basic King Safety: Open File Near King (Extra signal)
+        // Check files around King (file-1, file, file+1)
+        // If file is open (no pawns of either side?), penalty.
+        // Usually open file for *enemy rooks* is bad.
+        // User said "open file near king (keep it simple & fast)".
+        // Current logic checks shield missing.
+        // I will add a check for "Full Open File" (no pawns at all) adjacent to King.
+        let k_file = k_sq % 8;
+        let all_pawns = state.bitboards[P] | state.bitboards[p];
+        for f_offset in -1..=1 {
+            let f = k_file as i32 + f_offset;
+            if f >= 0 && f <= 7 {
+                let mask = bitboard::file_mask(f as usize);
+                if (all_pawns.0 & mask.0) == 0 {
+                    // Fully open file near king
+                    danger += 25; // Increase danger score
+                }
+            }
+        }
 
         let mut cluster_pen = 0;
         let mut r_iter = ring;
