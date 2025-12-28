@@ -229,7 +229,7 @@ fn process_and_write_game(move_text: &str, writer: &mut BufWriter<File>) -> usiz
         }
 
         // Calculate Eval (Score) - White Relative for BulletFormat
-        let raw_stm = crate::eval::evaluate(&state, &None, -32000, 32000);
+        let raw_stm = crate::eval::evaluate(&state, None, None, -32000, 32000);
         let score_white = if state.side_to_move == WHITE { raw_stm } else { -raw_stm };
         let mut clamped_score = score_white.clamp(-32000, 32000) as i16;
 

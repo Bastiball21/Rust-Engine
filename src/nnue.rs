@@ -2,6 +2,7 @@
 use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::sync::OnceLock;
+use crate::nnue_scratch::NNUEScratch;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -34,7 +35,12 @@ const SCRELU: [i16; 256] = {
     let mut table = [0; 256];
     let mut i = 0;
     while i < 256 {
-        table[i] = ((i as i32 * i as i32) / 255) as i16;
+        // Match the integer approximation used in AVX2
+        // y = sq + 128; y = y + (y >> 8); res = y >> 8;
+        let sq = i as i32 * i as i32;
+        let y = sq + 128;
+        let y2 = y + (y >> 8);
+        table[i] = (y2 >> 8) as i16;
         i += 1;
     }
     table
@@ -145,11 +151,11 @@ impl Accumulator {
                      let v_ptr = self.v.as_mut_ptr().add(i);
                      let w_ptr = weights.as_ptr().add(i);
 
-                     let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
-                     let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
+                     let v_vec = _mm256_load_si256(v_ptr as *const __m256i); // Aligned load for accumulator
+                     let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i); // Unaligned load for weights
 
                      let res = _mm256_add_epi16(v_vec, w_vec);
-                     _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
+                     _mm256_store_si256(v_ptr as *mut __m256i, res); // Aligned store for accumulator
 
                      i += 16;
                  }
@@ -175,11 +181,11 @@ impl Accumulator {
                      let v_ptr = self.v.as_mut_ptr().add(i);
                      let w_ptr = weights.as_ptr().add(i);
 
-                     let v_vec = _mm256_loadu_si256(v_ptr as *const __m256i); // Unaligned load safe
-                     let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i);
+                     let v_vec = _mm256_load_si256(v_ptr as *const __m256i); // Aligned load
+                     let w_vec = _mm256_loadu_si256(w_ptr as *const __m256i); // Unaligned load for weights
 
                      let res = _mm256_sub_epi16(v_vec, w_vec);
-                     _mm256_storeu_si256(v_ptr as *mut __m256i, res); // Unaligned store safe
+                     _mm256_store_si256(v_ptr as *mut __m256i, res); // Aligned store
 
                      i += 16;
                  }
@@ -251,22 +257,41 @@ pub fn make_index(perspective: usize, piece: usize, sq: usize, king_bucket: usiz
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn screlu_calc_avx2(val: __m256i, scale: __m256) -> __m256i {
+unsafe fn screlu_calc_avx2(val: __m256i) -> __m256i {
+    // Input: i16 values, clamped 0..255.
+    // Goal: Output (val * val) / 255 using integer math.
+    // Algorithm: y = x*x + 128; y = y + (y >> 8); res = y >> 8;
+
+    let zero = _mm256_setzero_si256();
+    let c128 = _mm256_set1_epi32(128);
+
+    // Unpack to i32 (0..255 -> 0..255)
     let lo_lane = _mm256_castsi256_si128(val);
     let lo_epi32 = _mm256_cvtepu16_epi32(lo_lane);
-    let lo_ps = _mm256_cvtepi32_ps(lo_epi32);
-    let lo_sq = _mm256_mul_ps(lo_ps, lo_ps);
-    let lo_res = _mm256_mul_ps(lo_sq, scale);
-    let lo_int = _mm256_cvttps_epi32(lo_res);
 
     let hi_lane = _mm256_extracti128_si256::<1>(val);
     let hi_epi32 = _mm256_cvtepu16_epi32(hi_lane);
-    let hi_ps = _mm256_cvtepi32_ps(hi_epi32);
-    let hi_sq = _mm256_mul_ps(hi_ps, hi_ps);
-    let hi_res = _mm256_mul_ps(hi_sq, scale);
-    let hi_int = _mm256_cvttps_epi32(hi_res);
 
-    let packed = _mm256_packus_epi32(lo_int, hi_int);
+    // Square (x * x)
+    let lo_sq = _mm256_mullo_epi32(lo_epi32, lo_epi32);
+    let hi_sq = _mm256_mullo_epi32(hi_epi32, hi_epi32);
+
+    // y = sq + 128
+    let lo_y = _mm256_add_epi32(lo_sq, c128);
+    let hi_y = _mm256_add_epi32(hi_sq, c128);
+
+    // y = y + (y >> 8)
+    let lo_y_shr = _mm256_srli_epi32(lo_y, 8);
+    let hi_y_shr = _mm256_srli_epi32(hi_y, 8);
+    let lo_y2 = _mm256_add_epi32(lo_y, lo_y_shr);
+    let hi_y2 = _mm256_add_epi32(hi_y, hi_y_shr);
+
+    // res = y >> 8
+    let lo_res = _mm256_srli_epi32(lo_y2, 8);
+    let hi_res = _mm256_srli_epi32(hi_y2, 8);
+
+    // Pack back to i16
+    let packed = _mm256_packus_epi32(lo_res, hi_res);
     _mm256_permute4x64_epi64::<0b11_01_10_00>(packed)
 }
 
@@ -319,23 +344,31 @@ unsafe fn clamp_activations_avx2(buffer: &mut [i16]) {
 // Evaluation Logic (Duplicated for Dispatch)
 // --------------------------------------------------------
 
-pub fn evaluate(stm_acc: &Accumulator, ntm_acc: &Accumulator) -> i32 {
+pub fn evaluate(stm_acc: &mut Accumulator, ntm_acc: &mut Accumulator, scratch: &mut NNUEScratch, state: &crate::state::GameState) -> i32 {
     let net = match NETWORK.get() {
         Some(n) => n,
         None => return 0,
     };
 
-    if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
-        panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid...");
+    if cfg!(debug_assertions) {
+        if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
+            panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid...");
+        }
+    } else {
+         if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
+             use crate::state::{K, k};
+             stm_acc.refresh(&state.bitboards, state.side_to_move, state.bitboards[if state.side_to_move == crate::state::WHITE { K } else { k }].get_lsb_index() as usize);
+             ntm_acc.refresh(&state.bitboards, 1 - state.side_to_move, state.bitboards[if (1 - state.side_to_move) == crate::state::WHITE { K } else { k }].get_lsb_index() as usize);
+         }
     }
 
     // Dispatch
     #[cfg(target_arch = "x86_64")]
     if use_avx2() {
-        return unsafe { evaluate_avx2(stm_acc, ntm_acc, net) };
+        return unsafe { evaluate_avx2(stm_acc, ntm_acc, net, scratch) };
     }
 
-    evaluate_scalar(stm_acc, ntm_acc, net)
+    evaluate_scalar(stm_acc, ntm_acc, net, scratch)
 }
 
 #[cfg(debug_assertions)]
@@ -365,79 +398,67 @@ pub fn verify_accumulator(state: &crate::state::GameState, acc: &Accumulator, pe
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network) -> i32 {
-    let mut hidden_512 = [0i16; 512];
-
+unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
     // L1 Input generation (AVX2)
     let zero = _mm256_setzero_si256();
-    let qa = _mm256_set1_epi16(QA as i16);
-    let scale = _mm256_set1_ps(1.0 / 255.0);
+    // Replaced QA vector logic with screlu input handling inside loop
+    // No explicit scale vector needed for integer path
 
     // STM
     for i in (0..L1_SIZE).step_by(16) {
         let ptr = stm_acc.v.as_ptr().add(i);
-        let val = _mm256_loadu_si256(ptr as *const __m256i);
-        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
-        let res = screlu_calc_avx2(clamped, scale);
-        _mm256_storeu_si256(hidden_512.as_mut_ptr().add(i) as *mut __m256i, res);
+        let val = _mm256_load_si256(ptr as *const __m256i); // Aligned load
+        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), _mm256_set1_epi16(QA as i16));
+        let res = screlu_calc_avx2(clamped);
+        _mm256_storeu_si256(scratch.hidden_512.as_mut_ptr().add(i) as *mut __m256i, res);
     }
     // NTM
     for i in (0..L1_SIZE).step_by(16) {
         let ptr = ntm_acc.v.as_ptr().add(i);
-        let val = _mm256_loadu_si256(ptr as *const __m256i);
-        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), qa);
-        let res = screlu_calc_avx2(clamped, scale);
-        _mm256_storeu_si256(hidden_512.as_mut_ptr().add(L1_SIZE + i) as *mut __m256i, res);
+        let val = _mm256_load_si256(ptr as *const __m256i); // Aligned load
+        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), _mm256_set1_epi16(QA as i16));
+        let res = screlu_calc_avx2(clamped);
+        _mm256_storeu_si256(scratch.hidden_512.as_mut_ptr().add(L1_SIZE + i) as *mut __m256i, res);
     }
 
     // Layer 1: 512 -> 32
-    let mut l2_out = [0i16; L2_SIZE];
-    layer_affine_avx2(&hidden_512, &net.l1_weights, &net.l1_biases, &mut l2_out, 512, L2_SIZE);
-    clamp_activations_avx2(&mut l2_out);
+    layer_affine_avx2(&scratch.hidden_512, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
+    clamp_activations_avx2(&mut scratch.l2_out);
 
     // Layer 2: 32 -> 32
-    let mut l3_out = [0i16; L3_SIZE];
-    layer_affine_avx2(&l2_out, &net.l2_weights, &net.l2_biases, &mut l3_out, L2_SIZE, L3_SIZE);
-    clamp_activations_avx2(&mut l3_out);
+    layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
+    clamp_activations_avx2(&mut scratch.l3_out);
 
     // Layer 3: 32 -> 32
-    let mut l4_out = [0i16; L4_SIZE];
-    layer_affine_avx2(&l3_out, &net.l3_weights, &net.l3_biases, &mut l4_out, L3_SIZE, L4_SIZE);
-    clamp_activations_avx2(&mut l4_out);
+    layer_affine_avx2(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
+    clamp_activations_avx2(&mut scratch.l4_out);
 
     // Output Layer: 32 -> 1
-    let mut final_out = [0i16; 1];
-    layer_affine_avx2(&l4_out, &net.l4_weights, &net.l4_biases, &mut final_out, L4_SIZE, 1);
+    layer_affine_avx2(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
 
-    let output = final_out[0] as i32;
+    let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
 }
 
-fn evaluate_scalar(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network) -> i32 {
-    let mut hidden_512 = [0i16; 512];
-
-    evaluate_l1_scalar(stm_acc, ntm_acc, &mut hidden_512);
+fn evaluate_scalar(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
+    evaluate_l1_scalar(stm_acc, ntm_acc, &mut scratch.hidden_512);
 
     // Layer 1: 512 -> 32
-    let mut l2_out = [0i16; L2_SIZE];
-    layer_affine_scalar(&hidden_512, &net.l1_weights, &net.l1_biases, &mut l2_out, 512, L2_SIZE);
-    clamp_activations_scalar(&mut l2_out);
+    layer_affine_scalar(&scratch.hidden_512, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
+    clamp_activations_scalar(&mut scratch.l2_out);
 
     // Layer 2: 32 -> 32
-    let mut l3_out = [0i16; L3_SIZE];
-    layer_affine_scalar(&l2_out, &net.l2_weights, &net.l2_biases, &mut l3_out, L2_SIZE, L3_SIZE);
-    clamp_activations_scalar(&mut l3_out);
+    layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
+    clamp_activations_scalar(&mut scratch.l3_out);
 
     // Layer 3: 32 -> 32
-    let mut l4_out = [0i16; L4_SIZE];
-    layer_affine_scalar(&l3_out, &net.l3_weights, &net.l3_biases, &mut l4_out, L3_SIZE, L4_SIZE);
-    clamp_activations_scalar(&mut l4_out);
+    layer_affine_scalar(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
+    clamp_activations_scalar(&mut scratch.l4_out);
 
     // Output Layer: 32 -> 1
-    let mut final_out = [0i16; 1];
-    layer_affine_scalar(&l4_out, &net.l4_weights, &net.l4_biases, &mut final_out, L4_SIZE, 1);
+    layer_affine_scalar(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
 
-    let output = final_out[0] as i32;
+    let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
 }
 
@@ -588,6 +609,44 @@ pub fn ensure_nnue_loaded() {
             }
             Err(e) => {
                 println!("Failed to load embedded NNUE: {}", e);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_screlu_avx2_vs_scalar() {
+        if !use_avx2() {
+            println!("Skipping AVX2 test on non-AVX2 machine");
+            return;
+        }
+
+        // Test all inputs 0..255
+        let mut inputs = [0i16; 256];
+        for i in 0..256 {
+            inputs[i] = i as i16;
+        }
+
+        unsafe {
+            // Process in chunks of 16
+            for i in (0..256).step_by(16) {
+                let ptr = inputs.as_ptr().add(i);
+                let val = _mm256_loadu_si256(ptr as *const __m256i);
+                let res_vec = screlu_calc_avx2(val);
+
+                let mut res_arr = [0i16; 16];
+                _mm256_storeu_si256(res_arr.as_mut_ptr() as *mut __m256i, res_vec);
+
+                for j in 0..16 {
+                    let input = inputs[i + j];
+                    let expected = SCRELU[input as usize];
+                    let actual = res_arr[j];
+                    assert_eq!(actual, expected, "Mismatch at input {}", input);
+                }
             }
         }
     }

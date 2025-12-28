@@ -1,7 +1,6 @@
 #![allow(non_upper_case_globals)]
 
-use crate::bitboard;
-use crate::state::{b, k, n, p, q, r, GameState, Move, B, K, N, P, Q, R, WHITE, NO_PIECE};
+use crate::state::{GameState, Move, Q, R, B, N};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
@@ -63,10 +62,10 @@ impl TTEntryTrait for TTEntry {
     fn save(&self, key: u64, score: i32, depth: u8, flag: u8, age: u8, mv: Option<Move>) {
         let move_u16 = if let Some(m) = mv {
             let promo_bits = match m.promotion() {
-                Some(Q) | Some(q) => 1,
-                Some(R) | Some(r) => 2,
-                Some(B) | Some(b) => 3,
-                Some(N) | Some(n) => 4,
+                Some(4) => 1,
+                Some(3) => 2,
+                Some(2) => 3,
+                Some(1) => 4,
                 _ => 0,
             };
             let mut bits = ((m.source() as u16) << 6) | (m.target() as u16) | (promo_bits << 12);
@@ -136,103 +135,11 @@ impl TTEntryTrait for TTEntry {
 }
 
 // --------------------------------------------------------------------------------
-// PACKED LAYOUT (8 bytes)
+// CLUSTER (2-way bucket)
 // --------------------------------------------------------------------------------
-#[cfg(feature = "packed-tt")]
-#[derive(Debug)]
-pub struct TTEntry {
-    pub data: AtomicU64,
-}
-
-#[cfg(feature = "packed-tt")]
-impl TTEntryTrait for TTEntry {
-    fn new() -> Self {
-        Self {
-            data: AtomicU64::new(0),
-        }
-    }
-
-    fn key(&self) -> u64 {
-        let raw = self.data.load(Ordering::Acquire);
-        let key16 = (raw & 0xFFFF) as u64;
-        key16 << 48
-    }
-
-    fn save(&self, key: u64, score: i32, depth: u8, flag: u8, age: u8, mv: Option<Move>) {
-        let key16 = (key >> 48) as u16;
-
-        let move_u16 = if let Some(m) = mv {
-            let promo_bits = match m.promotion() {
-                Some(Q) | Some(q) => 1,
-                Some(R) | Some(r) => 2,
-                Some(B) | Some(b) => 3,
-                Some(N) | Some(n) => 4,
-                _ => 0,
-            };
-            let mut bits = ((m.source() as u16) << 6) | (m.target() as u16) | (promo_bits << 12);
-            if m.is_capture() {
-                bits |= 0x8000;
-            }
-            bits
-        } else {
-            0
-        };
-
-        let score_u16 = (score.clamp(-32000, 32000) + 32000) as u16;
-        let gen_bound = ((age & 0x3F) << 2) | (flag & 0x3);
-
-        let data = (key16 as u64)
-            | ((move_u16 as u64) << 16)
-            | ((score_u16 as u64) << 32)
-            | ((depth as u64) << 48)
-            | ((gen_bound as u64) << 56);
-
-        self.data.store(data, Ordering::Release);
-    }
-
-    fn probe(&self, _key: u64) -> Option<(i32, u8, u8, u8, Option<Move>)> {
-        let data = self.data.load(Ordering::Relaxed);
-        if data == 0 { return None; }
-
-        let move_u16 = ((data >> 16) & 0xFFFF) as u16;
-        let score = ((data >> 32) & 0xFFFF) as i32 - 32000;
-        let depth = ((data >> 48) & 0xFF) as u8;
-        let gen_bound = ((data >> 56) & 0xFF) as u8;
-
-        let flag = gen_bound & 0x3;
-        let age = (gen_bound >> 2) & 0x3F;
-
-        let mv = if move_u16 != 0 {
-            let from = (move_u16 >> 6) & 0x3F;
-            let to = move_u16 & 0x3F;
-            let promo_bits = (move_u16 >> 12) & 0xF;
-            let promotion = match promo_bits {
-                1 => Some(Q),
-                2 => Some(R),
-                3 => Some(B),
-                4 => Some(N),
-                _ => None,
-            };
-            let is_capture = (move_u16 & 0x8000) != 0;
-            if from != to {
-                Some(Move::new(from as u8, to as u8, promotion, is_capture))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        Some((score, depth, flag, age, mv))
-    }
-}
-
 
 #[cfg(not(feature = "packed-tt"))]
-const CLUSTER_SIZE: usize = 4;
-
-#[cfg(feature = "packed-tt")]
-const CLUSTER_SIZE: usize = 8;
+const CLUSTER_SIZE: usize = 2;
 
 #[repr(C, align(64))]
 pub struct Cluster {
@@ -257,10 +164,6 @@ impl TTShard {
         let desired_count = desired_bytes / cluster_size;
 
         // Power of two count
-        let count = desired_count.next_power_of_two() >> 1; // Round down to be safe, or up?
-        // User requested "enforce power-of-two size".
-        // Usually we want to fill the RAM. next_power_of_two might exceed mb.
-        // Let's use previous_power_of_two (actually `next_power_of_two() / 2` if not exact, or just msb).
         let mut count = 1;
         while count * 2 * cluster_size <= desired_bytes {
             count *= 2;
@@ -399,8 +302,6 @@ impl TranspositionTable {
             return &self.shards[0];
         }
 
-        // Shard based on hash (high bits)
-        // Use high bits for better distribution
         let shard_idx = if self.num_shards.is_power_of_two() {
             ((hash >> 48) as usize) & (self.num_shards - 1)
         } else {
@@ -412,7 +313,6 @@ impl TranspositionTable {
 
     pub fn prefetch(&self, hash: u64, thread_id: Option<usize>) {
         let shard = self.get_shard(hash, thread_id);
-        // Masked Indexing
         let index = (hash as usize) & shard.mask;
         unsafe {
             let ptr = shard.table.add(index);
@@ -428,64 +328,63 @@ impl TranspositionTable {
 
         unsafe {
             let cluster = &*shard.table.add(index);
-            let mut best_victim_idx = 0;
-            let mut min_score = i32::MAX;
 
+            // 1. Search for existing entry to overwrite
             for i in 0..CLUSTER_SIZE {
                 let entry = &cluster.entries[i];
+                let data = entry.data.load(Ordering::Relaxed);
 
-                #[cfg(feature = "packed-tt")]
-                let (match_found, is_empty, replace_score) = (false, false, 0); // Packed TT disabled
-
-                #[cfg(not(feature = "packed-tt"))]
-                let (match_found, is_empty, replace_score) = {
-                    let data = entry.data.load(Ordering::Relaxed);
-                    // Fast path: if data is 0, it's empty
-                    if data == 0 {
-                        (false, true, i32::MIN)
-                    } else {
-                        // Check key
-                        let stored_key = entry.key.load(Ordering::Relaxed); // Key can be relaxed as we verify with XOR
-                        let recovered_key = stored_key ^ data;
-                        if recovered_key == hash {
-                             (true, false, 0)
+                if data != 0 {
+                    let stored_key = entry.key.load(Ordering::Relaxed);
+                    if (stored_key ^ data) == hash {
+                        // Found match: Overwrite
+                        let old_move = if best_move.is_none() {
+                             entry.probe(hash).and_then(|(_,_,_,_,m)| m)
                         } else {
-                            // Replacement score
-                            let (d, age) = unpack_depth_age(data);
-                            let age_diff = current_gen.wrapping_sub(age);
-                            let score = (d as i32) - (age_diff as i32 * 2);
-                            (false, false, score)
-                        }
+                             None
+                        };
+                        let final_move = best_move.or(old_move);
+                        entry.save(hash, score, depth, flag, current_gen, final_move);
+                        return;
                     }
-                };
-
-                if match_found {
-                    // Update existing entry
-                    // We need to retrieve the old move if the new move is None
-                    let old_move = if best_move.is_none() {
-                         entry.probe(hash).and_then(|(_,_,_,_,m)| m)
-                    } else {
-                         None
-                    };
-                    let final_move = best_move.or(old_move);
-                    entry.save(hash, score, depth, flag, current_gen, final_move);
-                    return;
-                }
-
-                if is_empty {
-                    entry.save(hash, score, depth, flag, current_gen, best_move);
-                    return;
-                }
-
-                if replace_score < min_score {
-                    min_score = replace_score;
-                    best_victim_idx = i;
                 }
             }
 
-            // Always replace if new depth is greater, or if victim is very old/shallow
-            let entry = &cluster.entries[best_victim_idx];
-            // Just force replace the victim found
+            // 2. Find replacement victim (Worst Slot)
+            // Metric: Lowest Depth. Tie-break: Oldest Gen (largest age diff).
+            // Quality Q = (depth << 8) + (255 - age_diff).
+            // We want to replace the entry with MINIMUM Quality.
+
+            let mut victim_idx = 0;
+            let mut min_quality = u32::MAX;
+
+            for i in 0..CLUSTER_SIZE {
+                let entry = &cluster.entries[i];
+                let data = entry.data.load(Ordering::Relaxed);
+
+                if data == 0 {
+                    // Empty slot is quality 0, immediate replace
+                    victim_idx = i;
+                    min_quality = 0;
+                    break;
+                }
+
+                let (d, age) = unpack_depth_age(data);
+                let age_diff = current_gen.wrapping_sub(age);
+
+                // Quality: Higher depth = Better. Lower age diff (More recent) = Better.
+                // We want to MINIMIZE quality to find victim.
+                // Depth is dominant.
+                let quality = ((d as u32) << 8) | (255 - age_diff as u32);
+
+                if quality < min_quality {
+                    min_quality = quality;
+                    victim_idx = i;
+                }
+            }
+
+            // 3. Replace Victim
+            let entry = &cluster.entries[victim_idx];
             entry.save(hash, score, depth, flag, current_gen, best_move);
         }
     }
@@ -498,22 +397,8 @@ impl TranspositionTable {
             let cluster = &*shard.table.add(index);
             for i in 0..CLUSTER_SIZE {
                 let entry = &cluster.entries[i];
-
-                #[cfg(feature = "packed-tt")]
-                {
-                    if entry.key() == (hash & 0xFFFF_0000_0000_0000) {
-                        if let Some((score, depth, flag, _, mv)) = entry.probe(hash) {
-                            return Some((score, depth, flag, mv));
-                        }
-                    }
-                }
-
-                #[cfg(not(feature = "packed-tt"))]
-                {
-                    // entry.probe() handles the XOR decoding internally
-                    if let Some((score, depth, flag, _, mv)) = entry.probe(hash) {
-                        return Some((score, depth, flag, mv));
-                    }
+                if let Some((score, depth, flag, _, mv)) = entry.probe(hash) {
+                    return Some((score, depth, flag, mv));
                 }
             }
         }
@@ -523,7 +408,6 @@ impl TranspositionTable {
     pub fn get_move(&self, hash: u64, state: &GameState, thread_id: Option<usize>) -> Option<Move> {
         self.probe_data(hash, state, thread_id).and_then(|(_, _, _, m)| m)
     }
-
 
     pub fn is_pseudo_legal(&self, state: &crate::state::GameState, mv: Move) -> bool {
         crate::movegen::is_move_pseudo_legal(state, mv)
@@ -539,10 +423,6 @@ impl TranspositionTable {
                 unsafe {
                     let cluster = &*shard.table.add(i);
                     for entry in &cluster.entries {
-                        #[cfg(feature = "packed-tt")]
-                        if entry.key() != 0 { used += 1; }
-
-                        #[cfg(not(feature = "packed-tt"))]
                         if entry.data.load(Ordering::Relaxed) != 0 { used += 1; }
                     }
                 }
@@ -560,44 +440,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tt_sharding_power_of_two() {
-        let tt = TranspositionTable::new(16, 4);
-        assert_eq!(tt.num_shards, 4);
+    fn test_tt_replacement_policy() {
+        // Mock TT with 1 Cluster
+        // CLUSTER_SIZE is 2
+        let mut tt = TranspositionTable::new(1, 1);
+        let current_gen = 10;
+        tt.generation.store(current_gen, Ordering::Relaxed);
 
-        // High bits 48, 49
-        let hash1: u64 = 0u64;           // 00 -> 0
-        let hash2: u64 = 1u64 << 48;     // 01 -> 1
-        let hash3: u64 = 2u64 << 48;     // 10 -> 2
-        let hash4: u64 = 3u64 << 48;     // 11 -> 3
+        // Ensure collision by using same index bits (lower bits)
+        // TT size 1MB ~ 16384 clusters. Mask is 16383 (0x3FFF).
+        // We shift high bits to differentiate keys but keep low bits identical.
+        let base_index = 5;
+        let hash_a = (1u64 << 48) | base_index;
+        let hash_b = (2u64 << 48) | base_index;
+        let hash_c = (3u64 << 48) | base_index;
 
-        let s1 = tt.get_shard(hash1, None);
-        let s2 = tt.get_shard(hash2, None);
-        let s3 = tt.get_shard(hash3, None);
-        let s4 = tt.get_shard(hash4, None);
+        // Dummy GameState for probe
+        let dummy_fen = "8/8/8/8/8/8/8/8 w - - 0 1";
+        let dummy_state = GameState::parse_fen(dummy_fen);
 
-        // Check pointers are distinct (shards are different objects)
-        assert!(!std::ptr::eq(s1 as *const _, s2 as *const _));
-        assert!(!std::ptr::eq(s1 as *const _, s3 as *const _));
-        assert!(!std::ptr::eq(s1 as *const _, s4 as *const _));
-    }
+        // 1. Store A: Depth 5, Age 10 (Current)
+        tt.store(hash_a, 100, None, 5, FLAG_EXACT, None);
+        // Verify A is there
+        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some());
 
-    #[test]
-    fn test_tt_sharding_non_power_of_two() {
-        let tt = TranspositionTable::new(16, 3);
-        assert_eq!(tt.num_shards, 3);
+        // 2. Store B: Depth 4, Age 10 (Current)
+        tt.store(hash_b, 200, None, 4, FLAG_EXACT, None);
+        // Verify A and B are there
+        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some());
+        assert!(tt.probe_data(hash_b, &dummy_state, None).is_some());
 
-        let hash0: u64 = 0u64 << 48; // 0 % 3 = 0
-        let hash1: u64 = 1u64 << 48; // 1 % 3 = 1
-        let hash2: u64 = 2u64 << 48; // 2 % 3 = 2
-        let hash3: u64 = 3u64 << 48; // 3 % 3 = 0
+        // 3. Store C: Depth 6. Should replace B (Depth 4 < Depth 5)
+        tt.store(hash_c, 300, None, 6, FLAG_EXACT, None);
+        // Verify A (Depth 5) kept, B (Depth 4) replaced by C (Depth 6)
+        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some(), "A should be kept (Depth 5)");
+        assert!(tt.probe_data(hash_b, &dummy_state, None).is_none(), "B should be replaced (Depth 4)");
+        assert!(tt.probe_data(hash_c, &dummy_state, None).is_some(), "C should be stored (Depth 6)");
 
-        let s0 = tt.get_shard(hash0, None);
-        let s1 = tt.get_shard(hash1, None);
-        let s2 = tt.get_shard(hash2, None);
-        let s3 = tt.get_shard(hash3, None);
+        // 4. Test Aging Tiebreak
+        // Setup:
+        // Slot 0: Hash A, Depth 5, Age 5 (Old)
+        // Slot 1: Hash B, Depth 5, Age 10 (Current)
+        // Store C: Depth 5. Should replace A (Older)
 
-        assert!(!std::ptr::eq(s0 as *const _, s1 as *const _));
-        assert!(!std::ptr::eq(s0 as *const _, s2 as *const _));
-        assert!(std::ptr::eq(s0 as *const _, s3 as *const _));
+        tt.clear();
+        tt.generation.store(10, Ordering::Relaxed);
+
+        // We need to simulate old age. tt.store uses current_gen.
+        // We'll manually poke? No, we can just set generation to 5, store A, set to 10, store B.
+
+        tt.generation.store(5, Ordering::Relaxed);
+        tt.store(hash_a, 100, None, 5, FLAG_EXACT, None);
+
+        tt.generation.store(10, Ordering::Relaxed);
+        tt.store(hash_b, 200, None, 5, FLAG_EXACT, None);
+
+        // Verify both present
+        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some());
+        assert!(tt.probe_data(hash_b, &dummy_state, None).is_some());
+
+        // Store C, Depth 5.
+        // A: Depth 5, Age 5. Diff = 5. Quality = (5<<8) | (255-5) = 1280 + 250 = 1530
+        // B: Depth 5, Age 10. Diff = 0. Quality = (5<<8) | (255-0) = 1280 + 255 = 1535
+        // A has lower quality (more stale). Should be replaced.
+
+        tt.store(hash_c, 300, None, 5, FLAG_EXACT, None);
+
+        assert!(tt.probe_data(hash_a, &dummy_state, None).is_none(), "A (Old) should be replaced");
+        assert!(tt.probe_data(hash_b, &dummy_state, None).is_some(), "B (New) should be kept");
+        assert!(tt.probe_data(hash_c, &dummy_state, None).is_some(), "C should be stored");
     }
 }
