@@ -1792,10 +1792,8 @@ fn negamax(
                 false,
             );
 
-            // Verification Search (Research if LMR move fails high/improves alpha)
-            // User requested: "Only do verification when reduced search returns a beta cutoff".
-            // But we research on any alpha improvement because we need exact score for PV update (and beta cutoff coverage).
-            if score > alpha && reduction > 0 {
+            // Verification Search (Research if LMR move fails high)
+            if score >= beta && reduction > 0 {
                 score = -negamax(
                     state,
                     new_depth - 1,
