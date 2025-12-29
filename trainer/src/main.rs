@@ -143,7 +143,7 @@ fn main() {
             let stm0 = l0.forward(stm_inputs).screlu();
             let ntm0 = l0.forward(ntm_inputs).screlu();
 
-            let combined = stm0.sub(ntm0);
+            let combined = stm0 - ntm0;
 
             // Single Perspective: Use STM features directly for the rest of the network
             // Note: NTM features are unused in the forward pass, but 'l0' weights are shared/updated via STM usage.
