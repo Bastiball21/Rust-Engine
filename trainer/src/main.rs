@@ -180,7 +180,7 @@ fn main() {
             final_lr,
             final_superbatch: superbatches,
         },
-        save_rate: 10,
+        save_rate: 1,
     };
 
     let output_directory = "checkpoints";
