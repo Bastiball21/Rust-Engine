@@ -697,6 +697,7 @@ pub fn run_datagen(config: DatagenConfig) {
                         {
                             if tt_flag == FLAG_EXACT && tt_depth >= 6 {
                                 if let Some(mv) = tt_move {
+                                    // SAFETY CHECK: Ensure TT move is valid for current state to prevent collision crashes
                                     if tt.is_pseudo_legal(&state, mv) {
                                         search_score = tt_score;
                                         best_move = Some(mv);
