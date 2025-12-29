@@ -121,7 +121,7 @@ fn main() {
         .loss_fn(|output: NetworkBuilderNode<BackendMarker>, target: NetworkBuilderNode<BackendMarker>| {
             output.sigmoid().squared_error(target)
         })
-        .build(|builder: &NetworkBuilder<BackendMarker>, stm_inputs: NetworkBuilderNode<BackendMarker>, _ntm_inputs: NetworkBuilderNode<BackendMarker>| {
+        .build(|builder: &NetworkBuilder<BackendMarker>, stm_inputs: NetworkBuilderNode<BackendMarker>, ntm_inputs: NetworkBuilderNode<BackendMarker>| {
             // Layer 0: 768 -> 512
             let l0 = builder.new_affine("l0", stm_inputs.annotated_node().shape.size(), l1_size);
 
@@ -140,14 +140,17 @@ fn main() {
 
             // Forward Pass
             // L0 Activation: SCReLU (SquarerClippedReLU)
-            let stm_hidden = l0.forward(stm_inputs).screlu();
+            let stm0 = l0.forward(stm_inputs).screlu();
+            let ntm0 = l0.forward(ntm_inputs).screlu();
+
+            let combined = stm0.sub(ntm0);
 
             // Single Perspective: Use STM features directly for the rest of the network
             // Note: NTM features are unused in the forward pass, but 'l0' weights are shared/updated via STM usage.
             // effectively this learns to evaluate purely based on "My King's perspective" features.
 
             // L1: 512 -> 64 (ClippedReLU)
-            let hidden_layer_1 = l1.forward(stm_hidden).crelu();
+            let hidden_layer_1 = l1.forward(combined).crelu();
 
             // L2: 64 -> 32 (ClippedReLU)
             let hidden_layer_2 = l2.forward(hidden_layer_1).crelu();
