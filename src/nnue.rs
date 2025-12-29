@@ -10,18 +10,21 @@ use std::arch::x86_64::*;
 static EMBEDDED_NET: &[u8] = include_bytes!("../nn-new.nnue");
 
 // Architecture Constants
-pub const L1_SIZE: usize = 256;
-pub const L2_SIZE: usize = 32;
+pub const L1_SIZE: usize = 512;
+pub const L2_SIZE: usize = 64;
 pub const L3_SIZE: usize = 32;
-pub const L4_SIZE: usize = 32;
+pub const L4_SIZE: usize = 16;
 pub const OUTPUT_SIZE: usize = 1;
 
 pub const INPUT_SIZE: usize = 768;
 pub const NUM_BUCKETS: usize = 32; // Matches bullet_lib ChessBuckets (Standard Mirrored)
 
+pub const NETWORK_MAGIC: u32 = 0xAE74E201;
+
 // Quantization Constants
 const QA: i32 = 255;
 const QB: i32 = 64;
+const OUTPUT_SHIFT: i32 = 6; // QB = 64 -> Shift 6
 const Q_ACTIVATION: i32 = 127; // Max activation for ClippedReLU (scaled)
 const SCALE: i32 = 400; // Eval scale from trainer
 const ACC_MAGIC: u16 = 0x1234;
@@ -298,7 +301,8 @@ unsafe fn screlu_calc_avx2(val: __m256i) -> __m256i {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i16], output: &mut [i16], in_size: usize, out_size: usize) {
-    let qb = QB as i32;
+    // Quantization shift
+    // output = (dot + bias) >> OUTPUT_SHIFT
 
     for i in 0..out_size {
         let mut sum_vec = _mm256_setzero_si256();
@@ -323,7 +327,8 @@ unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i16], outp
         let sum_part = _mm_cvtsi128_si32(v_sum3);
 
         let total_sum = sum_part + biases[i] as i32;
-        output[i] = (total_sum / qb) as i16;
+        // Shift right
+        output[i] = (total_sum >> OUTPUT_SHIFT) as i16;
     }
 }
 
@@ -332,6 +337,9 @@ unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i16], outp
 unsafe fn clamp_activations_avx2(buffer: &mut [i16]) {
     let zero = _mm256_setzero_si256();
     let max = _mm256_set1_epi16(Q_ACTIVATION as i16);
+
+    // We assume buffer length is a multiple of 16 for AVX2 efficiency in previous layers.
+    // L2 (64), L3 (32), L4 (16) are all multiples of 16.
     for i in (0..buffer.len()).step_by(16) {
          let ptr = buffer.as_mut_ptr().add(i);
          let v = _mm256_loadu_si256(ptr as *const __m256i);
@@ -398,78 +406,68 @@ pub fn verify_accumulator(state: &crate::state::GameState, acc: &Accumulator, pe
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
+unsafe fn evaluate_avx2(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
     // L1 Input generation (AVX2)
     let zero = _mm256_setzero_si256();
-    // Replaced QA vector logic with screlu input handling inside loop
-    // No explicit scale vector needed for integer path
 
-    // STM
+    // STM Only
     for i in (0..L1_SIZE).step_by(16) {
         let ptr = stm_acc.v.as_ptr().add(i);
         let val = _mm256_load_si256(ptr as *const __m256i); // Aligned load
         let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), _mm256_set1_epi16(QA as i16));
         let res = screlu_calc_avx2(clamped);
-        _mm256_storeu_si256(scratch.hidden_512.as_mut_ptr().add(i) as *mut __m256i, res);
-    }
-    // NTM
-    for i in (0..L1_SIZE).step_by(16) {
-        let ptr = ntm_acc.v.as_ptr().add(i);
-        let val = _mm256_load_si256(ptr as *const __m256i); // Aligned load
-        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), _mm256_set1_epi16(QA as i16));
-        let res = screlu_calc_avx2(clamped);
-        _mm256_storeu_si256(scratch.hidden_512.as_mut_ptr().add(L1_SIZE + i) as *mut __m256i, res);
+        _mm256_storeu_si256(scratch.hidden_l1.as_mut_ptr().add(i) as *mut __m256i, res);
     }
 
-    // Layer 1: 512 -> 32
-    layer_affine_avx2(&scratch.hidden_512, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
+    // NTM is NOT used in this architecture (Single Perspective Funnel), but we keep the accumulator updated by caller.
+
+    // Layer 1: 512 -> 64
+    // Note: We use only the first 512 elements of scratch.hidden_l1
+    layer_affine_avx2(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
     clamp_activations_avx2(&mut scratch.l2_out);
 
-    // Layer 2: 32 -> 32
+    // Layer 2: 64 -> 32
     layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
     clamp_activations_avx2(&mut scratch.l3_out);
 
-    // Layer 3: 32 -> 32
+    // Layer 3: 32 -> 16
     layer_affine_avx2(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
     clamp_activations_avx2(&mut scratch.l4_out);
 
-    // Output Layer: 32 -> 1
+    // Output Layer: 16 -> 1
     layer_affine_avx2(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
 
     let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
 }
 
-fn evaluate_scalar(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
-    evaluate_l1_scalar(stm_acc, ntm_acc, &mut scratch.hidden_512);
+fn evaluate_scalar(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
+    // L1 (Scalar) - STM Only
+    evaluate_l1_scalar(stm_acc, &mut scratch.hidden_l1);
 
-    // Layer 1: 512 -> 32
-    layer_affine_scalar(&scratch.hidden_512, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
+    // Layer 1: 512 -> 64
+    layer_affine_scalar(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
     clamp_activations_scalar(&mut scratch.l2_out);
 
-    // Layer 2: 32 -> 32
+    // Layer 2: 64 -> 32
     layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
     clamp_activations_scalar(&mut scratch.l3_out);
 
-    // Layer 3: 32 -> 32
+    // Layer 3: 32 -> 16
     layer_affine_scalar(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
     clamp_activations_scalar(&mut scratch.l4_out);
 
-    // Output Layer: 32 -> 1
+    // Output Layer: 16 -> 1
     layer_affine_scalar(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
 
     let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
 }
 
-fn evaluate_l1_scalar(stm: &Accumulator, ntm: &Accumulator, output: &mut [i16]) {
+fn evaluate_l1_scalar(stm: &Accumulator, output: &mut [i16]) {
     for i in 0..L1_SIZE {
         let val = stm.v[i].clamp(0, 255);
         output[i] = SCRELU[val as usize];
-    }
-    for i in 0..L1_SIZE {
-        let val = ntm.v[i].clamp(0, 255);
-        output[L1_SIZE + i] = SCRELU[val as usize];
     }
 }
 
@@ -485,8 +483,8 @@ fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i16], output: &
         for j in 0..in_size {
             sum += (input[j] as i32) * (weights[i * in_size + j] as i32);
         }
-        // Normalize: Divide by 64 (QB)
-        output[i] = (sum / QB) as i16;
+        // Shift Right
+        output[i] = (sum >> OUTPUT_SHIFT) as i16;
     }
 }
 
@@ -495,28 +493,36 @@ fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i16], output: &
 // --------------------------------------------------------
 
 pub struct Network {
-    // Layer 0 (768*32 -> 256)
-    pub l0_weights: Vec<i16>, // (768*32) * 256
-    pub l0_biases: Vec<i16>,  // 256
+    // Layer 0 (768*32 -> 512)
+    pub l0_weights: Vec<i16>, // (768*32) * 512
+    pub l0_biases: Vec<i16>,  // 512
 
-    // Layer 1 (512 -> 32)
-    pub l1_weights: Vec<i16>, // 512 * 32
-    pub l1_biases: Vec<i16>,  // 32
+    // Layer 1 (512 -> 64)
+    pub l1_weights: Vec<i16>, // 512 * 64
+    pub l1_biases: Vec<i16>,  // 64
 
-    // Layer 2 (32 -> 32)
-    pub l2_weights: Vec<i16>, // 32 * 32
+    // Layer 2 (64 -> 32)
+    pub l2_weights: Vec<i16>, // 64 * 32
     pub l2_biases: Vec<i16>,  // 32
 
-    // Layer 3 (32 -> 32)
-    pub l3_weights: Vec<i16>, // 32 * 32
-    pub l3_biases: Vec<i16>,  // 32
+    // Layer 3 (32 -> 16)
+    pub l3_weights: Vec<i16>, // 32 * 16
+    pub l3_biases: Vec<i16>,  // 16
 
-    // Layer 4 (32 -> 1)
-    pub l4_weights: Vec<i16>, // 32 * 1
+    // Layer 4 (16 -> 1)
+    pub l4_weights: Vec<i16>, // 16 * 1
     pub l4_biases: Vec<i16>,  // 1
 }
 
 pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> {
+    // Magic Check
+    let mut magic_bytes = [0u8; 4];
+    reader.read_exact(&mut magic_bytes)?;
+    let magic = u32::from_le_bytes(magic_bytes);
+    if magic != NETWORK_MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number - architecture mismatch"));
+    }
+
     // Helper to read vector
     let read_vec = |reader: &mut R, len: usize| -> io::Result<Vec<i16>> {
         let mut v = vec![0i16; len];
@@ -530,23 +536,23 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
 
     let total_features = INPUT_SIZE * NUM_BUCKETS; // 768 * 32
 
-    // L0
+    // L0 (Acc)
     let l0_weights = read_vec(reader, total_features * L1_SIZE)?;
     let l0_biases = read_vec(reader, L1_SIZE)?;
 
-    // L1
-    let l1_weights = read_vec(reader, (2 * L1_SIZE) * L2_SIZE)?;
+    // L1 (Dense 512->64)
+    let l1_weights = read_vec(reader, L1_SIZE * L2_SIZE)?;
     let l1_biases = read_vec(reader, L2_SIZE)?;
 
-    // L2
+    // L2 (Dense 64->32)
     let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?;
     let l2_biases = read_vec(reader, L3_SIZE)?;
 
-    // L3
+    // L3 (Dense 32->16)
     let l3_weights = read_vec(reader, L3_SIZE * L4_SIZE)?;
     let l3_biases = read_vec(reader, L4_SIZE)?;
 
-    // L4
+    // L4 (Dense 16->1)
     let l4_weights = read_vec(reader, L4_SIZE * OUTPUT_SIZE)?;
     let l4_biases = read_vec(reader, OUTPUT_SIZE)?;
 
@@ -647,6 +653,56 @@ mod tests {
                     let actual = res_arr[j];
                     assert_eq!(actual, expected, "Mismatch at input {}", input);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_determinism() {
+        use crate::state::GameState;
+
+        // Only run if we can load a network (requires valid magic)
+        // Since we probably don't have one, we just check if it returns gracefully or panics.
+        // We can mock a network here just for this test!
+
+        let mock_network = Network {
+            l0_weights: vec![0; INPUT_SIZE * NUM_BUCKETS * L1_SIZE],
+            l0_biases: vec![10; L1_SIZE], // Use bias 10
+            l1_weights: vec![1; L1_SIZE * L2_SIZE],
+            l1_biases: vec![1; L2_SIZE],
+            l2_weights: vec![1; L2_SIZE * L3_SIZE],
+            l2_biases: vec![1; L3_SIZE],
+            l3_weights: vec![1; L3_SIZE * L4_SIZE],
+            l3_biases: vec![1; L4_SIZE],
+            l4_weights: vec![1; L4_SIZE * OUTPUT_SIZE],
+            l4_biases: vec![1; OUTPUT_SIZE],
+        };
+
+        // We can't set the global OnceLock easily if it's already set or not.
+        // But we can call evaluate functions directly if we pass the network.
+        // Oops, evaluate functions take `net` as argument in their impl but the public `evaluate` retrieves it from global.
+
+        // However, `evaluate_scalar` and `evaluate_avx2` take `net`.
+        // So we can test `evaluate_scalar` directly.
+
+        let mut stm = Accumulator { v: [0; L1_SIZE], magic: ACC_MAGIC };
+        stm.v.copy_from_slice(&mock_network.l0_biases);
+
+        let mut ntm = Accumulator { v: [0; L1_SIZE], magic: ACC_MAGIC };
+        ntm.v.copy_from_slice(&mock_network.l0_biases);
+
+        let mut scratch = NNUEScratch::default();
+
+        // Run twice
+        let eval1 = evaluate_scalar(&mut stm, &mut ntm, &mock_network, &mut scratch);
+        let eval2 = evaluate_scalar(&mut stm, &mut ntm, &mock_network, &mut scratch);
+
+        assert_eq!(eval1, eval2, "Scalar eval determinism failed");
+
+        if use_avx2() {
+            unsafe {
+                let eval_avx = evaluate_avx2(&mut stm, &mut ntm, &mock_network, &mut scratch);
+                assert_eq!(eval1, eval_avx, "AVX2 vs Scalar mismatch");
             }
         }
     }
