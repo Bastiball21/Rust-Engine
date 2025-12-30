@@ -987,6 +987,25 @@ fn quiescence(
     alpha
 }
 
+#[derive(Clone, Debug)]
+pub struct RootMove {
+    pub score: i32,
+    pub prev_score: i32,
+    pub mv: Move,
+    pub pv: Vec<Move>,
+}
+
+impl RootMove {
+    pub fn new(mv: Move) -> Self {
+        Self {
+            score: -INFINITY,
+            prev_score: -INFINITY,
+            mv,
+            pv: Vec::new(),
+        }
+    }
+}
+
 pub fn search(
     state: &GameState,
     limits: Limits,
@@ -1049,23 +1068,52 @@ pub fn search(
     // Initialize Stack Root
     stack[0] = StackEntry::default();
     stack[0].current_move = Move::default(); // Ensure root move is default (none)
-    // Pre-populate root in_check
     stack[0].in_check = is_in_check(state);
 
+    // 1. Generate Root Moves
+    let mut root_moves = Vec::new();
+    let mut generator = MoveGenerator::new();
+    generator.generate_moves(state);
+
+    // Check legality and create RootMoves
+    for i in 0..generator.list.count {
+        let mv = generator.list.moves[i];
+        let mut next_state = *state;
+        next_state.make_move_inplace(mv, &mut None);
+        let our_king = if state.side_to_move == WHITE { K } else { k };
+        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
+
+        if !movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
+            root_moves.push(RootMove::new(mv));
+        }
+    }
+
+    if root_moves.is_empty() {
+        if stack[0].in_check {
+            if main_thread { println!("bestmove (none)"); }
+            return (-MATE_VALUE, None);
+        } else {
+            if main_thread { println!("bestmove (none)"); }
+            return (0, None);
+        }
+    }
+
     let mut last_score = 0;
-
-    let mut root_state = *state;
-
-    // --- THREAD DISTRIBUTION LOGIC START ---
     let mut depth = 1;
-
-    // Time Management Variables
-    let mut prev_best_move: Option<Move> = None;
     let mut best_move_changes = 0;
+    let mut prev_best_move: Option<Move> = None;
 
+    // --- ITERATIVE DEEPENING LOOP ---
     while depth <= max_depth {
         info.root_depth = depth;
         info.seldepth = 0;
+
+        // Sort Root Moves
+        // If depth > 1, sort by score (which is prev_score from depth-1)
+        if depth > 1 {
+            root_moves.sort_by(|r1, r2| r2.score.cmp(&r1.score));
+        }
+
         let mut alpha = -INFINITY;
         let mut beta = INFINITY;
 
@@ -1074,56 +1122,105 @@ pub fn search(
             beta = last_score + ASP_WINDOW_CP;
         }
 
-        let mut score;
         let mut delta = ASP_WIDEN_1;
+        let mut best_score = -INFINITY;
+        let mut best_move_this_iteration = None;
 
+        // Aspiration Window Loop
         loop {
-            if alpha < -3000 {
-                alpha = -INFINITY;
-            }
-            if beta > 3000 {
-                beta = INFINITY;
+            if alpha < -3000 { alpha = -INFINITY; }
+            if beta > 3000 { beta = INFINITY; }
+
+            best_score = -INFINITY;
+
+            // Iterate Root Moves
+            for (i, rm) in root_moves.iter_mut().enumerate() {
+                let mut root_state = *state;
+                let mv = rm.mv;
+
+                // Populate Stack[1]
+                let next_ply = 1;
+                stack[next_ply].current_move = mv;
+                stack[next_ply].to_sq = mv.target() as usize;
+                stack[next_ply].moved_piece = get_piece_type_safe(&root_state, mv.source());
+                stack[next_ply].is_capture = mv.is_capture();
+                stack[next_ply].in_check = gives_check_fast(&root_state, mv);
+
+                let unmake_info = root_state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
+                info.path.push(root_state.hash);
+
+                let mut score;
+
+                // PVS Logic at Root
+                if i == 0 {
+                    score = -negamax(&mut root_state, stack, depth - 1, -beta, -alpha, &mut info, next_ply, true, false);
+                } else {
+                    // Start with Null Window
+                    score = -negamax(&mut root_state, stack, depth - 1, -alpha - 1, -alpha, &mut info, next_ply, false, false);
+                    if score > alpha && score < beta {
+                        // Research with full window
+                        score = -negamax(&mut root_state, stack, depth - 1, -beta, -alpha, &mut info, next_ply, true, false);
+                    }
+                }
+
+                info.path.pop();
+                root_state.unmake_move(mv, unmake_info, &mut Some(&mut info.data.accumulators));
+
+                if info.stopped {
+                    break;
+                }
+
+                rm.score = score;
+
+                if score > best_score {
+                    best_score = score;
+                    best_move_this_iteration = Some(mv);
+                }
+
+                if score > alpha {
+                    alpha = score;
+                }
+
+                if score >= beta {
+                    break;
+                }
             }
 
-            score = negamax(
-                &mut root_state, stack, depth, alpha, beta, &mut info, 0, true, false,
-            );
             if info.stopped {
                 break;
             }
 
-            if score <= alpha {
+            // Aspiration Logic
+            if best_score <= alpha {
                 if let Limits::FixedTime(ref mut tm) = info.limits {
-                    tm.report_aspiration_fail(2); // FLAG_ALPHA (Fail Low)
+                    tm.report_aspiration_fail(2); // Fail Low
                 }
                 beta = (alpha + beta) / 2;
                 alpha = (-INFINITY).max(alpha - delta);
-                if delta == ASP_WIDEN_1 {
-                     delta = ASP_WIDEN_2;
-                } else {
-                     delta = INFINITY;
-                }
-            } else if score >= beta {
+                if delta == ASP_WIDEN_1 { delta = ASP_WIDEN_2; } else { delta = INFINITY; }
+            } else if best_score >= beta {
                 beta = (INFINITY).min(beta + delta);
-                if delta == ASP_WIDEN_1 {
-                     delta = ASP_WIDEN_2;
-                } else {
-                     delta = INFINITY;
-                }
+                if delta == ASP_WIDEN_1 { delta = ASP_WIDEN_2; } else { delta = INFINITY; }
             } else {
                 break;
             }
         }
 
-        last_score = score;
-
         if info.stopped {
             break;
         }
 
+        last_score = best_score;
+        best_move = best_move_this_iteration;
+
+        // Store best move in TT (Root)
+        if let Some(bm) = best_move {
+             info.tt.store(state.hash, last_score, Some(bm), depth, FLAG_EXACT, info.thread_id);
+        }
+
         // Time Management Updates (Root Loop)
         if main_thread {
-            let current_best_move = tt.get_move(state.hash, state, thread_id);
+            let current_best_move = best_move;
             if current_best_move != prev_best_move {
                 best_move_changes += 1;
                 prev_best_move = current_best_move;
@@ -1136,11 +1233,13 @@ pub fn search(
             }
         }
 
+        // Forced Move Check
         let mut forced_margin = None;
         if let Limits::FixedTime(ref mut tm) = info.limits {
             if main_thread {
-                let best_move_found = tt.get_move(state.hash, state, thread_id).unwrap_or_default();
-                tm.report_completed_depth(depth as i32, score, best_move_found);
+                if let Some(bm) = best_move {
+                     tm.report_completed_depth(depth as i32, last_score, bm);
+                }
                 forced_margin = tm.check_for_forced_move(depth as i32);
                 if tm.check_soft_limit() {
                     info.stopped = true;
@@ -1150,12 +1249,13 @@ pub fn search(
         }
 
         if let Some(margin) = forced_margin {
-             let best_move_found = tt.get_move(state.hash, state, thread_id).unwrap_or_default();
-             let is_forced = is_forced_move(&mut root_state, stack, margin, &mut info, best_move_found, score, depth);
-             if is_forced {
-                 if let Limits::FixedTime(ref mut tm) = info.limits {
-                     tm.report_forced_move(depth as i32);
-                 }
+             if let Some(bm) = best_move {
+                  let is_forced = is_forced_move(&mut (*state).clone(), stack, margin, &mut info, bm, last_score, depth);
+                  if is_forced {
+                       if let Limits::FixedTime(ref mut tm) = info.limits {
+                           tm.report_forced_move(depth as i32);
+                       }
+                  }
              }
         }
 
@@ -1172,29 +1272,26 @@ pub fn search(
             } else {
                 0
             };
-            let mut score_str = if score > MATE_SCORE {
-                format!("mate {}", (MATE_VALUE - score + 1) / 2)
-            } else if score < -MATE_SCORE {
-                format!("mate -{}", (MATE_VALUE + score + 1) / 2)
+            let mut score_str = if last_score > MATE_SCORE {
+                format!("mate {}", (MATE_VALUE - last_score + 1) / 2)
+            } else if last_score < -MATE_SCORE {
+                format!("mate -{}", (MATE_VALUE + last_score + 1) / 2)
             } else {
-                format!("cp {}", score)
+                format!("cp {}", last_score)
             };
 
             if crate::uci::UCI_SHOW_WDL.load(Ordering::Relaxed) {
-                if score.abs() < MATE_SCORE {
-                    let (w, d, l) = to_wdl(score);
+                if last_score.abs() < MATE_SCORE {
+                    let (w, d, l) = to_wdl(last_score);
                     score_str.push_str(&format!(" wdl {} {} {}", w, d, l));
                 }
             }
 
             let mut pv_line = String::new();
-            if let Some(mv) = tt.get_move(state.hash, state, thread_id) {
-                if info.tt.is_pseudo_legal(state, mv) {
-                    best_move = Some(mv);
-                    let (line, p_move) = get_pv_line(state, tt, depth, thread_id);
-                    pv_line = line;
-                    ponder_move = p_move;
-                }
+            if let Some(mv) = best_move {
+                 let (line, p_move) = get_pv_line(state, tt, depth, thread_id);
+                 pv_line = line;
+                 ponder_move = p_move;
             }
 
             println!(
@@ -1212,43 +1309,14 @@ pub fn search(
 
         depth += 1;
     }
-    // --- THREAD DISTRIBUTION LOGIC END ---
 
-    let mut final_move = best_move;
-    let mut generator = movegen::MoveGenerator::new();
-    generator.generate_moves(state);
-    let mut legal_moves: SmallVec<[Move; 64]> = SmallVec::new();
-    for i in 0..generator.list.count {
-        let mv = generator.list.moves[i];
-        let mut next_state = *state;
-        next_state.make_move_inplace(mv, &mut None);
-        let our_king = if state.side_to_move == WHITE { K } else { k };
-        let king_sq = next_state.bitboards[our_king].get_lsb_index() as u8;
-        if !movegen::is_square_attacked(&next_state, king_sq, next_state.side_to_move) {
-            legal_moves.push(mv);
-        }
-    }
-
-    if let Some(bm) = final_move {
-        let mut found = false;
-        for &lm in &legal_moves {
-            if bm.source() == lm.source() && bm.target() == lm.target() && bm.promotion() == lm.promotion() {
-                found = true;
-                final_move = Some(lm);
-                break;
-            }
-        }
-        if !found {
-            final_move = None;
-        }
-    }
-
-    if final_move.is_none() && !legal_moves.is_empty() {
-        final_move = Some(legal_moves[0]);
+    // Fallback if no best move found (e.g. stopped early)
+    if best_move.is_none() && !root_moves.is_empty() {
+        best_move = Some(root_moves[0].mv);
     }
 
     if main_thread {
-        if let Some(bm) = final_move {
+        if let Some(bm) = best_move {
             print!("bestmove {}", format_move_uci(bm, state));
             if let Some(pm) = ponder_move {
                 print!(
@@ -1262,7 +1330,7 @@ pub fn search(
         }
     }
 
-    (last_score, final_move)
+    (last_score, best_move)
 }
 
 fn negamax(
