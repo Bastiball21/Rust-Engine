@@ -139,7 +139,7 @@ impl TTEntryTrait for TTEntry {
 // --------------------------------------------------------------------------------
 
 #[cfg(not(feature = "packed-tt"))]
-const CLUSTER_SIZE: usize = 2;
+const CLUSTER_SIZE: usize = 4;
 
 #[repr(C, align(64))]
 pub struct Cluster {
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn test_tt_replacement_policy() {
         // Mock TT with 1 Cluster
-        // CLUSTER_SIZE is 2
+        // CLUSTER_SIZE is 4 now
         let mut tt = TranspositionTable::new(1, 1);
         let current_gen = 10;
         tt.generation.store(current_gen, Ordering::Relaxed);
@@ -454,60 +454,57 @@ mod tests {
         let hash_a = (1u64 << 48) | base_index;
         let hash_b = (2u64 << 48) | base_index;
         let hash_c = (3u64 << 48) | base_index;
+        let hash_d = (4u64 << 48) | base_index;
+        let hash_e = (5u64 << 48) | base_index;
 
         // Dummy GameState for probe
         let dummy_fen = "8/8/8/8/8/8/8/8 w - - 0 1";
         let dummy_state = GameState::parse_fen(dummy_fen);
 
-        // 1. Store A: Depth 5, Age 10 (Current)
+        // 1. Fill Cluster with 4 entries
+        // A: Depth 5
+        // B: Depth 4
+        // C: Depth 6
+        // D: Depth 5
         tt.store(hash_a, 100, None, 5, FLAG_EXACT, None);
-        // Verify A is there
-        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some());
-
-        // 2. Store B: Depth 4, Age 10 (Current)
         tt.store(hash_b, 200, None, 4, FLAG_EXACT, None);
-        // Verify A and B are there
-        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some());
-        assert!(tt.probe_data(hash_b, &dummy_state, None).is_some());
-
-        // 3. Store C: Depth 6. Should replace B (Depth 4 < Depth 5)
         tt.store(hash_c, 300, None, 6, FLAG_EXACT, None);
-        // Verify A (Depth 5) kept, B (Depth 4) replaced by C (Depth 6)
-        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some(), "A should be kept (Depth 5)");
-        assert!(tt.probe_data(hash_b, &dummy_state, None).is_none(), "B should be replaced (Depth 4)");
-        assert!(tt.probe_data(hash_c, &dummy_state, None).is_some(), "C should be stored (Depth 6)");
+        tt.store(hash_d, 400, None, 5, FLAG_EXACT, None);
 
-        // 4. Test Aging Tiebreak
-        // Setup:
-        // Slot 0: Hash A, Depth 5, Age 5 (Old)
-        // Slot 1: Hash B, Depth 5, Age 10 (Current)
-        // Store C: Depth 5. Should replace A (Older)
-
-        tt.clear();
-        tt.generation.store(10, Ordering::Relaxed);
-
-        // We need to simulate old age. tt.store uses current_gen.
-        // We'll manually poke? No, we can just set generation to 5, store A, set to 10, store B.
-
-        tt.generation.store(5, Ordering::Relaxed);
-        tt.store(hash_a, 100, None, 5, FLAG_EXACT, None);
-
-        tt.generation.store(10, Ordering::Relaxed);
-        tt.store(hash_b, 200, None, 5, FLAG_EXACT, None);
-
-        // Verify both present
+        // Verify all are there
         assert!(tt.probe_data(hash_a, &dummy_state, None).is_some());
         assert!(tt.probe_data(hash_b, &dummy_state, None).is_some());
+        assert!(tt.probe_data(hash_c, &dummy_state, None).is_some());
+        assert!(tt.probe_data(hash_d, &dummy_state, None).is_some());
 
-        // Store C, Depth 5.
-        // A: Depth 5, Age 5. Diff = 5. Quality = (5<<8) | (255-5) = 1280 + 250 = 1530
-        // B: Depth 5, Age 10. Diff = 0. Quality = (5<<8) | (255-0) = 1280 + 255 = 1535
-        // A has lower quality (more stale). Should be replaced.
+        // 2. Store E: Depth 6. Should replace B (Depth 4 is lowest)
+        tt.store(hash_e, 500, None, 6, FLAG_EXACT, None);
 
-        tt.store(hash_c, 300, None, 5, FLAG_EXACT, None);
+        assert!(tt.probe_data(hash_a, &dummy_state, None).is_some(), "A (Depth 5) kept");
+        assert!(tt.probe_data(hash_b, &dummy_state, None).is_none(), "B (Depth 4) replaced");
+        assert!(tt.probe_data(hash_c, &dummy_state, None).is_some(), "C (Depth 6) kept");
+        assert!(tt.probe_data(hash_d, &dummy_state, None).is_some(), "D (Depth 5) kept");
+        assert!(tt.probe_data(hash_e, &dummy_state, None).is_some(), "E (Depth 6) stored");
+
+        // 3. Test Aging Tiebreak
+        tt.clear();
+
+        // Setup 4 slots full
+        tt.generation.store(5, Ordering::Relaxed);
+        tt.store(hash_a, 100, None, 5, FLAG_EXACT, None); // Old (Gen 5)
+
+        tt.generation.store(10, Ordering::Relaxed);
+        tt.store(hash_b, 200, None, 5, FLAG_EXACT, None); // New (Gen 10)
+        tt.store(hash_c, 300, None, 5, FLAG_EXACT, None); // New (Gen 10)
+        tt.store(hash_d, 400, None, 5, FLAG_EXACT, None); // New (Gen 10)
+
+        // Store E (Depth 5). Should replace A (Oldest)
+        tt.store(hash_e, 500, None, 5, FLAG_EXACT, None);
 
         assert!(tt.probe_data(hash_a, &dummy_state, None).is_none(), "A (Old) should be replaced");
-        assert!(tt.probe_data(hash_b, &dummy_state, None).is_some(), "B (New) should be kept");
-        assert!(tt.probe_data(hash_c, &dummy_state, None).is_some(), "C should be stored");
+        assert!(tt.probe_data(hash_b, &dummy_state, None).is_some(), "B (New) kept");
+        assert!(tt.probe_data(hash_c, &dummy_state, None).is_some(), "C (New) kept");
+        assert!(tt.probe_data(hash_d, &dummy_state, None).is_some(), "D (New) kept");
+        assert!(tt.probe_data(hash_e, &dummy_state, None).is_some(), "E stored");
     }
 }
