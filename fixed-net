@@ -1,1 +1,31 @@
 
+import struct
+import os
+
+# Configuration
+INPUT_FILE = "nn-new.nnue"  # The file you are trying to use
+OUTPUT_FILE = "nn-fixed.nnue"
+MAGIC = 0xAE74E201
+
+try:
+    with open(INPUT_FILE, "rb") as f:
+        data = f.read()
+
+    # Check if it's already valid
+    if len(data) >= 4:
+        existing_magic = struct.unpack("<I", data[:4])[0]
+        if existing_magic == MAGIC:
+            print(f"✅ {INPUT_FILE} already has the correct magic number!")
+            exit(0)
+
+    # Prepend magic number
+    print(f"⚠️  File missing header. Adding magic number {hex(MAGIC)}...")
+    magic_bytes = struct.pack("<I", MAGIC)
+
+    with open(OUTPUT_FILE, "wb") as f:
+        f.write(magic_bytes + data)
+
+    print(f"✅ Created {OUTPUT_FILE}. Use this file!")
+
+except FileNotFoundError:
+    print(f"❌ Could not find {INPUT_FILE}. Please check the filename.")
