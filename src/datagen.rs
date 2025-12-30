@@ -709,6 +709,7 @@ pub fn run_datagen(config: DatagenConfig) {
                         if !used_tt_hit {
                             // Generate a random ID (ensure non-zero using | 1)
                             let random_id = (rng.next_u64() as usize) | 1;
+                            let mut stack = [search::StackEntry::default(); search::STACK_SIZE];
 
                             let (s, m) = search::search(
                                 &state,
@@ -718,9 +719,10 @@ pub fn run_datagen(config: DatagenConfig) {
                                 false,
                                 &history_vec,
                                 &mut search_data,
+                                &mut stack,
                                 &params_clone,
                                 Some(&global_nodes_clone),
-                                Some(random_id), // <--- Pass Random ID here
+                                Some(random_id),
                             );
                             search_score = s;
                             best_move = m;
