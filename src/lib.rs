@@ -27,6 +27,7 @@ pub mod zobrist; // Tests
 pub mod syzygy; // Added
 pub mod parameters;
 pub mod tuning_spsa;
+pub mod history; // Added
 
 use std::env;
 use std::thread;
