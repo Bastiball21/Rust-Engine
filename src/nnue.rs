@@ -10,10 +10,10 @@ use std::arch::x86_64::*;
 static EMBEDDED_NET: &[u8] = include_bytes!("../nn-new.nnue");
 
 // Architecture Constants
-pub const L1_SIZE: usize = 512;
-pub const L2_SIZE: usize = 64;
+pub const L1_SIZE: usize = 256;
+pub const L2_SIZE: usize = 32;
 pub const L3_SIZE: usize = 32;
-pub const L4_SIZE: usize = 16;
+pub const L4_SIZE: usize = 32;
 pub const OUTPUT_SIZE: usize = 1;
 
 pub const INPUT_SIZE: usize = 768;
@@ -339,7 +339,7 @@ unsafe fn clamp_activations_avx2(buffer: &mut [i16]) {
     let max = _mm256_set1_epi16(Q_ACTIVATION as i16);
 
     // We assume buffer length is a multiple of 16 for AVX2 efficiency in previous layers.
-    // L2 (64), L3 (32), L4 (16) are all multiples of 16.
+    // L2 (32), L3 (32), L4 (32) are all multiples of 16.
     for i in (0..buffer.len()).step_by(16) {
          let ptr = buffer.as_mut_ptr().add(i);
          let v = _mm256_loadu_si256(ptr as *const __m256i);
@@ -421,20 +421,20 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Net
 
     // NTM is NOT used in this architecture (Single Perspective Funnel), but we keep the accumulator updated by caller.
 
-    // Layer 1: 512 -> 64
-    // Note: We use only the first 512 elements of scratch.hidden_l1
-    layer_affine_avx2(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
+    // Layer 1: 256 -> 32
+    // Note: We use only the first 256 elements of scratch.hidden_l1
+    layer_affine_avx2(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_avx2(&mut scratch.l2_out);
 
-    // Layer 2: 64 -> 32
+    // Layer 2: 32 -> 32
     layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
     clamp_activations_avx2(&mut scratch.l3_out);
 
-    // Layer 3: 32 -> 16
+    // Layer 3: 32 -> 32
     layer_affine_avx2(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
     clamp_activations_avx2(&mut scratch.l4_out);
 
-    // Output Layer: 16 -> 1
+    // Output Layer: 32 -> 1
     layer_affine_avx2(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
 
     let output = scratch.final_out[0] as i32;
@@ -445,19 +445,19 @@ fn evaluate_scalar(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network,
     // L1 (Scalar) - STM Only
     evaluate_l1_scalar(stm_acc, &mut scratch.hidden_l1);
 
-    // Layer 1: 512 -> 64
-    layer_affine_scalar(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, 512, L2_SIZE);
+    // Layer 1: 256 -> 32
+    layer_affine_scalar(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_scalar(&mut scratch.l2_out);
 
-    // Layer 2: 64 -> 32
+    // Layer 2: 32 -> 32
     layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
     clamp_activations_scalar(&mut scratch.l3_out);
 
-    // Layer 3: 32 -> 16
+    // Layer 3: 32 -> 32
     layer_affine_scalar(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
     clamp_activations_scalar(&mut scratch.l4_out);
 
-    // Output Layer: 16 -> 1
+    // Output Layer: 32 -> 1
     layer_affine_scalar(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
 
     let output = scratch.final_out[0] as i32;
@@ -493,24 +493,24 @@ fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i16], output: &
 // --------------------------------------------------------
 
 pub struct Network {
-    // Layer 0 (768*32 -> 512)
-    pub l0_weights: Vec<i16>, // (768*32) * 512
-    pub l0_biases: Vec<i16>,  // 512
+    // Layer 0 (768*32 -> 256)
+    pub l0_weights: Vec<i16>, // (768*32) * 256
+    pub l0_biases: Vec<i16>,  // 256
 
-    // Layer 1 (512 -> 64)
-    pub l1_weights: Vec<i16>, // 512 * 64
-    pub l1_biases: Vec<i16>,  // 64
+    // Layer 1 (256 -> 32)
+    pub l1_weights: Vec<i16>, // 256 * 32
+    pub l1_biases: Vec<i16>,  // 32
 
-    // Layer 2 (64 -> 32)
-    pub l2_weights: Vec<i16>, // 64 * 32
+    // Layer 2 (32 -> 32)
+    pub l2_weights: Vec<i16>, // 32 * 32
     pub l2_biases: Vec<i16>,  // 32
 
-    // Layer 3 (32 -> 16)
-    pub l3_weights: Vec<i16>, // 32 * 16
-    pub l3_biases: Vec<i16>,  // 16
+    // Layer 3 (32 -> 32)
+    pub l3_weights: Vec<i16>, // 32 * 32
+    pub l3_biases: Vec<i16>,  // 32
 
-    // Layer 4 (16 -> 1)
-    pub l4_weights: Vec<i16>, // 16 * 1
+    // Layer 4 (32 -> 1)
+    pub l4_weights: Vec<i16>, // 32 * 1
     pub l4_biases: Vec<i16>,  // 1
 }
 
@@ -540,19 +540,19 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
     let l0_weights = read_vec(reader, total_features * L1_SIZE)?;
     let l0_biases = read_vec(reader, L1_SIZE)?;
 
-    // L1 (Dense 512->64)
+    // L1 (Dense 256->32)
     let l1_weights = read_vec(reader, L1_SIZE * L2_SIZE)?;
     let l1_biases = read_vec(reader, L2_SIZE)?;
 
-    // L2 (Dense 64->32)
+    // L2 (Dense 32->32)
     let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?;
     let l2_biases = read_vec(reader, L3_SIZE)?;
 
-    // L3 (Dense 32->16)
+    // L3 (Dense 32->32)
     let l3_weights = read_vec(reader, L3_SIZE * L4_SIZE)?;
     let l3_biases = read_vec(reader, L4_SIZE)?;
 
-    // L4 (Dense 16->1)
+    // L4 (Dense 32->1)
     let l4_weights = read_vec(reader, L4_SIZE * OUTPUT_SIZE)?;
     let l4_biases = read_vec(reader, OUTPUT_SIZE)?;
 

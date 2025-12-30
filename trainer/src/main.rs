@@ -36,16 +36,16 @@ fn main() {
     let final_lr = 0.001 * 0.3f32.powi(5);
     let superbatches = 40;
 
-    // Architecture: 768 -> 512 -> 64 -> 32 -> 16 -> 1
-    // L1: Accumulator (512)
-    // L2: Dense (64)
+    // Architecture: 768 -> 256 -> 32 -> 32 -> 32 -> 1
+    // L1: Accumulator (256)
+    // L2: Dense (32)
     // L3: Dense (32)
-    // L4: Dense (16)
+    // L4: Dense (32)
     // OUT: Dense (1)
-    let l1_size = 512;
-    let l2_size = 64;
+    let l1_size = 256;
+    let l2_size = 32;
     let l3_size = 32;
-    let l4_size = 16;
+    let l4_size = 32;
 
     // Parse command line arguments for dataset paths
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -97,24 +97,23 @@ fn main() {
         .optimiser(AdamW)
         .inputs(buckets)
         .save_format(&[
-            // Layer 0 (Accumulator): 768 -> 512 (SCReLU)
+            // Layer 0 (Accumulator): 768 -> 256 (SCReLU)
             SavedFormat::id("l0w").round().quantise::<i16>(255), // Weights
             SavedFormat::id("l0b").round().quantise::<i16>(255), // Bias
 
-            // Layer 1: 512 -> 64 (ClippedReLU)
-            // Input size 512 (STM only)
+            // Layer 1: 256 -> 32 (ClippedReLU)
             SavedFormat::id("l1w").round().quantise::<i16>(64),
             SavedFormat::id("l1b").round().quantise::<i16>(64 * 127),
 
-            // Layer 2: 64 -> 32 (ClippedReLU)
+            // Layer 2: 32 -> 32 (ClippedReLU)
             SavedFormat::id("l2w").round().quantise::<i16>(64),
             SavedFormat::id("l2b").round().quantise::<i16>(64 * 127),
 
-            // Layer 3: 32 -> 16 (ClippedReLU)
+            // Layer 3: 32 -> 32 (ClippedReLU)
             SavedFormat::id("l3w").round().quantise::<i16>(64),
             SavedFormat::id("l3b").round().quantise::<i16>(64 * 127),
 
-            // Layer 4: 16 -> 1 (Raw)
+            // Layer 4: 32 -> 1 (Raw)
             SavedFormat::id("l4w").round().quantise::<i16>(64),
             SavedFormat::id("l4b").round().quantise::<i32>(255 * 64 * 127), // Output bias
         ])
@@ -122,20 +121,20 @@ fn main() {
             output.sigmoid().squared_error(target)
         })
         .build(|builder: &NetworkBuilder<BackendMarker>, stm_inputs: NetworkBuilderNode<BackendMarker>, ntm_inputs: NetworkBuilderNode<BackendMarker>| {
-            // Layer 0: 768 -> 512
+            // Layer 0: 768 -> 256
             let l0 = builder.new_affine("l0", stm_inputs.annotated_node().shape.size(), l1_size);
 
-            // Layer 1: 512 -> 64
-            // Input is 512 (STM only).
+            // Layer 1: 256 -> 32
+            // Input is 256 (STM only).
             let l1 = builder.new_affine("l1", l1_size, l2_size);
 
-            // Layer 2: 64 -> 32
+            // Layer 2: 32 -> 32
             let l2 = builder.new_affine("l2", l2_size, l3_size);
 
-            // Layer 3: 32 -> 16
+            // Layer 3: 32 -> 32
             let l3 = builder.new_affine("l3", l3_size, l4_size);
 
-            // Layer 4: 16 -> 1
+            // Layer 4: 32 -> 1
             let l4 = builder.new_affine("l4", l4_size, 1);
 
             // Forward Pass
@@ -149,16 +148,16 @@ fn main() {
             // Note: NTM features are unused in the forward pass, but 'l0' weights are shared/updated via STM usage.
             // effectively this learns to evaluate purely based on "My King's perspective" features.
 
-            // L1: 512 -> 64 (ClippedReLU)
+            // L1: 256 -> 32 (ClippedReLU)
             let hidden_layer_1 = l1.forward(combined).crelu();
 
-            // L2: 64 -> 32 (ClippedReLU)
+            // L2: 32 -> 32 (ClippedReLU)
             let hidden_layer_2 = l2.forward(hidden_layer_1).crelu();
 
-            // L3: 32 -> 16 (ClippedReLU)
+            // L3: 32 -> 32 (ClippedReLU)
             let hidden_layer_3 = l3.forward(hidden_layer_2).crelu();
 
-            // L4: 16 -> 1 (Linear)
+            // L4: 32 -> 1 (Linear)
             l4.forward(hidden_layer_3)
         });
 
