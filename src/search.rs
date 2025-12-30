@@ -10,8 +10,10 @@ use crate::tt::{TranspositionTable, FLAG_ALPHA, FLAG_BETA, FLAG_EXACT};
 use crate::parameters::SearchParameters;
 use crate::nnue::Accumulator;
 use crate::nnue_scratch::NNUEScratch;
+use crate::history::ContinuationHistory;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicI16, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use smallvec::SmallVec;
 
 // --- FEATURE TOGGLES ---
@@ -37,7 +39,7 @@ pub const FUTILITY_MARGIN_PER_PLY: i32 = 100;
 
 pub const NULL_MIN_DEPTH: u8 = 3;
 
-const MAX_PLY: usize = 128;
+pub const MAX_PLY: usize = 128;
 // Max game length we support in search path
 const MAX_GAME_PLY: usize = 1024;
 const INFINITY: i32 = 32000;
@@ -50,8 +52,39 @@ pub const MIN_WINNING_SEE_SCORE: i32 = WINNING_CAPTURE_BONUS - 16384;
 static START_PLY: [i16; 20] = [0, 1, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 6, 7];
 static SKIP_SIZE: [i16; 20] = [1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4];
 
-// Continuation History
-type ContHistTable = [[[i32; 64]; 12]; 768];
+#[derive(Clone, Copy)]
+pub struct StackEntry {
+    pub current_move: Move,   // Use Move::default() if none
+    pub excluded_move: Move,
+    pub killers: [Move; 2],
+    pub static_eval: i32,
+    pub move_count: usize,
+
+    // CACHED CONTEXT (Must be populated BEFORE recursion)
+    // These define the context of the move stored in `current_move`.
+    pub moved_piece: usize, // Must be 0..11 (White: 0-5, Black: 6-11)
+    pub to_sq: usize,       // 0..63
+    pub is_capture: bool,
+    pub in_check: bool,     // Context: Side-to-move is in check at this node (bucket key)
+    pub stat_score: i32,
+}
+
+impl Default for StackEntry {
+    fn default() -> Self {
+        Self {
+            current_move: Move::default(),
+            excluded_move: Move::default(),
+            killers: [Move::default(); 2],
+            static_eval: 0,
+            move_count: 0,
+            moved_piece: 0,
+            to_sq: 0,
+            is_capture: false,
+            in_check: false,
+            stat_score: 0,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum Limits {
@@ -97,14 +130,18 @@ impl SearchPath {
 }
 
 pub struct SearchData {
-    pub killers: [[Option<Move>; 2]; MAX_PLY + 1],
+    // The search stack
+    pub stack: [StackEntry; MAX_PLY + 10],
+
+    // Global (thread-local) History Tables
     pub history: [[i32; 64]; 64],
     pub capture_history: Box<[[[i32; 6]; 64]; 12]>,
 
     // [Piece][ToSquare] -> Best Reply Move
     pub counter_moves: [[Option<Move>; 64]; 12],
 
-    pub cont_history: Box<ContHistTable>,
+    // New Deep Continuation History
+    pub cont_history: ContinuationHistory,
 
     // NNUE Accumulators (Thread Local)
     pub accumulators: [Accumulator; 2],
@@ -116,22 +153,22 @@ pub struct SearchData {
 impl SearchData {
     pub fn new() -> Self {
         Self {
-            killers: [[None; 2]; MAX_PLY + 1],
+            stack: [StackEntry::default(); MAX_PLY + 10],
             history: [[0; 64]; 64],
             capture_history: Box::new([[[0; 6]; 64]; 12]),
             counter_moves: [[None; 64]; 12],
-            cont_history: Box::new([[[0; 64]; 12]; 768]),
+            cont_history: ContinuationHistory::new(),
             accumulators: [Accumulator::default(); 2],
             nnue_scratch: Box::new(NNUEScratch::default()),
         }
     }
 
     pub fn clear(&mut self) {
-        self.killers = [[None; 2]; MAX_PLY + 1];
+        self.stack.fill(StackEntry::default());
         self.history = [[0; 64]; 64];
         self.capture_history.fill_with(|| [[0; 6]; 64]);
         self.counter_moves = [[None; 64]; 12];
-        self.cont_history.fill_with(|| [[0; 64]; 12]);
+        self.cont_history.clear();
     }
 }
 
@@ -157,10 +194,10 @@ pub struct MovePicker<'a> {
     move_index: usize,
     tt: &'a TranspositionTable,
     captures_only: bool,
-    cont_index: Option<usize>,
     thread_id: Option<usize>,
     params: Option<&'a SearchParameters>,
     is_pv_node: bool,
+    ply: usize,
 }
 
 impl<'a> MovePicker<'a> {
@@ -170,7 +207,6 @@ impl<'a> MovePicker<'a> {
         state: &GameState,
         ply: usize,
         tt_move: Option<Move>,
-        prev_move: Option<Move>,
         captures_only: bool,
         thread_id: Option<usize>,
         params: Option<&'a SearchParameters>,
@@ -178,15 +214,17 @@ impl<'a> MovePicker<'a> {
     ) -> Self {
         let mut killers = [None; 2];
         let mut counter_move = None;
-        let mut cont_index = None;
 
         if !captures_only && ply < MAX_PLY {
-            killers = data.killers[ply];
-            if let Some(pm) = prev_move {
-                let p_piece = get_moved_piece(state, pm);
-                let p_to = pm.target() as usize;
-                counter_move = data.counter_moves[p_piece][p_to];
-                cont_index = Some(p_piece * 64 + p_to);
+            killers = [Some(data.stack[ply].killers[0]), Some(data.stack[ply].killers[1])];
+            if data.stack[ply].killers[0] == Move::default() { killers[0] = None; }
+            if data.stack[ply].killers[1] == Move::default() { killers[1] = None; }
+
+            // Access previous move from stack.
+            // stack[ply] holds the move that led TO this node.
+            let prev = &data.stack[ply];
+            if prev.current_move != Move::default() {
+                counter_move = data.counter_moves[prev.moved_piece][prev.to_sq];
             }
         }
 
@@ -205,10 +243,10 @@ impl<'a> MovePicker<'a> {
             move_index: 0,
             tt,
             captures_only,
-            cont_index,
             thread_id,
             params,
             is_pv_node,
+            ply,
         }
     }
 
@@ -267,11 +305,7 @@ impl<'a> MovePicker<'a> {
                             None => break, // No more moves
                         };
 
-                        // Check if we ran out of "Good" captures (score < MIN_WINNING_SEE_SCORE)
-                        // self.move_index has been incremented by pick_best_move,
-                        // so the move we just picked is at self.move_index - 1
                         if self.move_scores[self.move_index - 1] < MIN_WINNING_SEE_SCORE {
-                             // Put back and transition to next stage
                              self.move_index -= 1;
                              break;
                         }
@@ -280,11 +314,9 @@ impl<'a> MovePicker<'a> {
                              continue;
                         }
 
-                        // Lazy SEE
                         if !see_ge(state, mv, 0) {
-                            // Penalize
                             self.move_scores[self.move_index - 1] -= WINNING_CAPTURE_BONUS;
-                            self.move_index -= 1; // Put back
+                            self.move_index -= 1;
                             continue;
                         }
 
@@ -371,9 +403,6 @@ impl<'a> MovePicker<'a> {
         let mut best_score = -INFINITY;
         let mut best_idx = self.move_index;
 
-        // Optimization: if we are in YieldRemaining, we might have mixed scores (negatives from bad captures, positives from quiets).
-        // Standard sort is fine.
-
         for i in self.move_index..self.move_count {
             if self.move_scores[i] > best_score {
                 best_score = self.move_scores[i];
@@ -406,13 +435,12 @@ impl<'a> MovePicker<'a> {
             let attacker = get_piece_type_safe(state, mv.source());
             let victim = get_victim_type(state, mv.target());
 
-            // Base WINNING_CAPTURE_BONUS
             let mut score = WINNING_CAPTURE_BONUS;
 
             if victim < 12 {
                  score += mvv_lva[victim % 6][attacker % 6];
             } else {
-                 score += 100; // En Passant or similar?
+                 score += 100;
             }
 
             if attacker < 12 && victim < 12 {
@@ -429,7 +457,6 @@ impl<'a> MovePicker<'a> {
 
         let jitter_base = if let Some(tid) = self.thread_id {
             if tid > 0 {
-                // Pseudo-random seed from hash and thread id
                 state.hash.wrapping_add(tid as u64)
             } else { 0 }
         } else { 0 };
@@ -438,40 +465,65 @@ impl<'a> MovePicker<'a> {
             let mv = self.move_list[i];
             let from = mv.source() as usize;
             let to = mv.target() as usize;
+            let piece = get_piece_type_safe(state, mv.source());
 
             let mut score = data.history[from][to];
-            if let Some(c_idx) = self.cont_index {
-                let piece = get_piece_type_safe(state, mv.source());
-                if piece < 12 {
-                    score += data.cont_history[c_idx][piece][to];
+
+            // Deep Continuation History Logic
+            // Check plies 1, 2, 4, 6 back
+            // stack[ply] is "previous move" (back 1).
+            // stack[ply-1] is "back 2", etc.
+
+            // Back 1
+            let prev = &data.stack[self.ply];
+            if prev.current_move != Move::default() {
+                 score += data.cont_history.get(prev.in_check, prev.is_capture, prev.moved_piece, prev.to_sq, piece, to) as i32;
+            }
+
+            // Back 2
+            if self.ply >= 1 {
+                let prev2 = &data.stack[self.ply - 1];
+                if prev2.current_move != Move::default() {
+                    score += data.cont_history.get(prev2.in_check, prev2.is_capture, prev2.moved_piece, prev2.to_sq, piece, to) as i32;
                 }
             }
 
-            // Threat Logic
-            // Bonus for moving away from pawn attack
+            // Back 4
+            if self.ply >= 3 {
+                let prev4 = &data.stack[self.ply - 3];
+                if prev4.current_move != Move::default() {
+                    score += data.cont_history.get(prev4.in_check, prev4.is_capture, prev4.moved_piece, prev4.to_sq, piece, to) as i32;
+                }
+            }
+
+             // Back 6
+             if self.ply >= 5 {
+                let prev6 = &data.stack[self.ply - 5];
+                if prev6.current_move != Move::default() {
+                    score += data.cont_history.get(prev6.in_check, prev6.is_capture, prev6.moved_piece, prev6.to_sq, piece, to) as i32;
+                }
+            }
+
             if enemy_pawn_attacks.get_bit(from as u8) {
                 score += 500;
             }
-            // Penalty for moving into pawn attack
             if enemy_pawn_attacks.get_bit(to as u8) {
                 score -= 1000;
             }
 
             if jitter_base != 0 {
-                // Noise in [-16, +15]
                 let noise = ((jitter_base.wrapping_add(mv.0 as u64) % 32) as i32) - 16;
                 score += noise;
             }
 
             self.move_scores[i] = score;
         }
-
     }
 }
 
 pub struct SearchInfo<'a> {
     pub data: &'a mut SearchData,
-    pub static_evals: [i32; MAX_PLY + 1],
+    // pub static_evals: [i32; MAX_PLY + 1], // Now in stack
     pub nodes: u64,
     pub global_nodes: Option<&'a AtomicU64>,
     pub seldepth: u8,
@@ -483,7 +535,8 @@ pub struct SearchInfo<'a> {
     pub main_thread: bool,
     pub params: &'a SearchParameters,
     pub thread_id: Option<usize>,
-    pub path: SearchPath, // Optimized
+    pub path: SearchPath,
+    pub tt_hit_avg: i32, // TT Hit Average (0..1024)
 }
 
 impl<'a> SearchInfo<'a> {
@@ -499,7 +552,6 @@ impl<'a> SearchInfo<'a> {
     ) -> Self {
         Self {
             data,
-            static_evals: [0; MAX_PLY + 1],
             nodes: 0,
             global_nodes,
             seldepth: 0,
@@ -512,6 +564,7 @@ impl<'a> SearchInfo<'a> {
             params,
             thread_id,
             path: SearchPath::new(),
+            tt_hit_avg: 0,
         }
     }
 
@@ -733,26 +786,6 @@ fn update_capture_history(info: &mut SearchInfo, mv: Move, state: &GameState, bo
     }
 }
 
-fn update_continuation_history(
-    info: &mut SearchInfo,
-    mv: Move,
-    prev_move: Option<Move>,
-    state: &GameState,
-    bonus: i32,
-) {
-    if let Some(pm) = prev_move {
-        let p_piece = get_moved_piece(state, pm);
-        let p_to = pm.target() as usize;
-        let idx = p_piece * 64 + p_to;
-
-        let c_piece = get_piece_type_safe(state, mv.source());
-        let c_to = mv.target() as usize;
-
-        update_history(&mut info.data.cont_history[idx][c_piece][c_to], bonus);
-    }
-}
-
-
 #[inline(always)]
 fn get_piece_type_safe(state: &GameState, square: u8) -> usize {
     state.board[square as usize] as usize
@@ -876,7 +909,8 @@ fn quiescence(
         }
     }
 
-    let mut picker = MovePicker::new(info.data, info.tt, state, ply, None, None, true, info.thread_id, Some(info.params), false);
+    // Use default values for MovePicker in QSearch
+    let mut picker = MovePicker::new(info.data, info.tt, state, ply, None, true, info.thread_id, Some(info.params), false);
 
     let mut legal_moves_found = 0;
 
@@ -995,6 +1029,11 @@ pub fn search(
     // Copy history to stack-based SearchPath
     info.path.load_from(history);
 
+    // Initialize Stack Root
+    info.data.stack[0] = StackEntry::default();
+    // Pre-populate root in_check
+    info.data.stack[0].in_check = is_in_check(state);
+
     let mut last_score = 0;
 
     let _nodes_at_root = 0;
@@ -1002,8 +1041,11 @@ pub fn search(
     let mut root_state = *state;
 
     // --- THREAD DISTRIBUTION LOGIC START ---
-    // Option 1: Same depth for all threads + move ordering jitter
     let mut depth = 1;
+
+    // Time Management Variables
+    let mut prev_best_move: Option<Move> = None;
+    let mut best_move_changes = 0;
 
     while depth <= max_depth {
         info.root_depth = depth;
@@ -1028,7 +1070,7 @@ pub fn search(
             }
 
             score = negamax(
-                &mut root_state, depth, alpha, beta, &mut info, 0, true, None, None, None, false,
+                &mut root_state, depth, alpha, beta, &mut info, 0, true, false,
             );
             if info.stopped {
                 break;
@@ -1063,10 +1105,35 @@ pub fn search(
             break;
         }
 
+        // Time Management Updates (Root Loop)
+        if main_thread {
+            let current_best_move = tt.get_move(state.hash, state, thread_id);
+            if current_best_move != prev_best_move {
+                best_move_changes += 1;
+                prev_best_move = current_best_move;
+            }
+
+            if let Limits::FixedTime(ref mut tm) = info.limits {
+                // Instability Factor Logic
+                // Instability factor: Base 1.0, +15% per change, max 1.6x
+                let instability = (1.0 + 0.15 * best_move_changes as f64).min(1.6);
+
+                // Apply to BASE soft limit
+                let new_soft = (tm.base_soft_limit as f64 * instability) as u128;
+
+                // Clamp to hard limit
+                tm.soft_limit = new_soft.min(tm.hard_limit);
+            }
+        }
+
         let mut forced_margin = None;
         if let Limits::FixedTime(ref mut tm) = info.limits {
             if main_thread {
                 let best_move_found = tt.get_move(state.hash, state, thread_id).unwrap_or_default();
+
+                // Legacy report - might still update hard limit which is fine,
+                // but soft limit is overwritten above by our new logic if needed.
+                // Or we can rely on report_completed_depth for other stats.
                 tm.report_completed_depth(depth as i32, score, best_move_found);
 
                 forced_margin = tm.check_for_forced_move(depth as i32);
@@ -1202,10 +1269,6 @@ fn negamax(
     info: &mut SearchInfo,
     ply: usize,
     is_pv: bool,
-    // Removed path arg, uses info.path
-    prev_move: Option<Move>,
-    prev_prev_move: Option<Move>,
-    excluded_move: Option<Move>,
     was_sacrifice: bool,
 ) -> i32 {
     if state.halfmove_clock >= 100 {
@@ -1260,7 +1323,7 @@ fn negamax(
         return 0;
     }
 
-    let in_check = is_check(state, state.side_to_move);
+    let in_check = info.data.stack[ply].in_check; // Use stack context
 
     let mut new_depth = depth;
     if in_check {
@@ -1270,6 +1333,10 @@ fn negamax(
     if new_depth == 0 {
         return quiescence(state, alpha, beta, info, ply);
     }
+
+    let excluded_move = info.data.stack[ply].excluded_move;
+    let prev_move = if ply > 0 { Some(info.data.stack[ply - 1].current_move) } else { None };
+    // let prev_prev_move = if ply > 1 { Some(info.data.stack[ply - 2].current_move) } else { None };
 
     let mut extensions = 0;
     if let Some(pm) = prev_move {
@@ -1287,23 +1354,38 @@ fn negamax(
 
     let depth_with_ext = new_depth.saturating_add(extensions);
 
+    let tt_hit;
     if let Some((score, d, flag, mv)) = info.tt.probe_data(state.hash, state, info.thread_id) {
+        tt_hit = true;
         tt_score = score;
         tt_depth = d;
         tt_flag = flag;
         tt_move = mv;
 
-        if ply > 0 && excluded_move.is_none() && d >= depth_with_ext {
+        if ply > 0 && excluded_move == Move::default() && d >= depth_with_ext {
             if flag == FLAG_EXACT {
+                // Update TT hit avg
+                info.tt_hit_avg += (1024 - info.tt_hit_avg) >> 6;
                 return score;
             }
             if flag == FLAG_ALPHA && score <= alpha {
+                info.tt_hit_avg += (1024 - info.tt_hit_avg) >> 6;
                 return alpha;
             }
             if flag == FLAG_BETA && score >= beta {
+                info.tt_hit_avg += (1024 - info.tt_hit_avg) >> 6;
                 return beta;
             }
         }
+    } else {
+        tt_hit = false;
+    }
+
+    // TT Hit Avg Update
+    if tt_hit {
+        info.tt_hit_avg += (1024 - info.tt_hit_avg) >> 6;
+    } else {
+        info.tt_hit_avg -= info.tt_hit_avg >> 6;
     }
 
     // Internal Iterative Reduction (IIR)
@@ -1311,25 +1393,24 @@ fn negamax(
         && ply > 0
         && !is_pv
         && !in_check
-        && excluded_move.is_none()
+        && excluded_move == Move::default()
         && tt_move.is_none()
         && new_depth >= 6
     {
         new_depth -= 1;
     }
 
-    let mut raw_eval = -INFINITY;
     let static_eval = if in_check {
         -INFINITY
     } else {
-        raw_eval = eval::evaluate(state, Some(&mut info.data.accumulators), Some(&mut info.data.nnue_scratch), alpha, beta);
-        info.static_evals[ply] = raw_eval;
-        raw_eval
+        let ev = eval::evaluate(state, Some(&mut info.data.accumulators), Some(&mut info.data.nnue_scratch), alpha, beta);
+        info.data.stack[ply].static_eval = ev;
+        ev
     };
 
-    let improving = ply >= 2 && !in_check && static_eval >= info.static_evals[ply - 2];
+    let improving = ply >= 2 && !in_check && static_eval >= info.data.stack[ply - 2].static_eval;
 
-    if !is_pv && !in_check && excluded_move.is_none() && new_depth <= 3 {
+    if !is_pv && !in_check && excluded_move == Move::default() && new_depth <= 3 {
         let razor_margin = info.params.razoring_base + (new_depth as i32 * info.params.razoring_multiplier);
         if static_eval + razor_margin < alpha {
             let v = quiescence(state, alpha, beta, info, ply);
@@ -1341,7 +1422,7 @@ fn negamax(
 
     if !is_pv
         && !in_check
-        && excluded_move.is_none()
+        && excluded_move == Move::default()
         && new_depth < 7
         && static_eval - (info.params.rfp_margin * new_depth as i32) >= beta
     {
@@ -1353,7 +1434,7 @@ fn negamax(
         && ply > 0
         && !in_check
         && !is_pv
-        && excluded_move.is_none()
+        && excluded_move == Move::default()
         && static_eval >= beta
         && !was_sacrifice
     {
@@ -1373,6 +1454,11 @@ fn negamax(
             let reduction_depth = info.params.nmp_base + new_depth as i32 / info.params.nmp_divisor;
             let unmake_info = state.make_null_move_inplace();
 
+            // Null move: populate next stack entry simply
+            let next_ply = ply + 1;
+            info.data.stack[next_ply] = StackEntry::default(); // Reset or default
+            info.data.stack[next_ply].in_check = false; // Null move implies we are not in check
+
             let reduced_depth = new_depth.saturating_sub(reduction_depth as u8);
             let score = -negamax(
                 state,
@@ -1380,11 +1466,8 @@ fn negamax(
                 -beta,
                 -beta + 1,
                 info,
-                ply + 1,
+                next_ply,
                 false,
-                None,
-                None,
-                None,
                 false,
             );
 
@@ -1402,7 +1485,7 @@ fn negamax(
     if !is_pv
         && new_depth >= 5
         && !in_check
-        && excluded_move.is_none()
+        && excluded_move == Move::default()
         && beta.abs() < MATE_SCORE
     {
         let prob_beta = beta + 200;
@@ -1416,9 +1499,6 @@ fn negamax(
             info,
             ply + 1,
             false,
-            prev_move,
-            prev_prev_move,
-            None,
             was_sacrifice,
         );
 
@@ -1437,9 +1517,6 @@ fn negamax(
             info,
             ply,
             is_pv,
-            prev_move,
-            prev_prev_move,
-            None,
             was_sacrifice,
         );
         if let Some(mv) = info.tt.get_move(state.hash, state, info.thread_id) {
@@ -1451,7 +1528,7 @@ fn negamax(
     if ply > 0
         && new_depth >= 8
         && tt_move.is_some()
-        && excluded_move.is_none()
+        && excluded_move == Move::default()
         && tt_depth >= new_depth.saturating_sub(3)
         && tt_flag == FLAG_EXACT
         && tt_score.abs() < MATE_SCORE
@@ -1459,6 +1536,9 @@ fn negamax(
         let margin = 2 * new_depth as i32;
         let singular_beta = tt_score.saturating_sub(margin);
         let reduced_depth = new_depth.saturating_sub(3);
+
+        // Populate excluded move in stack
+        info.data.stack[ply].excluded_move = tt_move.unwrap();
 
         let score = negamax(
             state,
@@ -1468,11 +1548,11 @@ fn negamax(
             info,
             ply,
             false,
-            prev_move,
-            prev_prev_move,
-            tt_move,
             was_sacrifice,
         );
+
+        // Restore excluded move
+        info.data.stack[ply].excluded_move = Move::default();
 
         if score < singular_beta {
             extension = 1;
@@ -1484,12 +1564,13 @@ fn negamax(
         }
     }
 
-    let mut picker = MovePicker::new(info.data, info.tt, state, ply, tt_move, prev_move, false, info.thread_id, Some(info.params), is_pv);
+    let mut picker = MovePicker::new(info.data, info.tt, state, ply, tt_move, false, info.thread_id, Some(info.params), is_pv);
 
     let mut max_score = -INFINITY;
     let mut best_move = None;
     let mut moves_searched = 0;
     let mut quiets_checked = 0;
+    let cut_node = beta - alpha == 1;
 
     info.path.push(state.hash);
 
@@ -1499,12 +1580,17 @@ fn negamax(
         movegen::get_pinned_mask(state, state.side_to_move)
     };
 
+    // Prepare for loop
+    let next_ply = ply + 1;
+    let _this_moved_piece_dummy = 0; // Not used yet
+
     while let Some(mv) = picker.next_move(state, info.data) {
-        if Some(mv) == excluded_move {
+        if Some(mv) == excluded_move.into() {
             continue;
         }
 
-        let is_quiet = !mv.is_capture() && mv.promotion().is_none();
+        let is_capture_move = mv.is_capture();
+        let is_quiet = !is_capture_move && mv.promotion().is_none();
 
         // Futility Pruning
         if ENABLE_LMP && new_depth < 5 && !in_check && !is_pv && is_quiet {
@@ -1532,7 +1618,7 @@ fn negamax(
         }
 
         // SEE Gating for Captures (Main Search)
-        if ENABLE_SEE_GATE_MAIN && mv.is_capture() && moves_searched >= 6 && new_depth <= 8 && !in_check {
+        if ENABLE_SEE_GATE_MAIN && is_capture_move && moves_searched >= 6 && new_depth <= 8 && !in_check {
              if !gives_check_fast(state, mv) && !see_ge(state, mv, 0) {
                  continue;
              }
@@ -1548,42 +1634,27 @@ fn negamax(
              continue;
         }
 
+        // 1. POPULATE STACK (Pre-recursion)
+        info.data.stack[next_ply].current_move = mv;
+        info.data.stack[next_ply].to_sq = mv.target() as usize;
+        info.data.stack[next_ply].moved_piece = get_piece_type_safe(state, mv.source());
+        info.data.stack[next_ply].is_capture = is_capture_move;
+        info.data.stack[next_ply].in_check = in_check; // Context before move
+        // Note: is_in_check() for next state will be done at start of next negamax or we can precompute?
+        // Spec says: "stack[next_ply].in_check = state.in_check(); // Store context BEFORE move is made"
+        // Yes, 'in_check' here is from the CURRENT state (before move).
+
         let unmake_info = state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
 
-        let our_side = state.side_to_move; // This is the side that just moved (opponent of current state side)
-        // Correct logic: state.side_to_move is flipped in make_move_inplace.
-        // So we want to check if the side that *just moved* (1 - state.side_to_move) is in check.
-        // Wait, make_move_inplace flips side.
-        // So state.side_to_move is now the opponent.
-        // We want to check if 'mover' is in check.
+        let our_side = state.side_to_move; // Side AFTER move (opponent)
         let mover = 1 - our_side;
         let mover_king_type = if mover == WHITE { K } else { k };
         let king_sq = state.bitboards[mover_king_type].get_lsb_index() as u8;
 
-        // Optimization: If not previously in check, and piece was not pinned, and not King move, and not En Passant...
-        // We can assume legality.
-        // We need 'from' square.
         let from = mv.source();
-        let piece = state.board[mv.target() as usize] as usize; // Piece is now at target
-        // piece type can be retrieved from target.
-        // King type is 5 or 11.
+        let piece = state.board[mv.target() as usize] as usize;
 
         let is_king = piece == K || piece == k;
-        let is_ep = unmake_info.en_passant != 64 && (piece == P || piece == p) && mv.target() == unmake_info.en_passant;
-        // Wait, unmake_info.en_passant is the OLD EP square.
-        // Logic: if move is EP capture.
-        // state.en_passant was cleared/changed.
-        // We can check if move is EP by looking at the move struct logic or reconstructed.
-        // Simpler: if mv.is_capture() and target is empty? No, target has piece now.
-        // In unmake_info, we know if it was EP? No.
-        // But we know from movegen logic: if it's EP, it's tricky.
-        // Let's rely on `mv.is_capture()` and `piece == P`.
-        // Actually, safer to just check `is_ep` properly or assume full check for EP.
-        // `is_move_pseudo_legal` logic for EP: target empty + capture flag.
-        // Here we already made the move.
-        // Let's just check if it was EP.
-        // In `make_move_inplace`: `if (piece_type == P || piece_type == p) && target == old_en_passant` -> EP.
-        // We have `unmake_info.en_passant` (old).
         let was_ep = (piece == P || piece == p) && mv.target() == unmake_info.en_passant;
 
         let needs_check = in_check || is_king || was_ep || pinned.get_bit(from);
@@ -1612,11 +1683,8 @@ fn negamax(
                 -beta,
                 -alpha,
                 info,
-                ply + 1,
+                next_ply,
                 true,
-                Some(mv),
-                prev_move,
-                None,
                 false,
             );
         } else {
@@ -1631,13 +1699,14 @@ fn negamax(
                 && !in_check
                 && Some(mv) != tt_move
                 && (ply >= MAX_PLY
-                    || (info.data.killers[ply][0] != Some(mv)
-                        && info.data.killers[ply][1] != Some(mv)))
+                    || (info.data.stack[ply].killers[0] != mv
+                        && info.data.stack[ply].killers[1] != mv))
             {
                 // Counter-move Exception
                 let is_counter = if ply > 0 {
-                    if let Some(pm) = prev_move {
-                        let p_piece = get_moved_piece(state, pm);
+                    let pm = info.data.stack[ply-1].current_move;
+                    if pm != Move::default() {
+                        let p_piece = info.data.stack[ply-1].moved_piece;
                         let p_to = pm.target() as usize;
                         info.data.counter_moves[p_piece][p_to] == Some(mv)
                     } else { false }
@@ -1645,7 +1714,7 @@ fn negamax(
 
                 // Pawn push to 6th/7th Exception
                 let src_sq = mv.source();
-                let piece_type = state.board[src_sq as usize] as usize % 6; // Assuming 0=Pawn
+                let piece_type = state.board[src_sq as usize] as usize % 6;
 
                 let is_advanced_pawn = piece_type == 0 && (
                     (state.side_to_move == WHITE && mv.target() >= 48) ||
@@ -1663,6 +1732,16 @@ fn negamax(
                         lmr_r += 1;
                     }
 
+                    // LMR Logic from Spec:
+                    // High hit rate (>37%) -> reduce less (trust search stability)
+                    if info.tt_hit_avg > 384 {
+                        lmr_r -= 1;
+                    }
+                    // Cut Node (beta-alpha==1) -> reduce more (expect fail-high)
+                    if cut_node {
+                        lmr_r += 1;
+                    }
+
                     reduction = lmr_r.max(0) as u8;
                 }
             }
@@ -1674,11 +1753,8 @@ fn negamax(
                 -alpha - 1,
                 -alpha,
                 info,
-                ply + 1,
+                next_ply,
                 false,
-                Some(mv),
-                prev_move,
-                None,
                 false,
             );
 
@@ -1690,11 +1766,8 @@ fn negamax(
                     -alpha - 1,
                     -alpha,
                     info,
-                    ply + 1,
+                    next_ply,
                     false,
-                    Some(mv),
-                    prev_move,
-                    None,
                     false,
                 );
             }
@@ -1708,11 +1781,8 @@ fn negamax(
                     -beta,
                     -alpha,
                     info,
-                    ply + 1,
+                    next_ply,
                     true,
-                    Some(mv),
-                    prev_move,
-                    None,
                     false,
                 );
             }
@@ -1740,60 +1810,87 @@ fn negamax(
             best_move = Some(mv);
             if score > alpha {
                 alpha = score;
-                if is_quiet {
-                    let from = mv.source() as usize;
-                    let to = mv.target() as usize;
-                    let bonus = (new_depth as i32) * (new_depth as i32);
-
-                    update_history(&mut info.data.history[from][to], bonus);
-
-                    if let Some(pm) = prev_move {
-                        let p_piece = get_moved_piece(state, pm);
-                        let p_to = pm.target() as usize;
-                        let idx = p_piece * 64 + p_to;
-                        let c_piece = get_piece_type_safe(state, mv.source());
-                        let c_to = mv.target() as usize;
-                        update_history(&mut info.data.cont_history[idx][c_piece][c_to], bonus);
-
-                        info.data.counter_moves[p_piece][pm.target() as usize] = Some(mv);
-                    }
-                } else {
-                    update_capture_history(
-                        info,
-                        mv,
-                        state,
-                        (new_depth as i32) * (new_depth as i32),
-                    );
-                }
-            }
-        } else {
-            if is_quiet {
-                let from = mv.source() as usize;
-                let to = mv.target() as usize;
-                let bonus = (new_depth as i32) * (new_depth as i32);
-                update_history(&mut info.data.history[from][to], -bonus);
-
-                if let Some(pm) = prev_move {
-                    let p_piece = get_moved_piece(state, pm);
-                    let p_to = pm.target() as usize;
-                    let idx = p_piece * 64 + p_to;
-                    let c_piece = get_piece_type_safe(state, mv.source());
-                    let c_to = mv.target() as usize;
-                    update_history(&mut info.data.cont_history[idx][c_piece][c_to], -bonus);
-                }
+                // History updates moved to below (for quiet/capture separation if needed)
+                // But fail-high update handles beta cutoff.
+                // If we improved alpha but didn't cutoff, we still update history?
+                // Standard engine logic updates history on cutoff.
+                // Usually history is updated on Quiet Best Move (if not cutoff) or Quiet Cutoff.
+                // Wait, spec says: "3. FAIL HIGH UPDATE (Post-recursion) if score >= beta".
+                // So we do it inside the check.
             }
         }
 
-        if alpha >= beta {
+        if score >= beta {
+            // FAIL HIGH UPDATE
+            let curr_entry = info.data.stack[next_ply];
+
+            // Standard Bonus
+            let raw_bonus = (new_depth as i32 * new_depth as i32).min(400);
+            let bonus = if curr_entry.is_capture { raw_bonus / 2 } else { raw_bonus };
+
             if is_quiet {
-                if ply < MAX_PLY {
-                    info.data.killers[ply][1] = info.data.killers[ply][0];
-                    info.data.killers[ply][0] = Some(mv);
+                 let from = mv.source() as usize;
+                 let to = mv.target() as usize;
+                 update_history(&mut info.data.history[from][to], bonus);
+
+                 if ply < MAX_PLY {
+                    info.data.stack[ply].killers[1] = info.data.stack[ply].killers[0];
+                    info.data.stack[ply].killers[0] = mv;
                 }
             } else {
-                update_capture_history(info, mv, state, (new_depth as i32) * (new_depth as i32));
+                 update_capture_history(info, mv, state, bonus);
             }
-            break;
+
+            // Update CMH for plies 1, 2, 4, 6 back relative to current move
+            for &back in &[1, 2, 4, 6] {
+                if next_ply >= back {
+                    let prev_idx = next_ply - back;
+                    let prev_entry = info.data.stack[prev_idx];
+
+                    if prev_entry.current_move != Move::default() {
+                        info.data.cont_history.update(
+                            curr_entry.in_check,
+                            curr_entry.is_capture,
+                            prev_entry.moved_piece, prev_entry.to_sq,
+                            curr_entry.moved_piece, curr_entry.to_sq,
+                            bonus
+                        );
+                    }
+                }
+            }
+
+            break; // Beta Cutoff
+        } else {
+             // Score < Beta (implied by loop continuation, unless we break)
+             // Penalize quiet moves that failed low?
+             // User didn't explicitly specify penalty logic for CMH, but standard engines do.
+             // "Gravity Update: entry += bonus - (entry * |bonus|) / 16384"
+             // Usually we pass -bonus for fail low.
+             if is_quiet {
+                 let from = mv.source() as usize;
+                 let to = mv.target() as usize;
+                 let penalty_bonus = -((new_depth as i32 * new_depth as i32).min(400));
+                 update_history(&mut info.data.history[from][to], penalty_bonus);
+
+                  // Update CMH for plies 1, 2, 4, 6 back
+                for &back in &[1, 2, 4, 6] {
+                    if next_ply >= back {
+                        let prev_idx = next_ply - back;
+                        let prev_entry = info.data.stack[prev_idx];
+                         let curr_entry = info.data.stack[next_ply];
+
+                        if prev_entry.current_move != Move::default() {
+                            info.data.cont_history.update(
+                                curr_entry.in_check,
+                                curr_entry.is_capture,
+                                prev_entry.moved_piece, prev_entry.to_sq,
+                                curr_entry.moved_piece, curr_entry.to_sq,
+                                penalty_bonus
+                            );
+                        }
+                    }
+                }
+             }
         }
     }
 
@@ -1814,11 +1911,47 @@ fn negamax(
     } else {
         FLAG_EXACT
     };
-    if excluded_move.is_none() {
+    if excluded_move == Move::default() {
         info.tt
             .store(state.hash, max_score, best_move, new_depth, flag, info.thread_id);
     }
     max_score
+}
+
+fn is_forced_move(
+    state: &mut GameState,
+    margin: i32,
+    info: &mut SearchInfo,
+    best_move: Move,
+    value: i32,
+    depth: u8
+) -> bool {
+    let r_beta = (value - margin).max(-MATE_SCORE + 1);
+    let r_depth = (depth.saturating_sub(1)) / 2;
+
+    // Set excluded move at root
+    info.data.stack[0].excluded_move = best_move;
+
+    // Check if other moves fail low
+    let score = negamax(
+        state,
+        r_depth,
+        r_beta - 1,
+        r_beta,
+        info,
+        0,
+        false,
+        false,
+    );
+
+    // Clear excluded move
+    info.data.stack[0].excluded_move = Move::default();
+
+    score < r_beta
+}
+
+pub(crate) fn see_ge(state: &GameState, mv: Move, threshold: i32) -> bool {
+    see(state, mv) >= threshold
 }
 
 pub fn is_check(state: &GameState, side: usize) -> bool {
@@ -1898,36 +2031,4 @@ pub fn format_move_uci(mv: Move, state: &GameState) -> String {
         }
     }
     s
-}
-
-fn is_forced_move(
-    state: &mut GameState,
-    margin: i32,
-    info: &mut SearchInfo,
-    best_move: Move,
-    value: i32,
-    depth: u8
-) -> bool {
-    let r_beta = (value - margin).max(-MATE_SCORE + 1);
-    let r_depth = (depth.saturating_sub(1)) / 2;
-
-    // Check if other moves fail low
-    let score = negamax(
-        state,
-        r_depth,
-        r_beta - 1,
-        r_beta,
-        info,
-        0,
-        false,
-        None, None,
-        Some(best_move), // Exclude the best move
-        false
-    );
-
-    score < r_beta
-}
-
-pub(crate) fn see_ge(state: &GameState, mv: Move, threshold: i32) -> bool {
-    see(state, mv) >= threshold
 }
