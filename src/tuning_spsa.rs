@@ -276,6 +276,7 @@ fn play_game(
 
         let params = if state.side_to_move == WHITE { white } else { black };
 
+        let mut stack = [search::StackEntry::default(); search::STACK_SIZE];
         let (score, best_move) = search::search(
             &state,
             limit,
@@ -284,6 +285,7 @@ fn play_game(
             false,
             &history,
             &mut sd,
+            &mut stack,
             params,
             None,
             None,

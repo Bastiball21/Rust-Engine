@@ -106,6 +106,7 @@ pub fn run_cli() {
              let mut data = search::SearchData::new();
              let params = parameters::SearchParameters::default();
              let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+             let mut stack = [search::StackEntry::default(); search::STACK_SIZE];
 
              println!("Running Benchmark: Startpos Depth 14");
              search::search(
@@ -116,6 +117,7 @@ pub fn run_cli() {
                  true,
                  &[],
                  &mut data,
+                 &mut stack,
                  &params,
                  None,
                  Some(0)
