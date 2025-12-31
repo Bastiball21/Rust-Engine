@@ -196,7 +196,7 @@ let save_format: Vec<SavedFormat> = {
         eval_scale: 400.0,
         steps: TrainingSteps {
             batch_size: 16_384,
-            batches_per_superbatch: 8728,
+            batches_per_superbatch: 8917,
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
