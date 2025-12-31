@@ -36,16 +36,29 @@ fn main() {
     let final_lr = 0.001 * 0.3f32.powi(5);
     let superbatches = 40;
 
-    // Architecture: 768 -> 256 -> 32 -> 32 -> 32 -> 1
-    // L1: Accumulator (256)
-    // L2: Dense (32)
-    // L3: Dense (32)
-    // L4: Dense (32)
-    // OUT: Dense (1)
-    let l1_size = 256;
-    let l2_size = 32;
-    let l3_size = 32;
-    let l4_size = 32;
+// Architecture:
+// default: 768 -> 256 -> 32 -> 32 -> 32 -> 1
+// nnue_512_64: 768 -> 512 -> 64 -> 1
+let l1_size: usize;
+let l2_size: usize;
+let l3_size: usize;
+let l4_size: usize;
+
+#[cfg(not(feature = "nnue_512_64"))]
+{
+    l1_size = 256;
+    l2_size = 32;
+    l3_size = 32;
+    l4_size = 32;
+}
+
+#[cfg(feature = "nnue_512_64")]
+{
+    l1_size = 512;
+    l2_size = 64;
+    l3_size = 0;
+    l4_size = 0;
+}
 
     // Parse command line arguments for dataset paths
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -91,15 +104,14 @@ fn main() {
     // 32 Buckets (Standard Mirrored)
     let buckets = ChessBucketsMirrored::new(std::array::from_fn(|i| i));
 
-    let mut trainer = ValueTrainerBuilder::default()
-        .use_devices(vec![0])
-        .dual_perspective()
-        .optimiser(AdamW)
-        .inputs(buckets)
-        .save_format(&[
+// Save format depends on architecture
+let save_format: Vec<SavedFormat> = {
+    #[cfg(not(feature = "nnue_512_64"))]
+    {
+        vec![
             // Layer 0 (Accumulator): 768 -> 256 (SCReLU)
-            SavedFormat::id("l0w").round().quantise::<i16>(255), // Weights
-            SavedFormat::id("l0b").round().quantise::<i16>(255), // Bias
+            SavedFormat::id("l0w").round().quantise::<i16>(255),
+            SavedFormat::id("l0b").round().quantise::<i16>(255),
 
             // Layer 1: 256 -> 32 (ClippedReLU)
             SavedFormat::id("l1w").round().quantise::<i16>(64),
@@ -115,51 +127,68 @@ fn main() {
 
             // Layer 4: 32 -> 1 (Raw)
             SavedFormat::id("l4w").round().quantise::<i16>(64),
-            SavedFormat::id("l4b").round().quantise::<i32>(255 * 64 * 127), // Output bias
-        ])
+            SavedFormat::id("l4b").round().quantise::<i32>(255 * 64 * 127),
+        ]
+    }
+
+    #[cfg(feature = "nnue_512_64")]
+    {
+        vec![
+            // Layer 0 (Accumulator): 768 -> 512 (SCReLU)
+            SavedFormat::id("l0w").round().quantise::<i16>(255),
+            SavedFormat::id("l0b").round().quantise::<i16>(255),
+
+            // Layer 1: 512 -> 64 (ClippedReLU)
+            SavedFormat::id("l1w").round().quantise::<i16>(64),
+            SavedFormat::id("l1b").round().quantise::<i16>(64 * 127),
+
+            // Output: 64 -> 1 (Raw) [kept id "l2" to match engine loader]
+            SavedFormat::id("l2w").round().quantise::<i16>(64),
+            SavedFormat::id("l2b").round().quantise::<i32>(255 * 64 * 127),
+        ]
+    }
+};
+
+    let mut trainer = ValueTrainerBuilder::default()
+        .use_devices(vec![0])
+        .dual_perspective()
+        .optimiser(AdamW)
+        .inputs(buckets)
+        .save_format(&save_format)
         .loss_fn(|output: NetworkBuilderNode<BackendMarker>, target: NetworkBuilderNode<BackendMarker>| {
             output.sigmoid().squared_error(target)
         })
         .build(|builder: &NetworkBuilder<BackendMarker>, stm_inputs: NetworkBuilderNode<BackendMarker>, ntm_inputs: NetworkBuilderNode<BackendMarker>| {
-            // Layer 0: 768 -> 256
-            let l0 = builder.new_affine("l0", stm_inputs.annotated_node().shape.size(), l1_size);
+    // Layer 0: 768 -> L1
+    let l0 = builder.new_affine("l0", stm_inputs.annotated_node().shape.size(), l1_size);
 
-            // Layer 1: 256 -> 32
-            // Input is 256 (STM only).
-            let l1 = builder.new_affine("l1", l1_size, l2_size);
+    // Shared L0 forward pass
+    let stm0 = l0.forward(stm_inputs).screlu();
+    let ntm0 = l0.forward(ntm_inputs).screlu();
+    let combined = stm0 - ntm0;
 
-            // Layer 2: 32 -> 32
-            let l2 = builder.new_affine("l2", l2_size, l3_size);
+    #[cfg(not(feature = "nnue_512_64"))]
+    {
+        let l1 = builder.new_affine("l1", l1_size, l2_size);
+        let l2 = builder.new_affine("l2", l2_size, l3_size);
+        let l3 = builder.new_affine("l3", l3_size, l4_size);
+        let l4 = builder.new_affine("l4", l4_size, 1);
 
-            // Layer 3: 32 -> 32
-            let l3 = builder.new_affine("l3", l3_size, l4_size);
+        let h1 = l1.forward(combined).crelu();
+        let h2 = l2.forward(h1).crelu();
+        let h3 = l3.forward(h2).crelu();
+        l4.forward(h3)
+    }
 
-            // Layer 4: 32 -> 1
-            let l4 = builder.new_affine("l4", l4_size, 1);
+    #[cfg(feature = "nnue_512_64")]
+    {
+        let l1 = builder.new_affine("l1", l1_size, l2_size);
+        let out = builder.new_affine("l2", l2_size, 1);
 
-            // Forward Pass
-            // L0 Activation: SCReLU (SquarerClippedReLU)
-            let stm0 = l0.forward(stm_inputs).screlu();
-            let ntm0 = l0.forward(ntm_inputs).screlu();
-
-            let combined = stm0 - ntm0;
-
-            // Single Perspective: Use STM features directly for the rest of the network
-            // Note: NTM features are unused in the forward pass, but 'l0' weights are shared/updated via STM usage.
-            // effectively this learns to evaluate purely based on "My King's perspective" features.
-
-            // L1: 256 -> 32 (ClippedReLU)
-            let hidden_layer_1 = l1.forward(combined).crelu();
-
-            // L2: 32 -> 32 (ClippedReLU)
-            let hidden_layer_2 = l2.forward(hidden_layer_1).crelu();
-
-            // L3: 32 -> 32 (ClippedReLU)
-            let hidden_layer_3 = l3.forward(hidden_layer_2).crelu();
-
-            // L4: 32 -> 1 (Linear)
-            l4.forward(hidden_layer_3)
-        });
+        let h1 = l1.forward(combined).crelu();
+        out.forward(h1)
+    }
+});
 
     let net_id = "aether-funnel";
     let schedule = TrainingSchedule {
@@ -207,7 +236,10 @@ fn main() {
     let final_path = "nn-aether.nnue";
 
     if let Ok(mut content) = std::fs::read(&checkpoint_path) {
+        #[cfg(not(feature = "nnue_512_64"))]
         let magic: u32 = 0xAE74E201;
+        #[cfg(feature = "nnue_512_64")]
+        let magic: u32 = 0xAE74E202;
         let mut final_content = Vec::with_capacity(4 + content.len());
         final_content.extend_from_slice(&magic.to_le_bytes());
         final_content.append(&mut content);
