@@ -25,6 +25,57 @@ pub const ENABLE_SEE_GATE_MAIN: bool = true;
 pub const ENABLE_SEE_GATE_QS: bool = true;
 pub const ENABLE_IIR: bool = true;
 
+
+// --- SEARCH MODES (Play vs Datagen) ---
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchMode {
+    Play,
+    Datagen,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SearchTuning {
+    pub allow_nullmove: bool,
+    pub null_min_depth: u8,
+    pub lmr_min_depth: u8,
+    pub lmr_min_move_index: usize,
+    pub enable_lmp: bool,
+    pub enable_futility: bool,
+    pub enable_history_pruning: bool,
+    pub qsearch_include_checks: bool,
+    pub qsearch_delta_dynamic: bool,
+}
+
+pub const TUNING_PLAY: SearchTuning = SearchTuning {
+    allow_nullmove: true,
+    null_min_depth: 3,
+    lmr_min_depth: 3,
+    lmr_min_move_index: 5,
+    enable_lmp: true,
+    enable_futility: true,
+    enable_history_pruning: true,
+    qsearch_include_checks: true,
+    qsearch_delta_dynamic: true,
+};
+
+pub const TUNING_DATAGEN: SearchTuning = SearchTuning {
+    allow_nullmove: false,
+    null_min_depth: 99,
+    lmr_min_depth: 4,
+    lmr_min_move_index: 8,
+    enable_lmp: false,
+    enable_futility: false,
+    enable_history_pruning: false,
+    qsearch_include_checks: true,
+    qsearch_delta_dynamic: true,
+};
+
+impl Default for SearchTuning {
+    fn default() -> Self {
+        TUNING_PLAY
+    }
+}
+
 // --- TUNING CONSTANTS ---
 pub const ASP_WINDOW_CP: i32 = 50;
 pub const ASP_WIDEN_1: i32 = 150;
@@ -551,6 +602,7 @@ pub struct SearchInfo<'a> {
     pub main_thread: bool,
     pub params: &'a SearchParameters,
     pub thread_id: Option<usize>,
+    pub tuning: SearchTuning,
     pub path: SearchPath,
     pub tt_hit_avg: i32,
 }
@@ -565,6 +617,7 @@ impl<'a> SearchInfo<'a> {
         params: &'a SearchParameters,
         global_nodes: Option<&'a AtomicU64>,
         thread_id: Option<usize>,
+        mode: SearchMode,
     ) -> Self {
         Self {
             data,
@@ -579,6 +632,7 @@ impl<'a> SearchInfo<'a> {
             main_thread: main,
             params,
             thread_id,
+            tuning: match mode { SearchMode::Datagen => TUNING_DATAGEN, SearchMode::Play => TUNING_PLAY },
             path: SearchPath::new(),
             tt_hit_avg: 0,
         }
@@ -911,7 +965,11 @@ fn quiescence(
         let us = state.side_to_move;
         let enemy_queens = state.bitboards[if us == WHITE { q } else { Q }];
 
-        let delta = if enemy_queens.0 != 0 { 975 } else { 600 };
+        let delta = if info.tuning.qsearch_delta_dynamic {
+            if enemy_queens.0 != 0 { 975 } else { 600 }
+        } else {
+            975
+        };
 
         let is_endgame = (state.bitboards[Q].0 | state.bitboards[q].0) == 0;
 
@@ -933,8 +991,11 @@ fn quiescence(
 
     while let Some(mv) = picker.next_move(state, info.data, stack) {
         if !in_check {
-            if !mv.is_capture() && mv.promotion().is_none() {
-                continue;
+            let is_quiet = !mv.is_capture() && mv.promotion().is_none();
+            if is_quiet {
+                if !(info.tuning.qsearch_include_checks && gives_check_fast(state, mv)) {
+                    continue;
+                }
             }
         }
 
@@ -1016,6 +1077,7 @@ pub fn search(
     search_data: &mut SearchData,
     stack: &mut [StackEntry], // PASSED STACK
     params: &SearchParameters,
+    mode: SearchMode,
     global_nodes: Option<&AtomicU64>,
     thread_id: Option<usize>,
 ) -> (i32, Option<Move>) {
@@ -1060,6 +1122,7 @@ pub fn search(
         params,
         global_nodes,
         thread_id,
+        mode,
     ));
 
     // Copy history to stack-based SearchPath
@@ -1500,7 +1563,7 @@ fn negamax(
     }
 
     if ENABLE_NULL_MOVE
-        && new_depth >= NULL_MIN_DEPTH
+        && info.tuning.allow_nullmove && new_depth >= info.tuning.null_min_depth
         && ply > 0
         && !in_check
         && !is_pv
@@ -1662,7 +1725,7 @@ fn negamax(
         let is_quiet = !is_capture_move && mv.promotion().is_none();
 
         // Futility Pruning
-        if ENABLE_LMP && new_depth < 5 && !in_check && !is_pv && is_quiet {
+        if info.tuning.enable_futility && new_depth < 5 && !in_check && !is_pv && is_quiet {
             let futility_margin = FUTILITY_MARGIN_PER_PLY * new_depth as i32;
             if static_eval + futility_margin <= alpha {
                 quiets_checked += 1;
@@ -1671,7 +1734,7 @@ fn negamax(
         }
 
         // History Pruning
-        if new_depth < 8 && !in_check && !is_pv && is_quiet {
+        if info.tuning.enable_history_pruning && new_depth < 8 && !in_check && !is_pv && is_quiet {
             let history = info.data.history[mv.source() as usize][mv.target() as usize];
             if history < -8192 {
                 quiets_checked += 1;
@@ -1680,7 +1743,7 @@ fn negamax(
         }
 
         // Late Move Pruning
-        if ENABLE_LMP && !is_pv && !in_check && new_depth <= LMP_DEPTH_MAX && is_quiet {
+        if ENABLE_LMP && info.tuning.enable_lmp && !is_pv && !in_check && new_depth <= LMP_DEPTH_MAX && is_quiet {
             if quiets_checked >= info.params.lmp_table[new_depth as usize] {
                 continue;
             }
@@ -1760,8 +1823,8 @@ fn negamax(
             let mut reduction = 0;
 
             if ENABLE_LMR
-                && new_depth >= LMR_MIN_DEPTH
-                && moves_searched >= LMR_MIN_MOVE_INDEX
+                && new_depth >= info.tuning.lmr_min_depth
+                && moves_searched >= info.tuning.lmr_min_move_index
                 && is_quiet
                 && !gives_check
                 && !in_check

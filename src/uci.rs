@@ -1,5 +1,6 @@
 use crate::movegen::{self, MoveGenerator};
 use crate::search;
+use crate::search::SearchMode;
 use crate::state::{k, GameState, Move, K};
 use crate::time::{TimeControl, TimeManager};
 use crate::tt::TranspositionTable;
@@ -40,6 +41,7 @@ pub fn uci_loop() {
 
     let mut num_threads = 1;
     let mut move_overhead = 10;
+    let mut mode = SearchMode::Play;
 
     // LAZY LOADING: Removed eager init_nnue check here.
     // We defer until 'EvalFile' option is set OR 'go' is called.
@@ -83,6 +85,7 @@ pub fn uci_loop() {
                 println!("option name UCI_ShowWDL type check default false");
                 println!("option name TTShards type spin default 1 min 1 max 64");
                 println!("option name EvalBlend type spin default 0 min 0 max 256");
+                println!("option name Mode type combo default Play var Play var Datagen");
                 println!("uciok");
             }
             "isready" => println!("readyok"),
@@ -133,6 +136,7 @@ pub fn uci_loop() {
                     let is_main = i == 0;
                     let tt_clone = tt.clone();
                     let params_clone = default_params.clone();
+                    let mode_clone = mode;
                     let global_nodes_clone = global_nodes.clone();
                     let thread_id = i;
 
@@ -154,6 +158,7 @@ pub fn uci_loop() {
                                 &mut search_data,
                                 &mut stack,
                                 &params_clone,
+                                mode_clone,
                                 Some(&global_nodes_clone),
                                 Some(thread_id),
                             );
@@ -218,6 +223,12 @@ pub fn uci_loop() {
                         } else if name.eq_ignore_ascii_case("TTShards") {
                             if let Ok(s) = value.parse::<usize>() {
                                 TT_SHARDS.store(s.clamp(1, 64), Ordering::Relaxed);
+                            }
+                        } else if name.eq_ignore_ascii_case("Mode") {
+                            if value.eq_ignore_ascii_case("Datagen") {
+                                mode = SearchMode::Datagen;
+                            } else {
+                                mode = SearchMode::Play;
                             }
                         } else if name.eq_ignore_ascii_case("EvalBlend") {
                             if let Ok(b) = value.parse::<usize>() {

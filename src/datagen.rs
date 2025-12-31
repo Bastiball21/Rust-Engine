@@ -721,6 +721,7 @@ pub fn run_datagen(config: DatagenConfig) {
                                 &mut search_data,
                                 &mut stack,
                                 &params_clone,
+                                search::SearchMode::Datagen,
                                 Some(&global_nodes_clone),
                                 Some(random_id),
                             );

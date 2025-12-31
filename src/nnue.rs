@@ -10,16 +10,34 @@ use std::arch::x86_64::*;
 static EMBEDDED_NET: &[u8] = include_bytes!("../nn-new.nnue");
 
 // Architecture Constants
+#[cfg(not(feature = "nnue_512_64"))]
 pub const L1_SIZE: usize = 256;
+#[cfg(not(feature = "nnue_512_64"))]
 pub const L2_SIZE: usize = 32;
+#[cfg(not(feature = "nnue_512_64"))]
 pub const L3_SIZE: usize = 32;
+#[cfg(not(feature = "nnue_512_64"))]
 pub const L4_SIZE: usize = 32;
+
+#[cfg(feature = "nnue_512_64")]
+pub const L1_SIZE: usize = 512;
+#[cfg(feature = "nnue_512_64")]
+pub const L2_SIZE: usize = 64;
+// Unused in nnue_512_64 path (kept non-zero for scratch struct layout).
+#[cfg(feature = "nnue_512_64")]
+pub const L3_SIZE: usize = 1;
+// Unused in nnue_512_64 path (kept non-zero for scratch struct layout).
+#[cfg(feature = "nnue_512_64")]
+pub const L4_SIZE: usize = 1;
 pub const OUTPUT_SIZE: usize = 1;
 
 pub const INPUT_SIZE: usize = 768;
 pub const NUM_BUCKETS: usize = 32; // Matches bullet_lib ChessBuckets (Standard Mirrored)
 
+#[cfg(not(feature = "nnue_512_64"))]
 pub const NETWORK_MAGIC: u32 = 0xAE74E201;
+#[cfg(feature = "nnue_512_64")]
+pub const NETWORK_MAGIC: u32 = 0xAE74E202;
 
 // Quantization Constants
 const QA: i32 = 255;
@@ -426,6 +444,8 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Net
     layer_affine_avx2(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_avx2(&mut scratch.l2_out);
 
+#[cfg(not(feature = "nnue_512_64"))]
+{
     // Layer 2: 32 -> 32
     layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
     clamp_activations_avx2(&mut scratch.l3_out);
@@ -436,6 +456,13 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Net
 
     // Output Layer: 32 -> 1
     layer_affine_avx2(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
+}
+
+#[cfg(feature = "nnue_512_64")]
+{
+    // Output Layer: 64 -> 1
+    layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.final_out, L2_SIZE, 1);
+}
 
     let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
@@ -449,6 +476,8 @@ fn evaluate_scalar(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network,
     layer_affine_scalar(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_scalar(&mut scratch.l2_out);
 
+#[cfg(not(feature = "nnue_512_64"))]
+{
     // Layer 2: 32 -> 32
     layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
     clamp_activations_scalar(&mut scratch.l3_out);
@@ -459,6 +488,13 @@ fn evaluate_scalar(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network,
 
     // Output Layer: 32 -> 1
     layer_affine_scalar(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
+}
+
+#[cfg(feature = "nnue_512_64")]
+{
+    // Output Layer: 64 -> 1
+    layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.final_out, L2_SIZE, 1);
+}
 
     let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
@@ -501,17 +537,21 @@ pub struct Network {
     pub l1_weights: Vec<i16>, // 256 * 32
     pub l1_biases: Vec<i16>,  // 32
 
-    // Layer 2 (32 -> 32)
-    pub l2_weights: Vec<i16>, // 32 * 32
-    pub l2_biases: Vec<i16>,  // 32
+    // Layer 2
+    // default: 32 -> 32 (ClippedReLU)
+    // nnue_512_64: 64 -> 1 (Raw output)
+    pub l2_weights: Vec<i16>,
+    pub l2_biases: Vec<i16>,
 
-    // Layer 3 (32 -> 32)
-    pub l3_weights: Vec<i16>, // 32 * 32
-    pub l3_biases: Vec<i16>,  // 32
+    #[cfg(not(feature = "nnue_512_64"))]
+    pub l3_weights: Vec<i16>,
+    #[cfg(not(feature = "nnue_512_64"))]
+    pub l3_biases: Vec<i16>,
 
-    // Layer 4 (32 -> 1)
-    pub l4_weights: Vec<i16>, // 32 * 1
-    pub l4_biases: Vec<i16>,  // 1
+    #[cfg(not(feature = "nnue_512_64"))]
+    pub l4_weights: Vec<i16>,
+    #[cfg(not(feature = "nnue_512_64"))]
+    pub l4_biases: Vec<i16>,
 }
 
 pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> {

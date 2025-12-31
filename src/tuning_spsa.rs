@@ -287,6 +287,7 @@ fn play_game(
             &mut sd,
             &mut stack,
             params,
+            search::SearchMode::Play,
             None,
             None,
         );

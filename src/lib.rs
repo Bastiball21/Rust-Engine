@@ -119,6 +119,7 @@ pub fn run_cli() {
                  &mut data,
                  &mut stack,
                  &params,
+                 search::SearchMode::Play,
                  None,
                  Some(0)
              );
