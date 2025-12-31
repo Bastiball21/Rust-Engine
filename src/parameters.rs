@@ -52,7 +52,7 @@ impl Default for SearchParameters {
     fn default() -> Self {
         let mut params = Self {
             lmr_base: 1.0,
-            lmr_divisor: 2.5,
+            lmr_divisor: 4.0,
             nmp_base: 3,
             nmp_divisor: 6,
             rfp_margin: 60,
@@ -66,7 +66,7 @@ impl Default for SearchParameters {
             bonus_skewer: 90_000,
             bonus_discovered: 70_000,
 
-            tactical_topk_quiets: 12,
+            tactical_topk_quiets: 20,
 
             extend_safe_check: true,
             extend_near_mate: true,
