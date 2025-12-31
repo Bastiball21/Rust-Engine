@@ -1588,6 +1588,14 @@ fn negamax(
             let unmake_info = state.make_null_move_inplace();
 
             let next_ply = ply + 1;
+// Threat context for this node (used to avoid reducing genuinely tactical quiet moves).
+// Kept behind depth/in-check guards to avoid adding overhead in shallow nodes.
+let threat_info: Option<ThreatInfo> = if ENABLE_LMR && new_depth > 4 && !in_check {
+    Some(threat::analyze(state))
+} else {
+    None
+};
+
             stack[next_ply] = StackEntry::default();
             stack[next_ply].in_check = false;
 
@@ -1723,6 +1731,16 @@ fn negamax(
 
         let is_capture_move = mv.is_capture();
         let is_quiet = !is_capture_move && mv.promotion().is_none();
+// If this quiet move creates a meaningful tactical shift, don't reduce it later with LMR.
+let is_tactical_for_lmr = if is_quiet {
+    threat_info
+        .as_ref()
+        .map(|ti| threat::analyze_move_threat_impact(state, mv, ti).is_tactical)
+        .unwrap_or(false)
+} else {
+    false
+};
+
 
         // Futility Pruning
         if info.tuning.enable_futility && new_depth < 5 && !in_check && !is_pv && is_quiet {
@@ -1826,6 +1844,7 @@ fn negamax(
                 && new_depth >= info.tuning.lmr_min_depth
                 && moves_searched >= info.tuning.lmr_min_move_index
                 && is_quiet
+                && !is_tactical_for_lmr
                 && !gives_check
                 && !in_check
                 && Some(mv) != tt_move
