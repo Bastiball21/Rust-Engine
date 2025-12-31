@@ -29,6 +29,7 @@ default = ["bmi2"]
 bmi2 = []
 tuning = []
 packed-tt = []
+nnue_512_64 = []
 
 [[bench]]
 name = "bench_main"
