@@ -28,6 +28,8 @@ pub mod syzygy; // Added
 pub mod parameters;
 pub mod tuning_spsa;
 pub mod history; // Added
+pub mod dense_history;
+pub mod correction;
 
 use std::env;
 use std::thread;

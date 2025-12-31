@@ -11,6 +11,7 @@ use crate::parameters::SearchParameters;
 use crate::nnue::Accumulator;
 use crate::nnue_scratch::NNUEScratch;
 use crate::history::ContinuationHistory;
+use crate::correction::CorrectionHistory;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicI16, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -195,6 +196,9 @@ pub struct SearchData {
     // New Deep Continuation History
     pub cont_history: ContinuationHistory,
 
+    // Correction History (Thread Local): fixes systematic eval bias for pruning
+    pub correction_history: CorrectionHistory,
+
     // NNUE Accumulators (Thread Local)
     pub accumulators: [Accumulator; 2],
 
@@ -209,6 +213,7 @@ impl SearchData {
             capture_history: Box::new([[[0; 6]; 64]; 12]),
             counter_moves: [[None; 64]; 12],
             cont_history: ContinuationHistory::new(),
+            correction_history: CorrectionHistory::new(),
             accumulators: [Accumulator::default(); 2],
             nnue_scratch: Box::new(NNUEScratch::default()),
         }
@@ -219,6 +224,7 @@ impl SearchData {
         self.capture_history.fill_with(|| [[0; 6]; 64]);
         self.counter_moves = [[None; 64]; 12];
         self.cont_history.clear();
+        self.correction_history.clear();
     }
 }
 
@@ -544,14 +550,14 @@ impl<'a> MovePicker<'a> {
                 // 1-ply back
                 let prev = &stack[self.ply];
                 if prev.current_move != Move::default() {
-                     score += data.cont_history.get(prev.in_check, prev.is_capture, prev.moved_piece, prev.to_sq, piece, to) as i32;
+                     score += data.cont_history.get(prev.in_check, prev.is_capture, prev.current_move.source() as usize, prev.current_move.target() as usize, from, to) as i32;
                 }
 
                 // 2-ply back
                 if self.ply >= 1 {
                     let prev2 = &stack[self.ply - 1];
                     if prev2.current_move != Move::default() {
-                        score += data.cont_history.get(prev2.in_check, prev2.is_capture, prev2.moved_piece, prev2.to_sq, piece, to) as i32;
+                        score += data.cont_history.get(prev2.in_check, prev2.is_capture, prev2.current_move.source() as usize, prev2.current_move.target() as usize, from, to) as i32;
                     }
                 }
 
@@ -559,7 +565,7 @@ impl<'a> MovePicker<'a> {
                 if self.ply >= 3 {
                     let prev4 = &stack[self.ply - 3];
                     if prev4.current_move != Move::default() {
-                        score += data.cont_history.get(prev4.in_check, prev4.is_capture, prev4.moved_piece, prev4.to_sq, piece, to) as i32;
+                        score += data.cont_history.get(prev4.in_check, prev4.is_capture, prev4.current_move.source() as usize, prev4.current_move.target() as usize, from, to) as i32;
                     }
                 }
 
@@ -567,7 +573,7 @@ impl<'a> MovePicker<'a> {
                  if self.ply >= 5 {
                     let prev6 = &stack[self.ply - 5];
                     if prev6.current_move != Move::default() {
-                        score += data.cont_history.get(prev6.in_check, prev6.is_capture, prev6.moved_piece, prev6.to_sq, piece, to) as i32;
+                        score += data.cont_history.get(prev6.in_check, prev6.is_capture, prev6.current_move.source() as usize, prev6.current_move.target() as usize, from, to) as i32;
                     }
                 }
             }
@@ -1215,13 +1221,13 @@ pub fn search(
 
                 // PVS Logic at Root
                 if i == 0 {
-                    score = -negamax(&mut root_state, stack, depth - 1, -beta, -alpha, &mut info, next_ply, true, false);
+                    score = -negamax(&mut root_state, stack, depth - 1, -beta, -alpha, &mut info, next_ply, true, false, false);
                 } else {
                     // Start with Null Window
-                    score = -negamax(&mut root_state, stack, depth - 1, -alpha - 1, -alpha, &mut info, next_ply, false, false);
+                    score = -negamax(&mut root_state, stack, depth - 1, -alpha - 1, -alpha, &mut info, next_ply, false, false, false);
                     if score > alpha && score < beta {
                         // Research with full window
-                        score = -negamax(&mut root_state, stack, depth - 1, -beta, -alpha, &mut info, next_ply, true, false);
+                        score = -negamax(&mut root_state, stack, depth - 1, -beta, -alpha, &mut info, next_ply, true, false, false);
                     }
                 }
 
@@ -1405,6 +1411,7 @@ fn negamax(
     ply: usize,
     is_pv: bool,
     was_sacrifice: bool,
+    is_null_node: bool,
 ) -> i32 {
     if state.halfmove_clock >= 100 {
         return 0;
@@ -1540,12 +1547,19 @@ fn negamax(
         stack[ply].static_eval = ev;
         ev
     };
+    // Correction history: adjust static eval for pruning stability (NMP/RFP/Razoring/Futility)
+    let correction = info
+        .data
+        .correction_history
+        .get(state.pawn_key, state.side_to_move);
+    let corrected_eval = static_eval + correction;
+
 
     let improving = ply >= 2 && !in_check && static_eval >= stack[ply - 2].static_eval;
 
     if !is_pv && !in_check && excluded_move == Move::default() && new_depth <= 3 {
         let razor_margin = info.params.razoring_base + (new_depth as i32 * info.params.razoring_multiplier);
-        if static_eval + razor_margin < alpha {
+        if corrected_eval + razor_margin < alpha {
             let v = quiescence(state, stack, alpha, beta, info, ply);
             if v < alpha {
                 return v;
@@ -1557,9 +1571,9 @@ fn negamax(
         && !in_check
         && excluded_move == Move::default()
         && new_depth < 7
-        && static_eval - (info.params.rfp_margin * new_depth as i32) >= beta
+        && corrected_eval - (info.params.rfp_margin * new_depth as i32) >= beta
     {
-        return static_eval;
+        return corrected_eval;
     }
 
     if ENABLE_NULL_MOVE
@@ -1568,7 +1582,7 @@ fn negamax(
         && !in_check
         && !is_pv
         && excluded_move == Move::default()
-        && static_eval >= beta
+        && corrected_eval >= beta
         && !was_sacrifice
     {
         use crate::state::{b, n, q, r, B, N, Q, R};
@@ -1610,6 +1624,7 @@ let threat_info: Option<ThreatInfo> = if ENABLE_LMR && new_depth > 4 && !in_chec
                 next_ply,
                 false,
                 false,
+            true,
             );
 
             state.unmake_null_move(unmake_info);
@@ -1642,6 +1657,7 @@ let threat_info: Option<ThreatInfo> = if ENABLE_LMR && new_depth > 4 && !in_chec
             ply + 1,
             false,
             was_sacrifice,
+        false,
         );
 
         if prob_score >= prob_beta {
@@ -1661,6 +1677,7 @@ let threat_info: Option<ThreatInfo> = if ENABLE_LMR && new_depth > 4 && !in_chec
             ply,
             is_pv,
             was_sacrifice,
+        false,
         );
         if let Some(mv) = info.tt.get_move(state.hash, state, info.thread_id) {
             tt_move = Some(mv);
@@ -1692,6 +1709,7 @@ let threat_info: Option<ThreatInfo> = if ENABLE_LMR && new_depth > 4 && !in_chec
             ply,
             false,
             was_sacrifice,
+        false,
         );
 
         stack[ply].excluded_move = Move::default();
@@ -1745,7 +1763,7 @@ let is_tactical_for_lmr = if is_quiet {
         // Futility Pruning
         if info.tuning.enable_futility && new_depth < 5 && !in_check && !is_pv && is_quiet {
             let futility_margin = FUTILITY_MARGIN_PER_PLY * new_depth as i32;
-            if static_eval + futility_margin <= alpha {
+            if corrected_eval + futility_margin <= alpha {
                 quiets_checked += 1;
                 continue;
             }
@@ -1835,6 +1853,7 @@ let is_tactical_for_lmr = if is_quiet {
                 next_ply,
                 true,
                 false,
+            false,
             );
         } else {
             let gives_check = is_in_check(state);
@@ -1901,6 +1920,8 @@ let is_tactical_for_lmr = if is_quiet {
                 next_ply,
                 false,
                 false,
+            false,
+            false,
             );
 
             if score >= beta && reduction > 0 {
@@ -1914,6 +1935,7 @@ let is_tactical_for_lmr = if is_quiet {
                     next_ply,
                     false,
                     false,
+                false,
                 );
             }
             if score > alpha && score < beta {
@@ -1986,8 +2008,8 @@ let is_tactical_for_lmr = if is_quiet {
                         info.data.cont_history.update(
                             curr_entry.in_check,
                             curr_entry.is_capture,
-                            prev_entry.moved_piece, prev_entry.to_sq,
-                            curr_entry.moved_piece, curr_entry.to_sq,
+                            prev_entry.current_move.source() as usize, prev_entry.current_move.target() as usize,
+                            curr_entry.current_move.source() as usize, curr_entry.current_move.target() as usize,
                             bonus
                         );
                     }
@@ -2012,8 +2034,8 @@ let is_tactical_for_lmr = if is_quiet {
                             info.data.cont_history.update(
                                 curr_entry.in_check,
                                 curr_entry.is_capture,
-                                prev_entry.moved_piece, prev_entry.to_sq,
-                                curr_entry.moved_piece, curr_entry.to_sq,
+                                prev_entry.current_move.source() as usize, prev_entry.current_move.target() as usize,
+                            curr_entry.current_move.source() as usize, curr_entry.current_move.target() as usize,
                                 penalty_bonus
                             );
                         }
@@ -2030,6 +2052,23 @@ let is_tactical_for_lmr = if is_quiet {
             return -MATE_VALUE + (ply as i32);
         } else {
             return 0;
+        }
+    }
+
+    // Update correction history using the final searched score (skip null-move nodes / mates / fail-lows).
+    if !is_null_node
+        && excluded_move == Move::default()
+        && max_score.abs() < MATE_SCORE - 100
+    {
+        // Only learn from beta cutoffs or exact nodes (fail-lows are not reliable training signals).
+        if max_score > alpha0 {
+            info.data.correction_history.update(
+                state.pawn_key,
+                state.side_to_move,
+                static_eval,
+                max_score,
+                new_depth,
+            );
         }
     }
 
@@ -2071,6 +2110,7 @@ fn is_forced_move(
         0,
         false,
         false,
+    false,
     );
 
     stack[0].excluded_move = Move::default();
