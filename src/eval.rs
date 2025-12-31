@@ -52,9 +52,9 @@ pub const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
 // pub const TOTAL_PHASE: i32 = 24;
 
 // King Safety Weights
-pub const KING_TROPISM_PENALTY: [i32; 8] = [10, 8, 5, 2, 0, 0, 0, 0];
-pub const SHIELD_MISSING_PENALTY: i32 = -20;
-pub const SHIELD_OPEN_FILE_PENALTY: i32 = -30;
+pub const KING_TROPISM_PENALTY: [i32; 8] = [5, 4, 2, 1, 0, 0, 0, 0];
+pub const SHIELD_MISSING_PENALTY: i32 = -40;
+pub const SHIELD_OPEN_FILE_PENALTY: i32 = -50;
 // pub const SAFE_CHECK_BONUS: i32 = 15;
 
 const LAZY_EVAL_MARGIN: i32 = 250;
@@ -817,7 +817,7 @@ fn evaluate_complex_terms(
             }
         }
 
-        if danger > 50 {
+        if danger > 80 {
             mg -= danger * us_sign;
         }
         mg -= cluster_pen * us_sign;
