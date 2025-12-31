@@ -631,13 +631,6 @@ pub fn run_datagen(config: DatagenConfig) {
                     let mut draw_counter = 0;
 
                     loop {
-                        // Safety Check: Ensure state is consistent before searching
-                        // This catches corruption from Random Walk or previous moves that might cause panics in Search
-                        if !state.is_consistent() {
-                            abort_game = true;
-                            break;
-                        }
-
                         // Repetition / 50-move
                         if let Some(&count) = rep_history.get(&state.hash) {
                             if count >= 3 {

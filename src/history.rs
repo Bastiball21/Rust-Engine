@@ -39,7 +39,8 @@ impl ContinuationHistory {
 
         let index = Self::idx(bucket, prev, curr);
         // SAFETY: We trust indices are within bounds (0..12, 0..64)
-        let entry = unsafe { self.table.get_unchecked_mut(index) };
+        debug_assert!(index < self.table.len());
+        let entry = &mut self.table[index];
 
         // Gravity Update: entry += bonus - (entry * |bonus|) / 16384
         let penalty = (*entry as i32 * bonus.abs()) / 16384;

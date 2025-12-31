@@ -1144,8 +1144,7 @@ pub fn search(
                 stack[next_ply].to_sq = mv.target() as usize;
                 stack[next_ply].moved_piece = get_piece_type_safe(&root_state, mv.source());
                 stack[next_ply].is_capture = mv.is_capture();
-                stack[next_ply].in_check = gives_check_fast(&root_state, mv);
-
+                stack[next_ply].in_check = stack[0].in_check; // CMH bucket key: in-check at this node (before mv)
                 let unmake_info = root_state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
                 info.path.push(root_state.hash);
 
@@ -1711,8 +1710,7 @@ fn negamax(
         stack[next_ply].is_capture = is_capture_move;
         // Check propagation: Does this move give check?
         // We need to calculate if the opponent will be in check in the NEXT state.
-        stack[next_ply].in_check = gives_check_fast(state, mv);
-
+        stack[next_ply].in_check = in_check; // CMH bucket key: in-check at this node (before mv)
         let unmake_info = state.make_move_inplace(mv, &mut Some(&mut info.data.accumulators));
 
         let our_side = state.side_to_move;
