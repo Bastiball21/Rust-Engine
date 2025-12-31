@@ -1,189 +1,124 @@
 # Aether
-My first chess engine
 
-## Features
-*   **Search**: Alpha-Beta with Principal Variation Search, Transposition Table, Iterative Deepening.
-*   **Evaluation**: Hybrid 5-Layer NNUE (768 → 256 → 32 → 32 → 32 → 1) with Hand-Crafted Evaluation (HCE) fallback. Includes an **Embedded Network** for standalone operation.
-*   **Protocol**: Universal Chess Interface (UCI).
-*   **Training**: CUDA-accelerated NNUE trainer using `bullet`.
+A Rust chess engine (UCI) with a Bullet-format NNUE pipeline + CUDA trainer.
 
-## Performance Optimization (Performance Build)
+## What’s in here
 
-For maximum performance, compile with native CPU optimizations. This enables SIMD instructions (AVX2/BMI2) specific to your processor.
+- **Engine**: alpha-beta search with TT + iterative deepening (UCI).
+- **Eval**: NNUE (Bullet-format compatible). Falls back to HCE if no network is loaded.
+- **Data**:
+  - `datagen` mode: self-play / search-based position generation (writes `.bin` in BulletFormat).
+  - `convert` mode: **PGN → BulletFormat** conversion for training.
+- **Trainer**: `trainer/` uses `bullet_lib` (CUDA) to train and exports `nn-aether.nnue`.
 
-### Local Speed Build
+> ⚠️ Windows note: if `git clone` fails with `error: invalid path '0.'`,
+> the repo contains a file literally named `0.` which Windows dislikes. Delete/rename it in the repo (recommended),
+> or clone inside **WSL**.
+
+---
+
+## Build (engine)
+
+Fast local build:
 ```bash
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 
-### Profile-Guided Optimization (PGO)
-PGO can further improve performance by ~10-15% by optimizing the binary for typical usage patterns.
-
-**Steps:**
-1.  **Generate Profile Data:**
-    ```bash
-    RUSTFLAGS="-C target-cpu=native -C profile-generate=./pgo-data" cargo build --release
-    ```
-2.  **Run Benchmark (Training Run):**
-    Run the engine to generate profile data. A simple benchmark or game generation works.
-    ```bash
-    ./target/release/aether bench
-    ```
-3.  **Merge Data:**
-    Requires `llvm-profdata` (usually included with Rust or LLVM).
-    ```bash
-    llvm-profdata merge -o pgo-data/merged.profdata pgo-data
-    ```
-4.  **Use Profile:**
-    ```bash
-    RUSTFLAGS="-C target-cpu=native -C profile-use=./pgo-data/merged.profdata" cargo build --release
-    ```
-
-**Note:** Binaries built with `target-cpu=native` are **not portable** and may crash on other machines with different CPUs.
-
-## Building and Testing
-
-### Prerequisites
-*   Rust Toolchain (Stable)
-*   CUDA Toolkit (Required for Trainer only)
-
-### Running Tests
-Run the standard test suite:
-```bash
-# Set stack size to prevent overflow in deep search tests
-RUST_MIN_STACK=8388608 cargo test --release
-```
-
-Run Perft tests (Move Generation Verification):
-```bash
-cargo test --release --test perft_test
-```
-*Note: `perft` tests cover Start Position, Kiwipete, and Castling/En Passant edge cases.*
-
-## Usage
-
-### UCI Mode (Standard)
-Run the engine in UCI mode:
+Run as a UCI engine:
 ```bash
 cargo run --release
 ```
-Then send UCI commands (e.g., `uci`, `isready`, `go depth 10`).
 
-### Options
-*   **Hash**: Size of the transposition table in MB (Range: 1-262144, Default: 64).
-*   **Threads**: Number of search threads (Range: 1-64, Default: 1).
-*   **EvalFile**: Path to the NNUE network file. The engine attempts to load `nn-aether.nnue` from the working directory by default. If not found, it uses the **embedded network** compiled into the binary.
-*   **UCI_Chess960**: Enable Chess960 (Fischer Random) mode.
-*   **SyzygyPath**: Path to Syzygy endgame tablebases.
-*   **TTShards**: Number of Transposition Table shards (Range: 1-64, Default: 1).
-*   **Move Overhead**: Time buffer in milliseconds to compensate for network/GUI latency (Range: 0-5000, Default: 10).
+Load a network (UCI option):
+- `EvalFile` → path to your `nn-aether.nnue`
 
-### Embedded Network
-Aether includes a default NNUE network embedded directly into the binary. This ensures the engine plays at full strength even if the external `nn-aether.nnue` file is missing. You can override this by providing a specific file via the `EvalFile` option.
+---
 
-### Tuning
-Aether supports parameter tuning:
-*   **SPSA (Search Tuning)**: Optimizes search parameters (LMR, RFP, etc.) via self-play.
-    ```bash
-    cargo run --release -- tune-search
-    ```
-*   **Texel (Eval Tuning)**: Optimizes HCE weights using labeled positions.
-    ```bash
-    cargo run --release -- tune <epd_file>
-    ```
+## PGN → training data (BulletFormat)
 
-## Data Generation
+This converts games from a PGN into a Bullet-format binary dataset the trainer can read.
 
-Generate self-play games for training using the `datagen` command. This mode uses Pure Self-Play with random walk openings (Zero Knowledge/No Book).
-
-**New Features:**
-*   **Duplicate Game Prevention**: Ensures unique games.
-*   **Fixed Depth**: Uses fixed search depth instead of node limits.
-*   **Mercy Rule Adjudication**: Early termination for decisive games.
-
-**Command:**
 ```bash
-cargo run --release -- datagen <games> <threads> <depth> <filename> <seed>
+cargo run --release -- convert <input.pgn> <output.bin>
 ```
 
-**Example:**
+Example:
 ```bash
-# Generate 1000 games on 1 thread, depth 8, saving to data.bin with seed 12345
-cargo run --release -- datagen 1000 1 8 data.bin 12345
+cargo run --release -- convert ./test_compact.pgn ./aether_data.bin
 ```
 
-### Convert PGN to Training Data
-Convert existing PGN files into binary training data.
+### What the converter writes
 
-**Command:**
+For each legal position in the PGN (until parse fails / game ends), it stores:
+- **Score**: a static evaluation (centipawn-ish i16), converted to **White-relative**.
+- **Result**: game result mapped to a float from White’s perspective:
+  - `1-0` → `1.0`
+  - `0-1` → `0.0`
+  - `1/2-1/2` → `0.5`
+
+This “perspective correction” is important: the network learns **“is this good for the side to move?”**
+instead of accidentally learning “Black losing positions are good because White eventually won” 💀.
+
+---
+
+## Train (CUDA trainer)
+
+The trainer lives in `trainer/` and reads Bullet-format `.bin` files.
+
+### 1) Build/run the trainer
 ```bash
-# Convert PGN to training data (BulletFormat Standard)
-cargo run --release -- convert grandmaster.pgn data.bin
+cd trainer
+cargo run --release -- <path_to_dataset_or_folder>
 ```
 
-**Data Format Note:**
-*   **Score:** White-Relative Centipawns (standard for `bulletformat`).
-*   **Result:** Global White Outcome (1.0 = White Win, 0.0 = Black Win, 0.5 = Draw).
+- If you pass a **folder**, it will scan for `.bin` files inside.
+- If you pass nothing, it defaults to `../aether_data.bin`.
 
-## Training
-
-To train the NNUE network, you need a training dataset (generated via the `datagen` command) and a CUDA-capable GPU. The trainer is configured for the Hybrid 5-Layer Architecture.
-
-**Command:**
+Example:
 ```bash
-./train.sh [paths...]
+cd trainer
+cargo run --release -- ../aether_data.bin
 ```
 
-**Note on CUDA:**
-The trainer crate requires `nvcc` and CUDA libraries to build. If CUDA is not available, the trainer build will fail. The core engine (`aether`) does **not** require CUDA and runs on CPU.
+### 2) Output network
+At the end, the trainer writes:
+- `nn-aether.nnue` (in `trainer/`)
 
-**Arguments:**
-*   `[paths...]`: Optional. File paths to `.bin` data files or directories containing them. Defaults to `../aether_data.bin`.
-
-**Example:**
+Copy it to the engine folder (or point `EvalFile` to it):
 ```bash
-./train.sh my_data.bin
+cp trainer/nn-aether.nnue .
 ```
-Checkpoints are saved to `trainer/checkpoints`.
 
-## 🧬 Adaptive Data Generation Strategy
+### 3) Keep engine + trainer architecture in sync
 
-🧬 What “Adaptation” Means Here (No Buzzwords)
-In our datagen context, adaptation = the engine changes how it generates games based on what it’s learning.
+There is an optional feature flag for a bigger net:
+- `nnue_512_64`
 
-Not just: “Play 1M games at depth 8 and dump positions.”
+If you enable it, **enable it on both** the engine and the trainer, or the engine will reject the file
+(different magic numbers are used for strict shape validation).
 
-But: “Notice patterns → adjust behavior → generate better data next.”
+Engine:
+```bash
+cargo build --release --features nnue_512_64
+```
 
-🔥 4 Levels of Adaptation (From Easy to Spicy)
-🟢 LEVEL 1 — Curriculum Adaptation (High ROI) Train in phases, where each phase feeds the next.
+Trainer:
+```bash
+cd trainer
+cargo run --release --features nnue_512_64 -- ../aether_data.bin
+```
 
-Phase 1: Shallow depth, high randomness, wide eval range.
+---
 
-Phase 2: Medium depth, reduced randomness.
+## Tests
 
-Phase 3: Deeper depth, near-deterministic, high-quality positions.
+```bash
+RUST_MIN_STACK=8388608 cargo test --release
+cargo test --release --test perft_test
+```
 
-Implementation: Run datagen in multiple passes, mixing datasets.
+---
 
-🟢 LEVEL 2 — Eval-Range Feedback (Implemented) Bias generation toward uncertain positions.
+## License / credits
 
-Problem: Self-play drifts into boring +10 eval stomps.
-
-Solution: We dynamically reduce search depth if the evaluation indicates a decided game (>300cp or >600cp), keeping resources focused on the critical path.
-
-🟡 LEVEL 3 — On-the-Fly Network Reloading Create a bootstrap loop: Engine → Data → Network → Stronger Engine → Better Data
-
-No MCTS or policy learning required. Just pure Alpha-Beta grinding with an evolving evaluation function.
-
-🟡 LEVEL 4 — Opponent Diversity Prevent style collapse by randomizing opponents.
-
-Example: Randomly pair "Aggressive Config" vs "Conservative Config" during self-play to force the network to handle different playing styles.
-
-🧠 Anti-Goals (What we DO NOT do)
-
-❌ Full AlphaZero RL loop (too complex/slow)
-
-❌ MCTS policy targets
-
-❌ Online gradient updates mid-search
+- Training/data format and trainer stack powered by `bulletformat` / `bullet_lib`.
