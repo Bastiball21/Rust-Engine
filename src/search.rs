@@ -1562,6 +1562,14 @@ fn negamax(
         return static_eval;
     }
 
+    // Threat context for this node (used to avoid reducing genuinely tactical quiet moves).
+    // Kept behind depth/in-check guards to avoid adding overhead in shallow nodes.
+    let threat_info: Option<ThreatInfo> = if ENABLE_LMR && new_depth > 4 && !in_check {
+        Some(threat::analyze(state))
+    } else {
+        None
+    };
+
     if ENABLE_NULL_MOVE
         && info.tuning.allow_nullmove && new_depth >= info.tuning.null_min_depth
         && ply > 0
@@ -1588,14 +1596,6 @@ fn negamax(
             let unmake_info = state.make_null_move_inplace();
 
             let next_ply = ply + 1;
-// Threat context for this node (used to avoid reducing genuinely tactical quiet moves).
-// Kept behind depth/in-check guards to avoid adding overhead in shallow nodes.
-let threat_info: Option<ThreatInfo> = if ENABLE_LMR && new_depth > 4 && !in_check {
-    Some(threat::analyze(state))
-} else {
-    None
-};
-
             stack[next_ply] = StackEntry::default();
             stack[next_ply].in_check = false;
 
