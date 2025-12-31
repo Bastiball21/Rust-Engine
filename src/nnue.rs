@@ -424,20 +424,29 @@ pub fn verify_accumulator(state: &crate::state::GameState, acc: &Accumulator, pe
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn evaluate_avx2(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
+unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
     // L1 Input generation (AVX2)
     let zero = _mm256_setzero_si256();
+    let qa = _mm256_set1_epi16(QA as i16);
 
-    // STM Only
+    // Dual-perspective funnel: SCReLU(STM) - SCReLU(NTM) (must match trainer)
     for i in (0..L1_SIZE).step_by(16) {
-        let ptr = stm_acc.v.as_ptr().add(i);
-        let val = _mm256_load_si256(ptr as *const __m256i); // Aligned load
-        let clamped = _mm256_min_epi16(_mm256_max_epi16(val, zero), _mm256_set1_epi16(QA as i16));
-        let res = screlu_calc_avx2(clamped);
+        let stm_ptr = stm_acc.v.as_ptr().add(i);
+        let ntm_ptr = ntm_acc.v.as_ptr().add(i);
+
+        let stm_val = _mm256_load_si256(stm_ptr as *const __m256i); // Aligned load
+        let ntm_val = _mm256_load_si256(ntm_ptr as *const __m256i); // Aligned load
+
+        let stm_clamped = _mm256_min_epi16(_mm256_max_epi16(stm_val, zero), qa);
+        let ntm_clamped = _mm256_min_epi16(_mm256_max_epi16(ntm_val, zero), qa);
+
+        let stm_act = screlu_calc_avx2(stm_clamped);
+        let ntm_act = screlu_calc_avx2(ntm_clamped);
+
+        let res = _mm256_sub_epi16(stm_act, ntm_act);
         _mm256_storeu_si256(scratch.hidden_l1.as_mut_ptr().add(i) as *mut __m256i, res);
     }
 
-    // NTM is NOT used in this architecture (Single Perspective Funnel), but we keep the accumulator updated by caller.
 
     // Layer 1: 256 -> 32
     // Note: We use only the first 256 elements of scratch.hidden_l1
@@ -468,9 +477,9 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Net
     (output * SCALE) / (QB * Q_ACTIVATION)
 }
 
-fn evaluate_scalar(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
+fn evaluate_scalar(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
     // L1 (Scalar) - STM Only
-    evaluate_l1_scalar(stm_acc, &mut scratch.hidden_l1);
+    evaluate_l1_scalar(stm_acc, ntm_acc, &mut scratch.hidden_l1);
 
     // Layer 1: 256 -> 32
     layer_affine_scalar(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
@@ -500,10 +509,12 @@ fn evaluate_scalar(stm_acc: &Accumulator, _ntm_acc: &Accumulator, net: &Network,
     (output * SCALE) / (QB * Q_ACTIVATION)
 }
 
-fn evaluate_l1_scalar(stm: &Accumulator, output: &mut [i16]) {
+fn evaluate_l1_scalar(stm: &Accumulator, ntm: &Accumulator, output: &mut [i16]) {
+    // Dual-perspective funnel: SCReLU(STM) - SCReLU(NTM) (must match trainer)
     for i in 0..L1_SIZE {
-        let val = stm.v[i].clamp(0, 255);
-        output[i] = SCRELU[val as usize];
+        let stm_val = stm.v[i].clamp(0, 255) as usize;
+        let ntm_val = ntm.v[i].clamp(0, 255) as usize;
+        output[i] = SCRELU[stm_val].wrapping_sub(SCRELU[ntm_val]);
     }
 }
 
