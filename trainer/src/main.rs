@@ -37,28 +37,12 @@ fn main() {
     let superbatches = 40;
 
 // Architecture:
-// default: 768 -> 256 -> 32 -> 32 -> 32 -> 1
 // nnue_512_64: 768 -> 512 -> 64 -> 1
-let l1_size: usize;
-let l2_size: usize;
-let l3_size: usize;
-let l4_size: usize;
-
-#[cfg(not(feature = "nnue_512_64"))]
-{
-    l1_size = 256;
-    l2_size = 32;
-    l3_size = 32;
-    l4_size = 32;
-}
-
-#[cfg(feature = "nnue_512_64")]
-{
-    l1_size = 512;
-    l2_size = 64;
-    l3_size = 0;
-    l4_size = 0;
-}
+let l1_size: usize = 512;
+let l2_size: usize = 64;
+// Unused
+let l3_size: usize = 0;
+let l4_size: usize = 0;
 
     // Parse command line arguments for dataset paths
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -105,49 +89,19 @@ let l4_size: usize;
     let buckets = ChessBucketsMirrored::new(std::array::from_fn(|i| i));
 
 // Save format depends on architecture
-let save_format: Vec<SavedFormat> = {
-    #[cfg(not(feature = "nnue_512_64"))]
-    {
-        vec![
-            // Layer 0 (Accumulator): 768 -> 256 (SCReLU)
-            SavedFormat::id("l0w").round().quantise::<i16>(255),
-            SavedFormat::id("l0b").round().quantise::<i16>(255),
+let save_format: Vec<SavedFormat> = vec![
+    // Layer 0 (Accumulator): 768 -> 512 (SCReLU)
+    SavedFormat::id("l0w").round().quantise::<i16>(255),
+    SavedFormat::id("l0b").round().quantise::<i16>(255),
 
-            // Layer 1: 256 -> 32 (ClippedReLU)
-            SavedFormat::id("l1w").round().quantise::<i16>(64),
-            SavedFormat::id("l1b").round().quantise::<i16>(64 * 127),
+    // Layer 1: 512 -> 64 (ClippedReLU)
+    SavedFormat::id("l1w").round().quantise::<i16>(64),
+    SavedFormat::id("l1b").round().quantise::<i16>(64 * 127),
 
-            // Layer 2: 32 -> 32 (ClippedReLU)
-            SavedFormat::id("l2w").round().quantise::<i16>(64),
-            SavedFormat::id("l2b").round().quantise::<i16>(64 * 127),
-
-            // Layer 3: 32 -> 32 (ClippedReLU)
-            SavedFormat::id("l3w").round().quantise::<i16>(64),
-            SavedFormat::id("l3b").round().quantise::<i16>(64 * 127),
-
-            // Layer 4: 32 -> 1 (Raw)
-            SavedFormat::id("l4w").round().quantise::<i16>(64),
-            SavedFormat::id("l4b").round().quantise::<i32>(255 * 64 * 127),
-        ]
-    }
-
-    #[cfg(feature = "nnue_512_64")]
-    {
-        vec![
-            // Layer 0 (Accumulator): 768 -> 512 (SCReLU)
-            SavedFormat::id("l0w").round().quantise::<i16>(255),
-            SavedFormat::id("l0b").round().quantise::<i16>(255),
-
-            // Layer 1: 512 -> 64 (ClippedReLU)
-            SavedFormat::id("l1w").round().quantise::<i16>(64),
-            SavedFormat::id("l1b").round().quantise::<i16>(64 * 127),
-
-            // Output: 64 -> 1 (Raw) [kept id "l2" to match engine loader]
-            SavedFormat::id("l2w").round().quantise::<i16>(64),
-            SavedFormat::id("l2b").round().quantise::<i32>(255 * 64 * 127),
-        ]
-    }
-};
+    // Output: 64 -> 1 (Raw) [kept id "l2" to match engine loader]
+    SavedFormat::id("l2w").round().quantise::<i16>(64),
+    SavedFormat::id("l2b").round().quantise::<i32>(255 * 64 * 127),
+];
 
     let mut trainer = ValueTrainerBuilder::default()
         .use_devices(vec![0])
@@ -167,27 +121,11 @@ let save_format: Vec<SavedFormat> = {
     let ntm0 = l0.forward(ntm_inputs).screlu();
     let combined = stm0 - ntm0;
 
-    #[cfg(not(feature = "nnue_512_64"))]
-    {
-        let l1 = builder.new_affine("l1", l1_size, l2_size);
-        let l2 = builder.new_affine("l2", l2_size, l3_size);
-        let l3 = builder.new_affine("l3", l3_size, l4_size);
-        let l4 = builder.new_affine("l4", l4_size, 1);
+    let l1 = builder.new_affine("l1", l1_size, l2_size);
+    let out = builder.new_affine("l2", l2_size, 1);
 
-        let h1 = l1.forward(combined).crelu();
-        let h2 = l2.forward(h1).crelu();
-        let h3 = l3.forward(h2).crelu();
-        l4.forward(h3)
-    }
-
-    #[cfg(feature = "nnue_512_64")]
-    {
-        let l1 = builder.new_affine("l1", l1_size, l2_size);
-        let out = builder.new_affine("l2", l2_size, 1);
-
-        let h1 = l1.forward(combined).crelu();
-        out.forward(h1)
-    }
+    let h1 = l1.forward(combined).crelu();
+    out.forward(h1)
 });
 
     let net_id = "aether-funnel";
@@ -236,9 +174,6 @@ let save_format: Vec<SavedFormat> = {
     let final_path = "nn-aether.nnue";
 
     if let Ok(mut content) = std::fs::read(&checkpoint_path) {
-        #[cfg(not(feature = "nnue_512_64"))]
-        let magic: u32 = 0xAE74E201;
-        #[cfg(feature = "nnue_512_64")]
         let magic: u32 = 0xAE74E202;
         let mut final_content = Vec::with_capacity(4 + content.len());
         final_content.extend_from_slice(&magic.to_le_bytes());
