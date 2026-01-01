@@ -1610,7 +1610,6 @@ fn negamax(
             let unmake_info = state.make_null_move_inplace();
 
             let next_ply = ply + 1;
-
             stack[next_ply] = StackEntry::default();
             stack[next_ply].in_check = false;
 
