@@ -25,7 +25,7 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_
 criterion = "0.5"
 
 [features]
-default = ["bmi2"]
+default = ["bmi2", "nnue_512_64"]
 bmi2 = []
 tuning = []
 packed-tt = []

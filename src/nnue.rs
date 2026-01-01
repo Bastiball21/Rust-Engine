@@ -7,7 +7,7 @@ use crate::nnue_scratch::NNUEScratch;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-static EMBEDDED_NET: &[u8] = include_bytes!("../nn-new.nnue");
+static EMBEDDED_NET: &[u8] = include_bytes!("../new-net.bin");
 
 // Architecture Constants
 #[cfg(not(feature = "nnue_512_64"))]
@@ -595,30 +595,51 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
     let l1_weights = read_vec(reader, L1_SIZE * L2_SIZE)?;
     let l1_biases = read_vec(reader, L2_SIZE)?;
 
-    // L2 (Dense 32->32)
+    // L2 / Output layer depends on architecture.
+    //
+    // - default: L2 is 32 -> 32 (ClippedReLU), then additional dense layers to 1 output
+    // - nnue_512_64: L2 is 64 -> 1 (raw output)
+
+    // L2 (default: 32->32, 512-64: 64->1)
     let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?;
     let l2_biases = read_vec(reader, L3_SIZE)?;
 
-    // L3 (Dense 32->32)
-    let l3_weights = read_vec(reader, L3_SIZE * L4_SIZE)?;
-    let l3_biases = read_vec(reader, L4_SIZE)?;
+    #[cfg(not(feature = "nnue_512_64"))]
+    {
+        // L3 (Dense 32->32)
+        let l3_weights = read_vec(reader, L3_SIZE * L4_SIZE)?;
+        let l3_biases = read_vec(reader, L4_SIZE)?;
 
-    // L4 (Dense 32->1)
-    let l4_weights = read_vec(reader, L4_SIZE * OUTPUT_SIZE)?;
-    let l4_biases = read_vec(reader, OUTPUT_SIZE)?;
+        // L4 (Dense 32->1)
+        let l4_weights = read_vec(reader, L4_SIZE * OUTPUT_SIZE)?;
+        let l4_biases = read_vec(reader, OUTPUT_SIZE)?;
 
-    Ok(Network {
-        l0_weights,
-        l0_biases,
-        l1_weights,
-        l1_biases,
-        l2_weights,
-        l2_biases,
-        l3_weights,
-        l3_biases,
-        l4_weights,
-        l4_biases,
-    })
+        Ok(Network {
+            l0_weights,
+            l0_biases,
+            l1_weights,
+            l1_biases,
+            l2_weights,
+            l2_biases,
+            l3_weights,
+            l3_biases,
+            l4_weights,
+            l4_biases,
+        })
+    }
+
+    #[cfg(feature = "nnue_512_64")]
+    {
+        // For nnue_512_64 networks, the file ends after L2 weights/biases.
+        Ok(Network {
+            l0_weights,
+            l0_biases,
+            l1_weights,
+            l1_biases,
+            l2_weights,
+            l2_biases,
+        })
+    }
 }
 
 pub fn load_network(path: &str) -> io::Result<Network> {
@@ -716,6 +737,7 @@ mod tests {
         // Since we probably don't have one, we just check if it returns gracefully or panics.
         // We can mock a network here just for this test!
 
+        #[cfg(not(feature = "nnue_512_64"))]
         let mock_network = Network {
             l0_weights: vec![0; INPUT_SIZE * NUM_BUCKETS * L1_SIZE],
             l0_biases: vec![10; L1_SIZE], // Use bias 10
@@ -727,6 +749,17 @@ mod tests {
             l3_biases: vec![1; L4_SIZE],
             l4_weights: vec![1; L4_SIZE * OUTPUT_SIZE],
             l4_biases: vec![1; OUTPUT_SIZE],
+        };
+
+        #[cfg(feature = "nnue_512_64")]
+        let mock_network = Network {
+            l0_weights: vec![0; INPUT_SIZE * NUM_BUCKETS * L1_SIZE],
+            l0_biases: vec![10; L1_SIZE],
+            l1_weights: vec![1; L1_SIZE * L2_SIZE],
+            l1_biases: vec![1; L2_SIZE],
+            // For nnue_512_64, L2 is the output layer (64 -> 1)
+            l2_weights: vec![1; L2_SIZE * L3_SIZE],
+            l2_biases: vec![1; L3_SIZE],
         };
 
         // We can't set the global OnceLock easily if it's already set or not.
