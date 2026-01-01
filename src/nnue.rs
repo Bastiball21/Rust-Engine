@@ -7,7 +7,7 @@ use crate::nnue_scratch::NNUEScratch;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-static EMBEDDED_NET: &[u8] = include_bytes!("../nn-new.nnue");
+static EMBEDDED_NET: &[u8] = include_bytes!("../new-net.bin");
 
 // Architecture Constants
 #[cfg(not(feature = "nnue_512_64"))]
