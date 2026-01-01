@@ -10,33 +10,17 @@ use std::arch::x86_64::*;
 static EMBEDDED_NET: &[u8] = include_bytes!("../new-net.bin");
 
 // Architecture Constants
-#[cfg(not(feature = "nnue_512_64"))]
-pub const L1_SIZE: usize = 256;
-#[cfg(not(feature = "nnue_512_64"))]
-pub const L2_SIZE: usize = 32;
-#[cfg(not(feature = "nnue_512_64"))]
-pub const L3_SIZE: usize = 32;
-#[cfg(not(feature = "nnue_512_64"))]
-pub const L4_SIZE: usize = 32;
-
-#[cfg(feature = "nnue_512_64")]
 pub const L1_SIZE: usize = 512;
-#[cfg(feature = "nnue_512_64")]
 pub const L2_SIZE: usize = 64;
-// Unused in nnue_512_64 path (kept non-zero for scratch struct layout).
-#[cfg(feature = "nnue_512_64")]
+// Unused path (kept non-zero for scratch struct layout).
 pub const L3_SIZE: usize = 1;
-// Unused in nnue_512_64 path (kept non-zero for scratch struct layout).
-#[cfg(feature = "nnue_512_64")]
+// Unused path (kept non-zero for scratch struct layout).
 pub const L4_SIZE: usize = 1;
 pub const OUTPUT_SIZE: usize = 1;
 
 pub const INPUT_SIZE: usize = 768;
 pub const NUM_BUCKETS: usize = 32; // Matches bullet_lib ChessBuckets (Standard Mirrored)
 
-#[cfg(not(feature = "nnue_512_64"))]
-pub const NETWORK_MAGIC: u32 = 0xAE74E201;
-#[cfg(feature = "nnue_512_64")]
 pub const NETWORK_MAGIC: u32 = 0xAE74E202;
 
 // Quantization Constants
@@ -448,30 +432,12 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Netw
     }
 
 
-    // Layer 1: 256 -> 32
-    // Note: We use only the first 256 elements of scratch.hidden_l1
+    // Layer 1: 512 -> 64
     layer_affine_avx2(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_avx2(&mut scratch.l2_out);
 
-#[cfg(not(feature = "nnue_512_64"))]
-{
-    // Layer 2: 32 -> 32
-    layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
-    clamp_activations_avx2(&mut scratch.l3_out);
-
-    // Layer 3: 32 -> 32
-    layer_affine_avx2(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
-    clamp_activations_avx2(&mut scratch.l4_out);
-
-    // Output Layer: 32 -> 1
-    layer_affine_avx2(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
-}
-
-#[cfg(feature = "nnue_512_64")]
-{
     // Output Layer: 64 -> 1
     layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.final_out, L2_SIZE, 1);
-}
 
     let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
@@ -481,29 +447,12 @@ fn evaluate_scalar(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, 
     // L1 (Scalar) - STM Only
     evaluate_l1_scalar(stm_acc, ntm_acc, &mut scratch.hidden_l1);
 
-    // Layer 1: 256 -> 32
+    // Layer 1: 512 -> 64
     layer_affine_scalar(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_scalar(&mut scratch.l2_out);
 
-#[cfg(not(feature = "nnue_512_64"))]
-{
-    // Layer 2: 32 -> 32
-    layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.l3_out, L2_SIZE, L3_SIZE);
-    clamp_activations_scalar(&mut scratch.l3_out);
-
-    // Layer 3: 32 -> 32
-    layer_affine_scalar(&scratch.l3_out, &net.l3_weights, &net.l3_biases, &mut scratch.l4_out, L3_SIZE, L4_SIZE);
-    clamp_activations_scalar(&mut scratch.l4_out);
-
-    // Output Layer: 32 -> 1
-    layer_affine_scalar(&scratch.l4_out, &net.l4_weights, &net.l4_biases, &mut scratch.final_out, L4_SIZE, 1);
-}
-
-#[cfg(feature = "nnue_512_64")]
-{
     // Output Layer: 64 -> 1
     layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.final_out, L2_SIZE, 1);
-}
 
     let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
@@ -540,29 +489,17 @@ fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i16], output: &
 // --------------------------------------------------------
 
 pub struct Network {
-    // Layer 0 (768*32 -> 256)
-    pub l0_weights: Vec<i16>, // (768*32) * 256
-    pub l0_biases: Vec<i16>,  // 256
+    // Layer 0 (768*32 -> 512)
+    pub l0_weights: Vec<i16>, // (768*32) * 512
+    pub l0_biases: Vec<i16>,  // 512
 
-    // Layer 1 (256 -> 32)
-    pub l1_weights: Vec<i16>, // 256 * 32
-    pub l1_biases: Vec<i16>,  // 32
+    // Layer 1 (512 -> 64)
+    pub l1_weights: Vec<i16>, // 512 * 64
+    pub l1_biases: Vec<i16>,  // 64
 
-    // Layer 2
-    // default: 32 -> 32 (ClippedReLU)
-    // nnue_512_64: 64 -> 1 (Raw output)
+    // Layer 2 (64 -> 1)
     pub l2_weights: Vec<i16>,
     pub l2_biases: Vec<i16>,
-
-    #[cfg(not(feature = "nnue_512_64"))]
-    pub l3_weights: Vec<i16>,
-    #[cfg(not(feature = "nnue_512_64"))]
-    pub l3_biases: Vec<i16>,
-
-    #[cfg(not(feature = "nnue_512_64"))]
-    pub l4_weights: Vec<i16>,
-    #[cfg(not(feature = "nnue_512_64"))]
-    pub l4_biases: Vec<i16>,
 }
 
 pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> {
@@ -595,51 +532,18 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
     let l1_weights = read_vec(reader, L1_SIZE * L2_SIZE)?;
     let l1_biases = read_vec(reader, L2_SIZE)?;
 
-    // L2 / Output layer depends on architecture.
-    //
-    // - default: L2 is 32 -> 32 (ClippedReLU), then additional dense layers to 1 output
-    // - nnue_512_64: L2 is 64 -> 1 (raw output)
-
-    // L2 (default: 32->32, 512-64: 64->1)
-    let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?;
+    // L2 (64 -> 1)
+    let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?; // L3_SIZE is 1
     let l2_biases = read_vec(reader, L3_SIZE)?;
 
-    #[cfg(not(feature = "nnue_512_64"))]
-    {
-        // L3 (Dense 32->32)
-        let l3_weights = read_vec(reader, L3_SIZE * L4_SIZE)?;
-        let l3_biases = read_vec(reader, L4_SIZE)?;
-
-        // L4 (Dense 32->1)
-        let l4_weights = read_vec(reader, L4_SIZE * OUTPUT_SIZE)?;
-        let l4_biases = read_vec(reader, OUTPUT_SIZE)?;
-
-        Ok(Network {
-            l0_weights,
-            l0_biases,
-            l1_weights,
-            l1_biases,
-            l2_weights,
-            l2_biases,
-            l3_weights,
-            l3_biases,
-            l4_weights,
-            l4_biases,
-        })
-    }
-
-    #[cfg(feature = "nnue_512_64")]
-    {
-        // For nnue_512_64 networks, the file ends after L2 weights/biases.
-        Ok(Network {
-            l0_weights,
-            l0_biases,
-            l1_weights,
-            l1_biases,
-            l2_weights,
-            l2_biases,
-        })
-    }
+    Ok(Network {
+        l0_weights,
+        l0_biases,
+        l1_weights,
+        l1_biases,
+        l2_weights,
+        l2_biases,
+    })
 }
 
 pub fn load_network(path: &str) -> io::Result<Network> {
@@ -737,27 +641,12 @@ mod tests {
         // Since we probably don't have one, we just check if it returns gracefully or panics.
         // We can mock a network here just for this test!
 
-        #[cfg(not(feature = "nnue_512_64"))]
-        let mock_network = Network {
-            l0_weights: vec![0; INPUT_SIZE * NUM_BUCKETS * L1_SIZE],
-            l0_biases: vec![10; L1_SIZE], // Use bias 10
-            l1_weights: vec![1; L1_SIZE * L2_SIZE],
-            l1_biases: vec![1; L2_SIZE],
-            l2_weights: vec![1; L2_SIZE * L3_SIZE],
-            l2_biases: vec![1; L3_SIZE],
-            l3_weights: vec![1; L3_SIZE * L4_SIZE],
-            l3_biases: vec![1; L4_SIZE],
-            l4_weights: vec![1; L4_SIZE * OUTPUT_SIZE],
-            l4_biases: vec![1; OUTPUT_SIZE],
-        };
-
-        #[cfg(feature = "nnue_512_64")]
         let mock_network = Network {
             l0_weights: vec![0; INPUT_SIZE * NUM_BUCKETS * L1_SIZE],
             l0_biases: vec![10; L1_SIZE],
             l1_weights: vec![1; L1_SIZE * L2_SIZE],
             l1_biases: vec![1; L2_SIZE],
-            // For nnue_512_64, L2 is the output layer (64 -> 1)
+            // L2 is the output layer (64 -> 1)
             l2_weights: vec![1; L2_SIZE * L3_SIZE],
             l2_biases: vec![1; L3_SIZE],
         };
