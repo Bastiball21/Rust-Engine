@@ -19,8 +19,6 @@ pub const OUTPUT_SIZE: usize = 1;
 pub const INPUT_SIZE: usize = 768;
 pub const NUM_BUCKETS: usize = 32;
 
-pub const NETWORK_MAGIC: u32 = 0xAE74E202;
-
 // Quantization Constants
 const QA: i32 = 255;
 const QB: i32 = 64;
@@ -385,13 +383,6 @@ pub struct Network {
 }
 
 pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> {
-    let mut magic_bytes = [0u8; 4];
-    reader.read_exact(&mut magic_bytes)?;
-    let magic = u32::from_le_bytes(magic_bytes);
-    if magic != NETWORK_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
-    }
-
     let read_vec = |reader: &mut R, len: usize| -> io::Result<Vec<i16>> {
         let mut v = vec![0i16; len];
         let mut buf = vec![0u8; len * 2];

@@ -173,18 +173,13 @@ let save_format: Vec<SavedFormat> = vec![
     let checkpoint_path = format!("{}/{}-{}.bin", output_directory, net_id, superbatches);
     let final_path = "nn-aether.nnue";
 
-    if let Ok(mut content) = std::fs::read(&checkpoint_path) {
-        let magic: u32 = 0xAE74E202;
-        let mut final_content = Vec::with_capacity(4 + content.len());
-        final_content.extend_from_slice(&magic.to_le_bytes());
-        final_content.append(&mut content);
-
-        if let Ok(_) = std::fs::write(final_path, &final_content) {
+    if let Ok(content) = std::fs::read(&checkpoint_path) {
+        if let Ok(_) = std::fs::write(final_path, &content) {
             println!("Successfully saved finalized network to: {}", final_path);
         } else {
             eprintln!("Failed to write finalized network to: {}", final_path);
         }
     } else {
-        println!("Could not find final checkpoint at: {}. Please manually prepend magic 0xAE74E201.", checkpoint_path);
+        println!("Could not find final checkpoint at: {}.", checkpoint_path);
     }
 }
