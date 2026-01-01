@@ -5,6 +5,8 @@ use crate::search;
 use crate::state::{GameState, WHITE};
 use crate::tt::{TranspositionTable, FLAG_EXACT};
 use crate::parameters::SearchParameters;
+use crate::uci::UCI_CHESS960;
+use crate::chess960::generate_chess960_position;
 use bulletformat::BulletFormat;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
@@ -36,6 +38,7 @@ pub struct DatagenConfig {
     pub seed: u64,
     pub book_path: Option<String>,
     pub book_ply: usize,
+    pub chess960: bool,
 }
 
 // --- SplitMix64 RNG ---
@@ -341,11 +344,18 @@ pub fn run_datagen(config: DatagenConfig) {
     // Reset the flag in case this function is called multiple times
     STOP_FLAG.store(false, Ordering::Relaxed);
 
+    // --- NEW: Set Global 960 Flag ---
+    UCI_CHESS960.store(config.chess960, Ordering::Relaxed);
+    // --------------------------------
+
     println!("Starting Datagen (Aether Zero)");
     println!("  Games:    {}", config.num_games);
     println!("  Threads:  {}", config.num_threads);
     println!("  Output:   {}", config.filename);
     println!("  Seed:     {}", config.seed);
+    if config.chess960 {
+        println!("  Mode:     Chess960");
+    }
 
     let book = if let Some(path) = &config.book_path {
         println!("  Book:     {} (ply: {})", path, config.book_ply);
@@ -554,9 +564,15 @@ pub fn run_datagen(config: DatagenConfig) {
                         game_rolling_hash = rng.splitmix(config.seed ^ state.hash);
 
                     } else {
-                        state = GameState::parse_fen(
-                            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                        );
+                        if config.chess960 {
+                            // Generate random Chess960 position (0..960)
+                            let idx = rng.range(0, 960) as u16;
+                            state = generate_chess960_position(idx);
+                        } else {
+                            state = GameState::parse_fen(
+                                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                            );
+                        }
                         game_rolling_hash = rng.splitmix(config.seed ^ state.hash);
 
                         // 2. Random Walk (8-9 plies)

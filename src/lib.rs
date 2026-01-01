@@ -171,16 +171,27 @@ pub fn run_cli() {
             };
 
             let book_path = if args.len() > 7 {
-                Some(args[7].clone())
+                if args[7] == "chess960" {
+                    None
+                } else {
+                    Some(args[7].clone())
+                }
             } else {
                 None
             };
 
             let book_ply = if args.len() > 8 {
-                args[8].parse().unwrap_or(0)
+                if args[8] == "chess960" {
+                    0
+                } else {
+                    args[8].parse().unwrap_or(0)
+                }
             } else {
                 0
             };
+
+            // robustly check for "chess960" anywhere in the arguments
+            let is_chess960 = args.iter().skip(1).any(|arg| arg == "chess960");
 
             let config = datagen::DatagenConfig {
                 num_games: games,
@@ -189,6 +200,7 @@ pub fn run_cli() {
                 seed,
                 book_path,
                 book_ply,
+                chess960: is_chess960,
             };
 
             // Ensure NNUE is loaded (File or Embedded)
