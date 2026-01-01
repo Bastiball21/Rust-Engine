@@ -51,7 +51,7 @@ impl CorrectionHistory {
         let w = (depth as i32).clamp(1, 16);
         let newv = cur + ((error - cur) * w) / 16;
 
-        self.data[side][idx] = (newv.clamp(-512, 512) as i16);
+        self.data[side][idx] = newv.clamp(-512, 512) as i16;
     }
 
     #[inline]
