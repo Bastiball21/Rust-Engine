@@ -1,4 +1,3 @@
-// src/nnue.rs
 use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::sync::OnceLock;
@@ -221,7 +220,7 @@ unsafe fn screlu_calc_avx2(val: __m256i) -> __m256i {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-// FIX: Changed biases to &[i32]
+// FIX: Changed biases to &[i32] to support larger bias values
 unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i32], output: &mut [i16], in_size: usize, out_size: usize) {
     for i in 0..out_size {
         let mut sum_vec = _mm256_setzero_si256();
@@ -243,7 +242,7 @@ unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i32], outp
         let v_sum3 = _mm_hadd_epi32(v_sum2, v_sum2);
         let sum_part = _mm_cvtsi128_si32(v_sum3);
 
-        // FIX: Removed cast, biases[i] is already i32
+        // FIX: No cast needed, biases are i32
         let total_sum = sum_part + biases[i];
         output[i] = (total_sum >> OUTPUT_SHIFT) as i16;
     }
@@ -321,6 +320,8 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Netw
         let ntm_clamped = _mm256_min_epi16(_mm256_max_epi16(ntm_val, zero), qa);
         let stm_act = screlu_calc_avx2(stm_clamped);
         let ntm_act = screlu_calc_avx2(ntm_clamped);
+        
+        // DUAL PERSPECTIVE DIFFERENCE: STM - NTM
         let res = _mm256_sub_epi16(stm_act, ntm_act);
         _mm256_storeu_si256(scratch.hidden_l1.as_mut_ptr().add(i) as *mut __m256i, res);
     }
@@ -351,6 +352,7 @@ fn evaluate_l1_scalar(stm: &Accumulator, ntm: &Accumulator, output: &mut [i16]) 
     for i in 0..L1_SIZE {
         let stm_val = stm.v[i].clamp(0, 255) as usize;
         let ntm_val = ntm.v[i].clamp(0, 255) as usize;
+        // DUAL PERSPECTIVE DIFFERENCE: STM - NTM
         output[i] = SCRELU[stm_val].wrapping_sub(SCRELU[ntm_val]);
     }
 }
@@ -364,7 +366,7 @@ fn clamp_activations_scalar(buffer: &mut [i16]) {
 // FIX: Changed biases to &[i32]
 fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i32], output: &mut [i16], in_size: usize, out_size: usize) {
     for i in 0..out_size {
-        // FIX: Removed cast, biases[i] is already i32
+        // FIX: biases[i] is already i32
         let mut sum: i32 = biases[i];
         for j in 0..in_size {
             sum += (input[j] as i32) * (weights[i * in_size + j] as i32);
@@ -375,11 +377,11 @@ fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i32], output: &
 
 pub struct Network {
     pub l0_weights: Vec<i16>,
-    pub l0_biases: Vec<i16>, // Keep L0 as i16 for accumulator
+    pub l0_biases: Vec<i16>,
     pub l1_weights: Vec<i16>,
-    pub l1_biases: Vec<i32>, // FIX: Stored as i32
+    pub l1_biases: Vec<i32>, // FIX: Stored as i32 for uniformity
     pub l2_weights: Vec<i16>,
-    pub l2_biases: Vec<i32>, // FIX: Stored as i32
+    pub l2_biases: Vec<i32>, // FIX: Stored as i32 for uniformity
 }
 
 pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> {
@@ -400,7 +402,7 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
         Ok(v)
     };
 
-    // FIX: New helper to read i32
+    // FIX: New helper to read i32 from file (needed for L2/Output biases)
     let read_vec_i32 = |reader: &mut R, len: usize| -> io::Result<Vec<i32>> {
         let mut v = vec![0i32; len];
         let mut buf = vec![0u8; len * 4];
@@ -417,12 +419,14 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
     let l0_biases = read_vec(reader, L1_SIZE)?;
 
     let l1_weights = read_vec(reader, L1_SIZE * L2_SIZE)?;
-    // FIX: Read L1 biases as i16, then convert to i32 for uniformity
+    
+    // FIX: Read L1 biases as i16 (as saved by trainer), then convert to i32
     let l1_biases_i16 = read_vec(reader, L2_SIZE)?;
     let l1_biases = l1_biases_i16.into_iter().map(|x| x as i32).collect();
 
     let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?;
-    // FIX: Read L2 biases as i32 (Trainer writes i32 for output)
+    
+    // FIX: Read L2 biases as i32 (CRITICAL FIX - Trainer saves this as i32)
     let l2_biases = read_vec_i32(reader, L3_SIZE)?;
 
     Ok(Network {
