@@ -146,7 +146,7 @@ pub fn uci_loop() {
 
                     let handle = builder
                         .spawn(move || {
-                            let mut search_data = search::SearchData::new();
+                            let mut search_data = Box::new(search::SearchData::new());
                             let mut stack = [search::StackEntry::default(); search::STACK_SIZE];
                             search::search(
                                 &safe_state,
@@ -155,7 +155,7 @@ pub fn uci_loop() {
                                 stop_clone,
                                 is_main,
                                 &history_clone,
-                                &mut search_data,
+                                &mut *search_data,
                                 &mut stack,
                                 &params_clone,
                                 mode_clone,
