@@ -12,6 +12,7 @@ use crate::nnue::Accumulator;
 use crate::nnue_scratch::NNUEScratch;
 use crate::history::ContinuationHistory;
 use crate::correction::CorrectionHistory;
+use crate::uci_output::{uci_println, uci_print};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicI16, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -1100,7 +1101,7 @@ pub fn search(
 
     if main_thread {
         if let Some((tb_move, tb_score)) = syzygy::probe_root(state) {
-            println!("info string Syzygy Found: Score {} Move {:?}", tb_score, tb_move);
+            uci_println(&format!("info string Syzygy Found: Score {} Move {:?}", tb_score, tb_move));
             let score_str = if tb_score > MATE_SCORE {
                  format!("mate {}", (MATE_VALUE - tb_score + 1) / 2)
             } else if tb_score < -MATE_SCORE {
@@ -1109,10 +1110,10 @@ pub fn search(
                  format!("cp {}", tb_score)
             };
 
-            println!("info depth 1 seldepth 1 score {} nodes 0 nps 0 hashfull {} time 0 pv {}",
-                     score_str, tt.hashfull(), format_move_uci(tb_move, state));
+            uci_println(&format!("info depth 1 seldepth 1 score {} nodes 0 nps 0 hashfull {} time 0 pv {}",
+                     score_str, tt.hashfull(), format_move_uci(tb_move, state)));
 
-            println!("bestmove {}", format_move_uci(tb_move, state));
+            uci_println(&format!("bestmove {}", format_move_uci(tb_move, state)));
             return (tb_score, Some(tb_move));
         }
     }
@@ -1159,10 +1160,10 @@ pub fn search(
 
     if root_moves.is_empty() {
         if stack[0].in_check {
-            if main_thread { println!("bestmove (none)"); }
+            if main_thread { uci_println("bestmove (none)"); }
             return (-MATE_VALUE, None);
         } else {
-            if main_thread { println!("bestmove (none)"); }
+            if main_thread { uci_println("bestmove (none)"); }
             return (0, None);
         }
     }
@@ -1362,7 +1363,7 @@ pub fn search(
                  ponder_move = p_move;
             }
 
-            println!(
+            uci_println(&format!(
                 "info depth {} seldepth {} score {} nodes {} nps {} hashfull {} time {} pv {}",
                 depth,
                 info.seldepth,
@@ -1372,7 +1373,7 @@ pub fn search(
                 tt.hashfull(),
                 start_time.elapsed().as_millis(),
                 pv_line
-            );
+            ));
         }
 
         depth += 1;
@@ -1385,16 +1386,16 @@ pub fn search(
 
     if main_thread {
         if let Some(bm) = best_move {
-            print!("bestmove {}", format_move_uci(bm, state));
+            uci_print(&format!("bestmove {}", format_move_uci(bm, state)));
             if let Some(pm) = ponder_move {
-                print!(
+                uci_print(&format!(
                     " ponder {}",
                     format_move_uci(pm, state)
-                );
+                ));
             }
-            println!();
+            uci_println("");
         } else {
-            println!("bestmove (none)");
+            uci_println("bestmove (none)");
         }
     }
 
