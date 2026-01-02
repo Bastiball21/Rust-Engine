@@ -89,6 +89,20 @@ pub fn uci_loop() {
                 println!("uciok");
             }
             "isready" => println!("readyok"),
+            "eval" => {
+                let mut accumulators = [crate::nnue::Accumulator::default(); 2];
+                let mut scratch = crate::nnue_scratch::NNUEScratch::default();
+                game_state.refresh_accumulator(&mut accumulators);
+
+                let score = crate::eval::evaluate(
+                    &game_state,
+                    Some(&mut accumulators),
+                    Some(&mut scratch),
+                    -32000,
+                    32000,
+                );
+                println!("Eval: {}", score);
+            }
             "ucinewgame" => {
                 let shards = TT_SHARDS.load(Ordering::Relaxed);
                 if let Some(tt_mut) = Arc::get_mut(&mut tt) {
