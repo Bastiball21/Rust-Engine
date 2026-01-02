@@ -441,6 +441,9 @@ mod tests {
 
     #[test]
     fn test_tt_replacement_policy() {
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+
         // Mock TT with 1 Cluster
         // CLUSTER_SIZE is 4 now
         let mut tt = TranspositionTable::new(1, 1);
