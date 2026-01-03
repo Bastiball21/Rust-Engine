@@ -1,3 +1,4 @@
+// src/nnue.rs
 use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::sync::OnceLock;
@@ -54,8 +55,10 @@ fn use_avx2() -> bool {
     })
 }
 
+// CRITICAL FIX: Ensure 64-byte alignment and C layout so 'v' is at offset 0.
+// This prevents AVX2 load/store instructions from crashing on misaligned addresses.
 #[derive(Clone, Copy, Debug)]
-#[repr(align(64))]
+#[repr(C, align(64))]
 pub struct Accumulator {
     pub v: [i16; L1_SIZE],
     pub magic: u16,
@@ -218,7 +221,6 @@ unsafe fn screlu_calc_avx2(val: __m256i) -> __m256i {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-// FIX: Changed biases to &[i32] to support larger bias values
 unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i32], output: &mut [i16], in_size: usize, out_size: usize) {
     for i in 0..out_size {
         let mut sum_vec = _mm256_setzero_si256();
@@ -240,7 +242,6 @@ unsafe fn layer_affine_avx2(input: &[i16], weights: &[i16], biases: &[i32], outp
         let v_sum3 = _mm_hadd_epi32(v_sum2, v_sum2);
         let sum_part = _mm_cvtsi128_si32(v_sum3);
 
-        // FIX: No cast needed, biases are i32
         let total_sum = sum_part + biases[i];
         output[i] = (total_sum >> OUTPUT_SHIFT) as i16;
     }
@@ -321,11 +322,9 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Netw
         _mm256_storeu_si256(scratch.hidden_l1.as_mut_ptr().add(i) as *mut __m256i, res);
     }
 
-    // FIX: Using i32 biases
     layer_affine_avx2(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_avx2(&mut scratch.l2_out);
 
-    // FIX: Using i32 biases
     layer_affine_avx2(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.final_out, L2_SIZE, 1);
 
     let output = scratch.final_out[0] as i32;
@@ -334,10 +333,8 @@ unsafe fn evaluate_avx2(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Netw
 
 fn evaluate_scalar(stm_acc: &Accumulator, ntm_acc: &Accumulator, net: &Network, scratch: &mut NNUEScratch) -> i32 {
     evaluate_l1_scalar(stm_acc, ntm_acc, &mut scratch.hidden_l1);
-    // FIX: Using i32 biases
     layer_affine_scalar(&scratch.hidden_l1, &net.l1_weights, &net.l1_biases, &mut scratch.l2_out, L1_SIZE, L2_SIZE);
     clamp_activations_scalar(&mut scratch.l2_out);
-    // FIX: Using i32 biases
     layer_affine_scalar(&scratch.l2_out, &net.l2_weights, &net.l2_biases, &mut scratch.final_out, L2_SIZE, 1);
     let output = scratch.final_out[0] as i32;
     (output * SCALE) / (QB * Q_ACTIVATION)
@@ -347,7 +344,6 @@ fn evaluate_l1_scalar(stm: &Accumulator, ntm: &Accumulator, output: &mut [i16]) 
     for i in 0..L1_SIZE {
         let stm_val = stm.v[i].clamp(0, 255) as usize;
         let ntm_val = ntm.v[i].clamp(0, 255) as usize;
-        // DUAL PERSPECTIVE DIFFERENCE: STM - NTM
         output[i] = SCRELU[stm_val].wrapping_sub(SCRELU[ntm_val]);
     }
 }
@@ -358,10 +354,8 @@ fn clamp_activations_scalar(buffer: &mut [i16]) {
     }
 }
 
-// FIX: Changed biases to &[i32]
 fn layer_affine_scalar(input: &[i16], weights: &[i16], biases: &[i32], output: &mut [i16], in_size: usize, out_size: usize) {
     for i in 0..out_size {
-        // FIX: biases[i] is already i32
         let mut sum: i32 = biases[i];
         for j in 0..in_size {
             sum += (input[j] as i32) * (weights[i * in_size + j] as i32);
@@ -374,9 +368,9 @@ pub struct Network {
     pub l0_weights: Vec<i16>,
     pub l0_biases: Vec<i16>,
     pub l1_weights: Vec<i16>,
-    pub l1_biases: Vec<i32>, // FIX: Stored as i32 for uniformity
+    pub l1_biases: Vec<i32>,
     pub l2_weights: Vec<i16>,
-    pub l2_biases: Vec<i32>, // FIX: Stored as i32 for uniformity
+    pub l2_biases: Vec<i32>,
 }
 
 pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> {
@@ -390,7 +384,6 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
         Ok(v)
     };
 
-    // FIX: New helper to read i32 from file (needed for L2/Output biases)
     let read_vec_i32 = |reader: &mut R, len: usize| -> io::Result<Vec<i32>> {
         let mut v = vec![0i32; len];
         let mut buf = vec![0u8; len * 4];
@@ -408,13 +401,10 @@ pub fn load_network_from_reader<R: Read>(reader: &mut R) -> io::Result<Network> 
 
     let l1_weights = read_vec(reader, L1_SIZE * L2_SIZE)?;
     
-    // FIX: Read L1 biases as i16 (as saved by trainer), then convert to i32
     let l1_biases_i16 = read_vec(reader, L2_SIZE)?;
     let l1_biases = l1_biases_i16.into_iter().map(|x| x as i32).collect();
 
     let l2_weights = read_vec(reader, L2_SIZE * L3_SIZE)?;
-    
-    // FIX: Read L2 biases as i32 (CRITICAL FIX - Trainer saves this as i32)
     let l2_biases = read_vec_i32(reader, L3_SIZE)?;
 
     Ok(Network {
