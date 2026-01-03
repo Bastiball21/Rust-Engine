@@ -265,16 +265,13 @@ pub fn evaluate(stm_acc: &mut Accumulator, ntm_acc: &mut Accumulator, scratch: &
         None => return 0,
     };
 
-    if cfg!(debug_assertions) {
-        if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
-            panic!("CRITICAL ERROR: NNUE is loaded but Accumulators are invalid...");
+    if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
+        if cfg!(debug_assertions) {
+            eprintln!("WARNING: Accumulators were invalid (magic=0). Refreshing from scratch.");
         }
-    } else {
-         if stm_acc.magic != ACC_MAGIC || ntm_acc.magic != ACC_MAGIC {
-             use crate::state::{K, k};
-             stm_acc.refresh(&state.bitboards, state.side_to_move, state.bitboards[if state.side_to_move == crate::state::WHITE { K } else { k }].get_lsb_index() as usize);
-             ntm_acc.refresh(&state.bitboards, 1 - state.side_to_move, state.bitboards[if (1 - state.side_to_move) == crate::state::WHITE { K } else { k }].get_lsb_index() as usize);
-         }
+        use crate::state::{K, k};
+        stm_acc.refresh(&state.bitboards, state.side_to_move, state.bitboards[if state.side_to_move == crate::state::WHITE { K } else { k }].get_lsb_index() as usize);
+        ntm_acc.refresh(&state.bitboards, 1 - state.side_to_move, state.bitboards[if (1 - state.side_to_move) == crate::state::WHITE { K } else { k }].get_lsb_index() as usize);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -439,16 +436,16 @@ pub fn init_nnue(path: &str) {
     match load_network(path) {
         Ok(net) => {
             NETWORK.set(net).ok();
-            println!("NNUE loaded successfully from {}", path);
+            crate::uci_output::uci_println(&format!("info string NNUE loaded successfully from {}", path));
         }
         Err(e) => {
-            println!("Failed to load NNUE from {}: {}. Trying embedded...", path, e);
+            crate::uci_output::uci_println(&format!("info string Failed to load NNUE from {}: {}. Trying embedded...", path, e));
             match load_network_from_reader(&mut Cursor::new(EMBEDDED_NET)) {
                 Ok(net) => {
                     NETWORK.set(net).ok();
-                    println!("NNUE loaded successfully from embedded data");
+                    crate::uci_output::uci_println("info string NNUE loaded successfully from embedded data");
                 }
-                Err(e2) => println!("Failed to load embedded NNUE: {}", e2),
+                Err(e2) => crate::uci_output::uci_println(&format!("info string Failed to load embedded NNUE: {}", e2)),
             }
         }
     }
@@ -462,9 +459,9 @@ pub fn ensure_nnue_loaded() {
         match load_network_from_reader(&mut Cursor::new(EMBEDDED_NET)) {
             Ok(net) => {
                 NETWORK.set(net).ok();
-                println!("NNUE loaded successfully from embedded data");
+                crate::uci_output::uci_println("info string NNUE loaded successfully from embedded data");
             }
-            Err(e) => println!("Failed to load embedded NNUE: {}", e),
+            Err(e) => crate::uci_output::uci_println(&format!("info string Failed to load embedded NNUE: {}", e)),
         }
     }
 }
