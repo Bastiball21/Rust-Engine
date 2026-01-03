@@ -13,6 +13,7 @@ use std::sync::{
 use std::thread;
 
 use crate::syzygy;
+use crate::uci_output::{uci_println, uci_print};
 
 // Global UCI Option
 pub static UCI_CHESS960: AtomicBool = AtomicBool::new(false);
@@ -74,21 +75,21 @@ pub fn uci_loop() {
 
         match command {
             "uci" => {
-                println!("id name Aether 1.0.0");
-                println!("id author Basti Dangca");
-                println!("option name Hash type spin default 64 min 1 max 262144");
-                println!("option name Threads type spin default 1 min 1 max 64");
-                println!("option name SyzygyPath type string default <empty>");
-                println!("option name Move Overhead type spin default 10 min 0 max 5000");
-                println!("option name EvalFile type string default nn-aether.nnue");
-                println!("option name UCI_Chess960 type check default false");
-                println!("option name UCI_ShowWDL type check default false");
-                println!("option name TTShards type spin default 1 min 1 max 64");
-                println!("option name EvalBlend type spin default 0 min 0 max 256");
-                println!("option name Mode type combo default Play var Play var Datagen");
-                println!("uciok");
+                uci_println("id name Aether 1.0.0");
+                uci_println("id author Basti Dangca");
+                uci_println("option name Hash type spin default 64 min 1 max 262144");
+                uci_println("option name Threads type spin default 1 min 1 max 64");
+                uci_println("option name SyzygyPath type string default <empty>");
+                uci_println("option name Move Overhead type spin default 10 min 0 max 5000");
+                uci_println("option name EvalFile type string default nn-aether.nnue");
+                uci_println("option name UCI_Chess960 type check default false");
+                uci_println("option name UCI_ShowWDL type check default false");
+                uci_println("option name TTShards type spin default 1 min 1 max 64");
+                uci_println("option name EvalBlend type spin default 0 min 0 max 256");
+                uci_println("option name Mode type combo default Play var Play var Datagen");
+                uci_println("uciok");
             }
-            "isready" => println!("readyok"),
+            "isready" => uci_println("readyok"),
             "ucinewgame" => {
                 let shards = TT_SHARDS.load(Ordering::Relaxed);
                 if let Some(tt_mut) = Arc::get_mut(&mut tt) {

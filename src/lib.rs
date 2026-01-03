@@ -1,19 +1,25 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 pub mod bitboard;
 pub mod book;
+pub mod build;
 pub mod bullet_helper;
 pub mod chess960; // Helper
+pub mod correction;
 pub mod datagen;
+pub mod dense_history;
 pub mod endgame;
 pub mod eval;
+pub mod history; // Added
 pub mod logging;
 pub mod movegen;
 pub mod nnue;
 pub mod nnue_scratch;
+pub mod parameters;
 pub mod pawn;
 pub mod perft;
 pub mod search;
 pub mod state;
+pub mod syzygy; // Added
 pub mod tactical_test;
 pub mod tests;
 #[cfg(test)]
@@ -22,14 +28,10 @@ pub mod threat;
 pub mod time;
 pub mod tt;
 pub mod tuning;
-pub mod uci;
-pub mod zobrist; // Tests
-pub mod syzygy; // Added
-pub mod parameters;
 pub mod tuning_spsa;
-pub mod history; // Added
-pub mod dense_history;
-pub mod correction;
+pub mod uci;
+pub mod uci_output;
+pub mod zobrist; // Tests
 
 use std::env;
 use std::thread;
