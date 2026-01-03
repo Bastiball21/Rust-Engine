@@ -713,8 +713,10 @@ pub fn run_datagen(config: DatagenConfig) {
                         {
                             if tt_flag == FLAG_EXACT && tt_depth >= 6 {
                                 // SAFETY CHECK: Ensure TT move is valid for current state to prevent collision crashes
+                                // is_pseudo_legal checks geometry and rules.
+                                // is_move_consistent checks that capture flag matches board state (occupied/empty).
                                 if let Some(mv) = tt_move {
-                                    if tt.is_pseudo_legal(&state, mv) {
+                                    if tt.is_pseudo_legal(&state, mv) && state.is_move_consistent(mv) {
                                         search_score = tt_score;
                                         best_move = Some(mv);
                                         used_tt_hit = true;
