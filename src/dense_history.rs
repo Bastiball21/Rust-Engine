@@ -10,12 +10,11 @@ pub struct MoveIndexer;
 
 const INVALID: u16 = u16::MAX;
 
-static LOOKUP: OnceLock<[[u16; 64]; 64]> = OnceLock::new();
-static MAX_MOVES: OnceLock<usize> = OnceLock::new();
+static LOOKUP: OnceLock<([[u16; 64]; 64], usize)> = OnceLock::new();
 
 impl MoveIndexer {
     #[inline(always)]
-    fn init() -> [[u16; 64]; 64] {
+    fn init() -> ([[u16; 64]; 64], usize) {
         let mut table = [[INVALID; 64]; 64];
         let mut next_id: u16 = 0;
 
@@ -47,26 +46,19 @@ impl MoveIndexer {
             }
         }
 
-        // Store computed max (as usize) for consumers.
-        let _ = MAX_MOVES.set(next_id as usize);
-        table
+        (table, next_id as usize)
     }
 
     /// Returns the number of dense move IDs (valid pseudo-legal moves for *any* piece).
     #[inline(always)]
     pub fn max_dense_moves() -> usize {
-        *MAX_MOVES.get_or_init(|| {
-            // Ensure LOOKUP is initialized (which sets MAX_MOVES).
-            let _ = LOOKUP.get_or_init(Self::init);
-            // If MAX_MOVES wasn't set for some reason, fall back:
-            MAX_MOVES.get().copied().unwrap_or(0)
-        })
+        LOOKUP.get_or_init(Self::init).1
     }
 
     /// Get the dense index for (from, to). Returns None if invalid.
     #[inline(always)]
     pub fn get_index(from: u8, to: u8) -> Option<usize> {
-        let table = LOOKUP.get_or_init(Self::init);
+        let (table, _) = LOOKUP.get_or_init(Self::init);
         let v = table[from as usize][to as usize];
         if v == INVALID {
             None
