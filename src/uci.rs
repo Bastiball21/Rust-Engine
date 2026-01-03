@@ -1,3 +1,4 @@
+// src/uci.rs
 use crate::movegen::{self, MoveGenerator};
 use crate::search;
 use crate::search::SearchMode;
@@ -11,6 +12,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
+use std::panic;
 
 use crate::syzygy;
 use crate::uci_output::{uci_println, uci_print};
@@ -44,9 +46,6 @@ pub fn uci_loop() {
     let mut move_overhead = 10;
     let mut mode = SearchMode::Play;
 
-    // LAZY LOADING: Removed eager init_nnue check here.
-    // We defer until 'EvalFile' option is set OR 'go' is called.
-
     let stop_signal = Arc::new(AtomicBool::new(false));
     let mut search_threads: Vec<thread::JoinHandle<()>> = Vec::new();
     let global_nodes = Arc::new(AtomicU64::new(0));
@@ -70,7 +69,6 @@ pub fn uci_loop() {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let command = parts[0];
 
-        // Basic logging
         log::debug!("UCI Input: {}", cmd);
 
         match command {
@@ -108,29 +106,26 @@ pub fn uci_loop() {
                 game_history = handle_position(&mut game_state, &parts);
             }
             "go" => {
-                // Check Lazy Load of NNUE
                 crate::nnue::ensure_nnue_loaded();
 
                 stop_signal.store(true, Ordering::Relaxed);
                 for h in search_threads.drain(..) {
-                    h.join().unwrap();
+                    // CRITICAL FIX: Don't panic main thread if worker panicked
+                    if let Err(e) = h.join() {
+                         eprintln!("Worker thread panicked during cleanup: {:?}", e);
+                    }
                 }
 
                 stop_signal.store(false, Ordering::Relaxed);
 
                 let limits = parse_go(game_state.side_to_move, &parts, move_overhead);
-
                 global_nodes.store(0, Ordering::Relaxed);
-
-                // Bump TT generation
                 tt.new_search();
 
                 log::info!("Starting search with {} threads", num_threads);
 
                 for i in 0..num_threads {
                     let safe_state = game_state;
-                    // refresh_accumulator removed - handled in search
-
                     let stop_clone = stop_signal.clone();
                     let limits_clone = limits.clone();
                     let history_clone = game_history.clone();
@@ -147,22 +142,37 @@ pub fn uci_loop() {
 
                     let handle = builder
                         .spawn(move || {
+                            // CRITICAL FIX: Wrap search in catch_unwind to report errors and prevent silent death.
                             let mut search_data = Box::new(search::SearchData::new());
                             let mut stack = [search::StackEntry::default(); search::STACK_SIZE];
-                            search::search(
-                                &safe_state,
-                                limits_clone,
-                                &tt_clone,
-                                stop_clone,
-                                is_main,
-                                &history_clone,
-                                &mut *search_data,
-                                &mut stack,
-                                &params_clone,
-                                mode_clone,
-                                Some(&global_nodes_clone),
-                                Some(thread_id),
-                            );
+
+                            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                search::search(
+                                    &safe_state,
+                                    limits_clone,
+                                    &tt_clone,
+                                    stop_clone,
+                                    is_main,
+                                    &history_clone,
+                                    &mut *search_data,
+                                    &mut stack,
+                                    &params_clone,
+                                    mode_clone,
+                                    Some(&global_nodes_clone),
+                                    Some(thread_id),
+                                );
+                            }));
+
+                            if let Err(e) = result {
+                                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                                    s.to_string()
+                                } else if let Some(s) = e.downcast_ref::<String>() {
+                                    s.clone()
+                                } else {
+                                    "Unknown panic".to_string()
+                                };
+                                uci_println(&format!("info string ERROR: search_worker_{} panicked: {}", thread_id, msg));
+                            }
                         });
 
                     if let Ok(h) = handle {
@@ -175,7 +185,9 @@ pub fn uci_loop() {
             "stop" => {
                 stop_signal.store(true, Ordering::Relaxed);
                 for h in search_threads.drain(..) {
-                    h.join().unwrap();
+                    if let Err(e) = h.join() {
+                        eprintln!("Worker thread panicked during stop: {:?}", e);
+                    }
                 }
             }
             "setoption" => {
@@ -199,7 +211,7 @@ pub fn uci_loop() {
                                 let shards = TT_SHARDS.load(Ordering::Relaxed);
                                 stop_signal.store(true, Ordering::Relaxed);
                                 for h in search_threads.drain(..) {
-                                    h.join().unwrap();
+                                    if let Err(e) = h.join() { eprintln!("Panic during Hash set: {:?}", e); }
                                 }
                                 tt = Arc::new(TranspositionTable::new(clamped_mb, shards));
                             }
@@ -242,7 +254,7 @@ pub fn uci_loop() {
             "quit" => {
                 stop_signal.store(true, Ordering::Relaxed);
                 for h in search_threads.drain(..) {
-                    h.join().unwrap();
+                    let _ = h.join();
                 }
                 break;
             }
@@ -251,9 +263,7 @@ pub fn uci_loop() {
     }
 }
 
-// ... handle_position, parse_move, square_from_str, parse_go ...
-// [Retained existing helper functions content below]
-
+// Helper functions (retained)
 fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
     let mut move_index = 0;
     let mut history = Vec::new();
@@ -287,7 +297,6 @@ fn handle_position(state: &mut GameState, parts: &[&str]) -> Vec<u64> {
                 *state = state.make_move(mv);
                 history.push(state.hash);
 
-                // Reset history on capture or pawn move (50-move rule reset)
                 if mv.is_capture()
                     || (state.bitboards[crate::state::P].get_bit(mv.target())
                         || state.bitboards[crate::state::p].get_bit(mv.target()))
