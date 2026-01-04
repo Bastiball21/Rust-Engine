@@ -112,7 +112,7 @@ pub fn uci_loop() {
                 for h in search_threads.drain(..) {
                     // CRITICAL FIX: Don't panic main thread if worker panicked
                     if let Err(e) = h.join() {
-                         eprintln!("Worker thread panicked during cleanup: {:?}", e);
+                         uci_println(&format!("info string ERROR: Worker thread panicked during cleanup: {:?}", e));
                     }
                 }
 
@@ -143,10 +143,9 @@ pub fn uci_loop() {
                     let handle = builder
                         .spawn(move || {
                             // CRITICAL FIX: Wrap search in catch_unwind to report errors and prevent silent death.
-                            let mut search_data = Box::new(search::SearchData::new());
-                            let mut stack = [search::StackEntry::default(); search::STACK_SIZE];
-
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                let mut search_data = Box::new(search::SearchData::new());
+                                let mut stack = [search::StackEntry::default(); search::STACK_SIZE];
                                 search::search(
                                     &safe_state,
                                     limits_clone,
