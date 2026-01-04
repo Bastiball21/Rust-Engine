@@ -1175,6 +1175,9 @@ pub fn search(
 
     // --- ITERATIVE DEEPENING LOOP ---
     while depth <= max_depth {
+        if main_thread {
+            uci_println(&format!("info string Starting depth {}", depth));
+        }
         info.root_depth = depth;
         info.seldepth = 0;
 
