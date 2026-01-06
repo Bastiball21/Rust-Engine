@@ -1,0 +1,31 @@
+warning: value assigned to `best_score` is never read
+    --> src/search.rs:1199:17
+     |
+1199 |         let mut best_score = -INFINITY;
+     |                 ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `min_quality` is never read
+   --> src/tt.rs:368:21
+    |
+368 |                     min_quality = 0;
+    |                     ^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: `aether` (lib) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running `target/release/aether datagen 20 1 4 test_out.bin`
+Zobrist Keys Initialized.
+Initializing PEXT Bitboards...
+info string NNUE loaded successfully from embedded data
+Starting Datagen (Aether Zero)
+  Games:    20
+  Threads:  1
+  Output:   test_out.bin
+  Seed:     1767697016238676720
+  Strategy: Random Walk (8-9 plies)
+  Guards:   Mercy Rule (1000/8), Stable Win (700/6), Max Plies 200, Opening Skip 10
+TT: 32 MB total (1 shards of ~32 MB), 524288 Clusters, Masked Indexing
