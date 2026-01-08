@@ -250,3 +250,37 @@ pub fn run_mate_suite() {
             }
         }
     }
+
+    #[test]
+    fn test_tt_validation_logic() {
+        use crate::state::Move;
+        crate::zobrist::init_zobrist();
+        crate::bitboard::init_magic_tables();
+        crate::movegen::init_move_tables();
+
+        // 1. Setup a clean state
+        let state = crate::state::GameState::parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let tt = crate::tt::TranspositionTable::new_default(1);
+
+        // 2. Create an INVALID move (e2->e5, pawn jumps 3 squares)
+        // e2=12, e5=36.
+        let invalid_move = Move::new(12, 36, None, false);
+
+        // Verify tt.is_pseudo_legal rejects it
+        assert!(!tt.is_pseudo_legal(&state, invalid_move), "e2-e5 should be pseudo-illegal");
+
+        // 3. Create a CAPTURE on EMPTY square (e2->d3)
+        // e2=12, d3=19. Capture=true. d3 is empty.
+        let capture_empty = Move::new(12, 19, None, true);
+
+        // tt.is_pseudo_legal should reject it because target is empty and not EP
+        assert!(!tt.is_pseudo_legal(&state, capture_empty), "Capture on empty square should be pseudo-illegal");
+
+        // state.is_move_consistent should reject it because capture flag mismatches board
+        assert!(!state.is_move_consistent(capture_empty), "Capture on empty square should be inconsistent");
+
+        // 4. Verify valid move passes (e2->e4)
+        let valid_move = Move::new(12, 28, None, false);
+        assert!(tt.is_pseudo_legal(&state, valid_move), "e2-e4 should be valid");
+        assert!(state.is_move_consistent(valid_move), "e2-e4 should be consistent");
+    }
