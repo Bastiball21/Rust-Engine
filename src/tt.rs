@@ -338,13 +338,42 @@ impl TranspositionTable {
                     let stored_key = entry.key.load(Ordering::Relaxed);
                     if (stored_key ^ data) == hash {
                         // Found match: Overwrite
-                        let old_move = if best_move.is_none() {
-                             entry.probe(hash).and_then(|(_,_,_,_,m)| m)
+                        // Replacement Strategy:
+                        // 1. Prefer deeper searches (depth > old_depth)
+                        // 2. If depth is equal, prefer Exact bounds over Alpha/Beta
+                        // 3. Always update if the entry is from an old generation (stale)
+                        // 4. Update if we have a better move (or same move with better score context?)
+
+                        let old_depth = ((data >> 32) & 0xFF) as u8;
+                        let old_flag = ((data >> 40) & 0xFF) as u8;
+                        let old_age = ((data >> 48) & 0xFF) as u8;
+
+                        let overwrite = if old_age != current_gen {
+                            true // Always refresh stale entries (to prevent eviction of useful nodes)
+                        } else if depth > old_depth {
+                            true // Deeper is better
+                        } else if depth == old_depth {
+                            // Tie-break: Prefer Exact, or if same, prefer new (update score/age)
+                            if flag == FLAG_EXACT {
+                                true
+                            } else if old_flag == FLAG_EXACT {
+                                false
+                            } else {
+                                true
+                            }
                         } else {
-                             None
+                            false // Shallower search, keep old info
                         };
-                        let final_move = best_move.or(old_move);
-                        entry.save(hash, score, depth, flag, current_gen, final_move);
+
+                        if overwrite {
+                            let old_move = if best_move.is_none() {
+                                 entry.probe(hash).and_then(|(_,_,_,_,m)| m)
+                            } else {
+                                 None
+                            };
+                            let final_move = best_move.or(old_move);
+                            entry.save(hash, score, depth, flag, current_gen, final_move);
+                        }
                         return;
                     }
                 }
