@@ -712,9 +712,10 @@ pub fn run_datagen(config: DatagenConfig) {
                             tt.probe_data(state.hash, &state, None)
                         {
                             if tt_flag == FLAG_EXACT && tt_depth >= 6 {
-                                // SAFETY CHECK: Ensure TT move is valid for current state to prevent collision crashes
-                                // is_pseudo_legal checks geometry and rules.
-                                // is_move_consistent checks that capture flag matches board state (occupied/empty).
+                                // SAFETY CHECK: Ensure TT move is valid for current state to prevent collision crashes.
+                                // We verify both geometric legality (is_pseudo_legal) and state consistency (is_move_consistent)
+                                // because hash collisions can return moves that are geometrically valid but inconsistent
+                                // (e.g. capturing on an empty square due to a different position having the same hash).
                                 if let Some(mv) = tt_move {
                                     if tt.is_pseudo_legal(&state, mv) && state.is_move_consistent(mv) {
                                         search_score = tt_score;
